@@ -1,0 +1,31 @@
+# SFTPGo — SFTP + WebDAV + WebClient for all project files.
+#
+# Ports:
+#   8080     — WebClient/REST API; freeholdy allocates a loopback binding for nginx.
+#   2022:2022 — SFTP; direct public binding, bypasses nginx (TCP, not HTTP).
+#
+# Volumes:
+#   /var/lib/sftpgo  — SFTPGo's own SQLite database and config (persistent).
+#   ${PROJECTS_DIR}:/srv/projects — all freeholdy project files (read-write).
+#
+# Variables (written to .env in the compose project dir by the install.sh pre phase):
+#   PROJECTS_DIR      — absolute path to freeholdy's unified projects/ directory.
+#   SFTPGO_ADMIN_USER — bootstrap admin username (SFTPGo creates it on first start).
+#   SFTPGO_ADMIN_PASS — bootstrap admin password.
+
+services:
+  sftpgo:
+    image: drakkan/sftpgo:latest
+    environment:
+      - SFTPGO_HTTPD__BINDINGS__0__PORT=8080
+      - SFTPGO_HTTPD__BINDINGS__0__ADDRESS=0.0.0.0
+      - SFTPGO_DATA_PROVIDER__DRIVER=sqlite
+      - SFTPGO_DATA_PROVIDER__NAME=/var/lib/sftpgo/sftpgo.db
+      - SFTPGO_DEFAULT_ADMIN_USERNAME=${SFTPGO_ADMIN_USER}
+      - SFTPGO_DEFAULT_ADMIN_PASSWORD=${SFTPGO_ADMIN_PASS}
+    volumes:
+      - /var/lib/sftpgo:/var/lib/sftpgo
+      - ${PROJECTS_DIR}:/srv/projects
+    ports:
+      - "8080"
+      - "2022:2022"

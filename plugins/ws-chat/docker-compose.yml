@@ -1,0 +1,14 @@
+# ws-chat — two services exposed by freeholdy:
+#   web        -> web.{project}.{domain}        (React UI, static, nginx)
+#   websocket  -> websocket.{project}.{domain}  (Node.js ws server)
+# freeholdy rewrites these ports to loopback bindings and proxies them via nginx.
+# The 'websocket' service name is what makes nginx emit WebSocket upgrade headers.
+services:
+  web:
+    build: ./frontend
+    ports:
+      - "80"
+  websocket:
+    build: ./backend
+    ports:
+      - "8080"

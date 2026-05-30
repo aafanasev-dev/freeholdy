@@ -1,0 +1,8 @@
+{
+  "name": "about",
+  "description": "An 'About this project' React page describing freeholdy. Single-file React (CDN), no build step.",
+  "deploy_mode": "dockerfile",
+  "container_port": 80,
+  "type": "plugin",
+  "domain_prefix": "about"
+}

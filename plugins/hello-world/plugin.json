@@ -1,0 +1,8 @@
+{
+  "name": "hello-world",
+  "description": "Static HTML page served by Python's built-in http.server. No build step, no dependencies.",
+  "deploy_mode": "dockerfile",
+  "container_port": 80,
+  "type": "plugin",
+  "domain_prefix": "hello-world"
+}

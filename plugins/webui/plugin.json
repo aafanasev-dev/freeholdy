@@ -1,0 +1,8 @@
+{
+  "name": "webui",
+  "description": "freeholdy control panel — React UI served at ui.{domain}.",
+  "deploy_mode": "dockerfile",
+  "container_port": 14173,
+  "type": "system",
+  "domain_prefix": "ui"
+}

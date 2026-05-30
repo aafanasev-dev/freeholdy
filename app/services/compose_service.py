@@ -1,0 +1,132 @@
+"""
+compose_service.py
+
+Parsing and override generation for compose-mode projects.
+
+A compose project is described by a single user-supplied `docker-compose.yml`.
+freeholdy discovers its services, exposes every service that publishes a port
+at `{service}.{project}.{base_domain}`, and pins container names + loopback-only
+port bindings via a generated `docker-compose.override.yml`. Functions here are
+pure (parsing) or filesystem-only (file writing); orchestration lives in the
+compose router.
+"""
+
+import os
+import yaml
+
+from app.config import settings
+from app.models.schemas import validate_project_slug
+from app.services import scan
+
+
+def _extract_container_port(entry) -> int | None:
+    """Return the in-container (target) port for one compose `ports:` entry.
+
+    Handles the common short forms ("3000", "8080:80", "127.0.0.1:8080:80",
+    "8080:80/tcp", port ranges) and the long dict form ({target: 80, ...}).
+    Returns None if no port can be determined.
+    """
+    # Long form: a mapping with an explicit target.
+    if isinstance(entry, dict):
+        target = entry.get("target")
+        return int(target) if target is not None else None
+
+    # Short form: a string/number "host:container" — the container port is last.
+    text = str(entry).split("/", 1)[0]          # drop "/tcp" / "/udp"
+    container = text.split(":")[-1]              # last segment = container port
+    container = container.split("-")[0]          # first port of a range
+    try:
+        return int(container)
+    except ValueError:
+        return None
+
+
+def parse_services(compose_text: str) -> list[dict]:
+    """Parse a compose file into a list of service descriptors.
+
+    Each descriptor is `{name, exposed: bool, container_port: int | None}`.
+    A service is *exposed* (gets an nginx endpoint) iff it declares `ports:`.
+    Raises ValueError on malformed YAML, a missing `services:` block, or a
+    service name that is not a DNS-safe slug (it becomes a subdomain label).
+    """
+    try:
+        doc = yaml.safe_load(compose_text)
+    except yaml.YAMLError as e:
+        raise ValueError(f"Invalid YAML: {e}")
+
+    if not isinstance(doc, dict) or not isinstance(doc.get("services"), dict):
+        raise ValueError("Compose file has no 'services' mapping")
+
+    services: list[dict] = []
+    for name, spec in doc["services"].items():
+        validate_project_slug(str(name))   # raises ValueError if not slug-safe
+        spec = spec or {}
+        ports = spec.get("ports") or []
+        container_port = None
+        if ports:
+            container_port = _extract_container_port(ports[0])
+        # Per-service WebSocket detection: scan this service's name + its YAML block only.
+        block = f"{name}\n{yaml.safe_dump(spec, default_flow_style=False)}"
+        services.append({
+            "name": str(name),
+            "exposed": bool(ports) and container_port is not None,
+            "container_port": container_port,
+            "websocket": scan.uses_websocket(block),
+        })
+
+    if not services:
+        raise ValueError("Compose file defines no services")
+    return services
+
+
+def project_dir(project: str) -> str:
+    """The single on-disk working directory for a project, used by both deploy modes.
+
+    Uploaded files, the Dockerfile / docker-compose.yml, and the generated override all
+    live here, so the deploy mode can be auto-detected by scanning this directory's root.
+    """
+    return os.path.join(settings.PROJECTS_DIR, project)
+
+
+def compose_file_path(project: str) -> str:
+    return os.path.join(project_dir(project), "docker-compose.yml")
+
+
+def override_file_path(project: str) -> str:
+    return os.path.join(project_dir(project), "docker-compose.override.yml")
+
+
+def write_files(project: str, compose_text: str, services: list[dict]) -> tuple[str, str]:
+    """Persist the uploaded compose file and a generated override.
+
+    `services` is the descriptor list from `parse_services`, augmented with a
+    `local_port` key for every exposed service (the allocated loopback port).
+    The override pins a deterministic `container_name` and `restart: unless-stopped`
+    on every service, and rebinds each exposed service's port to
+    `127.0.0.1:{local_port}:{container_port}` so nothing is published beyond loopback.
+    Returns `(compose_path, override_path)`.
+    """
+    d = project_dir(project)
+    os.makedirs(d, exist_ok=True)
+
+    compose_path = compose_file_path(project)
+    with open(compose_path, "w") as f:
+        f.write(compose_text)
+
+    override_services: dict[str, dict] = {}
+    for svc in services:
+        name = svc["name"]
+        cfg: dict = {
+            "container_name": f"freeholdy_{project}_{name}",
+            "restart": "unless-stopped",
+        }
+        if svc.get("exposed"):
+            cfg["ports"] = [f"127.0.0.1:{svc['local_port']}:{svc['container_port']}"]
+        override_services[name] = cfg
+
+    override_path = override_file_path(project)
+    with open(override_path, "w") as f:
+        f.write("# Generated by freeholdy. Do not edit manually.\n")
+        yaml.safe_dump({"services": override_services}, f, default_flow_style=False, sort_keys=False)
+
+    return compose_path, override_path

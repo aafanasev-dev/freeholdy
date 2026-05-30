@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+data/
+projects/
+dockerfiles/
+compose/
+nginx_configs/
+venv/
+.venv/
+*.db
+*.log
+.DS_Store
+cli/.env
+cli/venv/
+cli/__pycache__/

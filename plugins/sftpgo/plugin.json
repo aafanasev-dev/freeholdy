@@ -1,0 +1,7 @@
+{
+  "name": "sftpgo",
+  "description": "SFTPGo file server — SFTP, WebDAV, and WebClient for all project files.",
+  "deploy_mode": "compose",
+  "type": "system",
+  "domain_prefix": "files"
+}
