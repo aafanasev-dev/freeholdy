@@ -8,7 +8,7 @@
 #   FRESH      — docker and/or nginx are NOT installed. The script provisions
 #                them (and the other packages), enables and starts the ones it
 #                installed. Intended for a dedicated / empty Ubuntu VPS:
-#                  curl -fsSL https://raw.githubusercontent.com/aafanasev-dev/freeholdy-dev/main/install.sh | sudo bash
+#                  curl -fsSL https://raw.githubusercontent.com/aafanasev-dev/freeholdy/main/install.sh | sudo bash
 #                (Use the raw.githubusercontent.com URL — the github.com blob
 #                 URL is an HTML page, not the script.)
 #
@@ -49,7 +49,7 @@ set -euo pipefail
 # Fallback clone (only used when the script is NOT run from a checkout). The repo
 # is private, so this needs an SSH key authorized on GitHub for the account
 # running git (root here). FUTURE: replace with a release-tarball download.
-REPO_URL="git@github.com:aafanasev-dev/freeholdy-dev.git"
+REPO_URL="git@github.com:aafanasev-dev/freeholdy.git"
 REPO_BRANCH="main"
 SERVICE_USER="freeholdy"          # default; override with -u or the prompt
 NGINX_GROUP="nginx-managers"
