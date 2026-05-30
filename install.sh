@@ -49,7 +49,7 @@ set -euo pipefail
 # Fallback clone (only used when the script is NOT run from a checkout). The repo
 # is private, so this needs an SSH key authorized on GitHub for the account
 # running git (root here). FUTURE: replace with a release-tarball download.
-REPO_URL="git@github.com:aafanasev-dev/freeholdy.git"
+REPO_URL="git clone https://github.com/aafanasev-dev/freeholdy.git"
 REPO_BRANCH="main"
 SERVICE_USER="freeholdy"          # default; override with -u or the prompt
 NGINX_GROUP="nginx-managers"
