@@ -46,10 +46,10 @@
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-# Fallback clone (only used when the script is NOT run from a checkout). The repo
-# is private, so this needs an SSH key authorized on GitHub for the account
-# running git (root here). FUTURE: replace with a release-tarball download.
-REPO_URL="git clone https://github.com/aafanasev-dev/freeholdy.git"
+# Fallback clone (only used when the script is NOT run from a checkout). Uses the
+# public HTTPS URL so no SSH key or credentials are needed — this is the path the
+# piped one-liner takes. FUTURE: replace with a release-tarball download.
+REPO_URL="https://github.com/aafanasev-dev/freeholdy.git"
 REPO_BRANCH="main"
 SERVICE_USER="freeholdy"          # default; override with -u or the prompt
 NGINX_GROUP="nginx-managers"
@@ -659,7 +659,6 @@ elif [[ -d "${APP_DIR}/.git" ]]; then
     ok "Repository updated at $APP_DIR"
 else
     info "No local checkout found — cloning ${REPO_URL} (branch ${REPO_BRANCH})…"
-    ssh -T -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 git@github.com &>/dev/null || true
     git clone -b "$REPO_BRANCH" "$REPO_URL" "$APP_DIR"
     ok "Repository cloned to $APP_DIR"
 fi
