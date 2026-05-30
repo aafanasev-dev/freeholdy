@@ -212,8 +212,19 @@ shift $((OPTIND - 1))
 set_paths
 
 # ── Resumable steps: persistent log + skip-if-done framework ───────────────────
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-LOG_FILE="${SCRIPT_DIR}/install.log"
+# Resolve the directory this script lives in. When piped (curl | sudo bash, or
+# bash <(curl …)) there is no real file on disk: $0 is a /dev/fd or /proc/*/fd
+# handle whose "directory" can't hold a log. Detect that and keep the resume log
+# in a stable, writable location instead so logging — and resume — still work.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" 2>/dev/null && pwd || true)"
+if [[ -z "$SCRIPT_DIR" || "$SCRIPT_DIR" == /proc/* || "$SCRIPT_DIR" == /dev/fd* || ! -w "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/install.sh" ]]; then
+    SCRIPT_DIR=""                       # not a real on-disk checkout (script was piped)
+    LOG_DIR="/var/lib/freeholdy"
+    mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="${TMPDIR:-/tmp}"
+    LOG_FILE="${LOG_DIR}/install.log"
+else
+    LOG_FILE="${SCRIPT_DIR}/install.log"
+fi
 
 if [[ "$RESET" -eq 1 && -f "$LOG_FILE" ]]; then
     rm -f "$LOG_FILE"
@@ -978,6 +989,6 @@ echo -e "  Save the API token printed above — it is shown only once."
 if [[ "$SSL_OK" -ne 1 ]]; then
     echo ""
     echo -e "  ${YELLOW}SSL not yet active.${NC} Point ${API_DOMAIN}'s DNS at this server, then run:"
-    echo -e "      ${CYAN}sudo ${CERT_SCRIPT} && sudo bash ${SCRIPT_DIR}/install.sh${NC}"
+    echo -e "      ${CYAN}sudo ${CERT_SCRIPT} && sudo bash ${SCRIPT_DIR:-$APP_DIR}/install.sh${NC}"
 fi
 echo ""
