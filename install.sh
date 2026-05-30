@@ -609,14 +609,47 @@ for dir in /etc/nginx/sites-available /etc/nginx/sites-enabled; do
 done
 
 # Passwordless sudo for exactly the commands freeholdy needs at runtime.
+# freeholdy adds/removes per-site nginx vhosts, so it must be able to validate
+# and reload — and, when nginx is fully stopped, restart/start — the service.
+# We grant both the direct binary (nginx -t / -s reload) AND the systemctl unit
+# verbs, scoped to the nginx unit only, so the account can manage nginx but
+# nothing else. Each verb is pinned to its argument so it can't be widened.
 NGINX_BIN=$(command -v nginx)
 CERTBOT_BIN=$(command -v certbot)
+SYSTEMCTL_BIN=$(command -v systemctl || echo /usr/bin/systemctl)
 cat > "$SUDOERS_FILE" <<EOF
 # Managed by install.sh — do not edit manually
 # Lets the freeholdy service account run nginx and certbot without a password.
 ${SERVICE_USER} ALL=(root) NOPASSWD: ${NGINX_BIN} -t
 ${SERVICE_USER} ALL=(root) NOPASSWD: ${NGINX_BIN} -s reload
 ${SERVICE_USER} ALL=(root) NOPASSWD: ${CERTBOT_BIN} certonly *
+# nginx service control (scoped to the nginx unit) — reload after vhost changes,
+# plus start/stop/restart/status for when a graceful reload isn't enough.
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} reload nginx
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} restart nginx
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} start nginx
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} stop nginx
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} status nginx
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} reload nginx.service
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} restart nginx.service
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} start nginx.service
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} stop nginx.service
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} status nginx.service
+# freeholdy's own service control — lets the account restart/stop itself
+# (e.g. after a self-update) without granting control over any other unit.
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} restart freeholdy
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} start freeholdy
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} stop freeholdy
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} status freeholdy
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} restart freeholdy.service
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} start freeholdy.service
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} stop freeholdy.service
+${SERVICE_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} status freeholdy.service
+# SSL: per-subdomain issuance is done by the app via 'certbot certonly' above;
+# this also lets the account run the bundled cert manager (issue/renew) by hand.
+# The script self-requires root, then calls certbot directly — so only the
+# script path needs granting, scoped to this deployment's copy.
+${SERVICE_USER} ALL=(root) NOPASSWD: ${APP_DIR}/scripts/cert-manager.sh
 EOF
 chmod 0440 "$SUDOERS_FILE"
 if visudo -c -f "$SUDOERS_FILE" &>/dev/null; then
