@@ -13,6 +13,9 @@ talking. It is the reference example for multi-service projects and live WebSock
 ## How it works
 
 - **Deploy mode:** `compose` (multiple containers).
+- **Interactive install:** during install you are asked for a **chat name** (shown as the
+  room title); it is baked into the frontend at build time. This plugin doubles as the
+  reference example for interactive `install.sh` scripts.
 - **Services:** a `frontend` (React UI) and a `backend` (Node.js WebSocket server).
 - **Subdomains:** each service is published at `{service}.ws-chat.{your-domain}`.
 - WebSocket usage is detected automatically, so the proxy is configured for live connections.

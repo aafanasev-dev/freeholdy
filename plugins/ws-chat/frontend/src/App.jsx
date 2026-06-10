@@ -12,6 +12,10 @@ function wsUrl() {
   return `${proto}://${host}`;
 }
 
+// Chat name chosen during the interactive install (plugin install.sh pre phase →
+// .env CHAT_NAME → compose build arg → Vite env), baked in at build time.
+const CHAT_NAME = import.meta.env.VITE_CHAT_NAME || "ws-chat";
+
 const S = {
   page: { fontFamily: "system-ui, sans-serif", maxWidth: 640, margin: "0 auto", padding: 16, height: "100vh", boxSizing: "border-box", display: "flex", flexDirection: "column" },
   title: { fontSize: 20, fontWeight: 700, marginBottom: 12 },
@@ -28,7 +32,7 @@ function Join({ onJoin }) {
   const [name, setName] = useState("");
   return (
     <div style={S.page}>
-      <div style={S.title}>💬 ws-chat</div>
+      <div style={S.title}>💬 {CHAT_NAME}</div>
       <p style={{ color: "#666" }}>Pick a username to join the chat.</p>
       <div style={S.row}>
         <input style={S.input} autoFocus placeholder="your name" value={name}
@@ -73,7 +77,7 @@ function Chat({ user }) {
   return (
     <div style={S.page}>
       <div style={S.title}>
-        💬 ws-chat <span style={{ fontSize: 13, fontWeight: 400, color: connected ? "#16a34a" : "#dc2626" }}>
+        💬 {CHAT_NAME} <span style={{ fontSize: 13, fontWeight: 400, color: connected ? "#16a34a" : "#dc2626" }}>
           {connected ? `· ${user}` : "· connecting…"}
         </span>
       </div>

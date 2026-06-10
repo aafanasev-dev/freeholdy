@@ -90,6 +90,50 @@ def _spawn(key: str, operation: str, cmd: list) -> DockerJob:
     return job
 
 
+def register_external_job(
+    key: str,
+    operation: str,
+    command: list,
+    process: subprocess.Popen,
+    log_path: str,
+) -> DockerJob:
+    """Register a process whose lifecycle is managed by the caller (e.g. an interactive
+    install session, see interactive_service) so GET /status, log reads, and abort_job
+    work on it like any spawned job. The caller writes the log file and must report the
+    outcome via finish_external_job — no monitor thread is started here. Note that a
+    later _spawn under the same key replaces this job and unlinks its log file."""
+    job = DockerJob(
+        operation=operation,
+        command=command,
+        process=process,
+        log_path=log_path,
+        status="running",
+    )
+    with _lock:
+        old = _jobs.get(key)
+        if old and old.status != "running":
+            try:
+                os.unlink(old.log_path)
+            except OSError:
+                pass
+        _jobs[key] = job
+    return job
+
+
+def finish_external_job(key: str, exit_code: Optional[int], aborted: bool = False) -> None:
+    """Record the outcome of a job registered via register_external_job."""
+    with _lock:
+        job = _jobs.get(key)
+        if job is None:
+            return
+        job.exit_code = exit_code
+        if job.status == "running":       # don't overwrite "aborted" set by abort_job
+            if aborted:
+                job.status = "aborted"
+            else:
+                job.status = "done" if exit_code == 0 else "error"
+
+
 # ---------------------------------------------------------------------------
 # Public job API
 # ---------------------------------------------------------------------------

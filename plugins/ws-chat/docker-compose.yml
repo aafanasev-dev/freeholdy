@@ -5,7 +5,12 @@
 # The 'websocket' service name is what makes nginx emit WebSocket upgrade headers.
 services:
   web:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        # Set by install.sh's interactive pre phase (.env); default keeps the stack
+        # buildable if the pre phase never ran.
+        VITE_CHAT_NAME: ${CHAT_NAME:-ws-chat}
     ports:
       - "80"
   websocket:

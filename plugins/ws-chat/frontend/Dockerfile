@@ -4,6 +4,9 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install
 COPY . .
+# Chat name chosen during the interactive install; baked into the bundle by Vite.
+ARG VITE_CHAT_NAME=ws-chat
+ENV VITE_CHAT_NAME=$VITE_CHAT_NAME
 RUN npm run build
 
 FROM nginx:alpine

@@ -125,8 +125,8 @@ class UploadResponse(BaseModel):
 
 class DockerJobStatusResponse(BaseModel):
     """Returned by every async docker endpoint and by GET /status."""
-    status: str                     # running | done | error | aborted | no_job
-    operation: Optional[str] = None # build | start | stop | exec | provision
+    status: str                     # running | done | error | aborted | no_job | waiting_interactive
+    operation: Optional[str] = None # build | start | stop | exec | provision | install
     message: str
     logs: str = ""
     exit_code: Optional[int] = None
@@ -139,6 +139,7 @@ class PluginResponse(BaseModel):
     deploy_mode: str = "dockerfile"       # dockerfile | compose
     container_port: Optional[int] = None  # dockerfile-mode only
     has_install: bool   # whether the plugin ships an install.sh
+    interactive: bool = False  # install.sh runs interactively over a WebSocket session
     type: str           # project type this plugin creates (user | plugin | system); "system" is hidden in the web UI
 
 
@@ -147,6 +148,9 @@ class PluginAddResponse(BaseModel):
     message: str
     project: ProjectResponse
     job: DockerJobStatusResponse
+    # Set when job.status == "waiting_interactive": the WebSocket path the client must
+    # connect to in order to run install.sh interactively (see routers/plugins.py).
+    ws_path: Optional[str] = None
 
 
 class ContainerResponse(BaseModel):

@@ -3,7 +3,9 @@ plugin_service.py
 Discovery and staging for the plugin catalog.
 
 A plugin is a directory under settings.PLUGINS_DIR containing:
-  plugin.json   — manifest: {name?, description, deploy_mode, container_port, domain_prefix?}
+  plugin.json   — manifest: {name?, description, deploy_mode, container_port, domain_prefix?,
+                  interactive?} — interactive: true makes install.sh run attached to a
+                  WebSocket session so it can prompt the user (requires install.sh)
   Dockerfile    — required; copied into the build context at add time
   install.sh    — optional; populates the build context (see provision_from_plugin)
   <assets>      — any files install.sh / the Dockerfile reference
@@ -87,6 +89,11 @@ def _load_manifest(plugin_dir: str, name: str) -> Optional[dict]:
     install_path = os.path.join(plugin_dir, "install.sh")
     has_install = os.path.isfile(install_path)
 
+    # "interactive": true means install.sh prompts the user and must run attached to a
+    # WebSocket session (see routers/plugins.py::install_session). Meaningless without
+    # an install.sh, so it is ANDed with has_install.
+    interactive = bool(data.get("interactive", False)) and has_install
+
     # Optional long-form description rendered in the web UI's plugin detail pane.
     # Falls back to the manifest "description" when no ABOUT.md ships with the plugin.
     about_path = os.path.join(plugin_dir, "ABOUT.md")
@@ -105,6 +112,7 @@ def _load_manifest(plugin_dir: str, name: str) -> Optional[dict]:
         "deploy_mode": deploy_mode,
         "container_port": container_port,
         "has_install": has_install,
+        "interactive": interactive,
         "type": project_type,
         "domain_prefix": domain_prefix,
         "dir": plugin_dir,

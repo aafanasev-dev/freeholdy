@@ -2,5 +2,6 @@
   "name": "ws-chat",
   "description": "Realtime WebSocket chat — React frontend + Node.js backend. No auth, just a username.",
   "deploy_mode": "compose",
-  "type": "plugin"
+  "type": "plugin",
+  "interactive": true
 }

@@ -1,0 +1,40 @@
+# sftp-go — personal SFTPGo file server (user plugin, interactive install).
+#
+# Exposed at sftpgo.{project}.{domain} (WebClient/WebDAV/admin over HTTPS via nginx) plus
+# a raw SFTP port published directly on the host (TCP, bypasses nginx).
+#
+# Ports:
+#   8080            — WebClient/REST API; freeholdy allocates a loopback binding for nginx.
+#                     MUST stay first: parse_services reads ports[0] as the proxied port.
+#   ${SFTP_PORT}:2022 — public SFTP; the generated override concatenates this, so it survives.
+#
+# Volumes:
+#   sftpgo_data      — named volume (namespaced <project>_sftpgo_data) for SFTPGo's own
+#                      SQLite DB + config, so multiple instances never share state.
+#   ${DATA_DIR}:/srv/data — the user-chosen host folder where files live (read-write).
+#
+# Variables (written to .env by the install.sh "pre" phase):
+#   SFTPGO_ADMIN_USER — admin username (also reused as the SFTP/WebClient user in "post").
+#   SFTPGO_ADMIN_PASS — admin password.
+#   DATA_DIR          — absolute host path of the storage folder.
+#   SFTP_PORT         — public host port for raw SFTP.
+
+services:
+  sftpgo:
+    image: drakkan/sftpgo:latest
+    environment:
+      - SFTPGO_HTTPD__BINDINGS__0__PORT=8080
+      - SFTPGO_HTTPD__BINDINGS__0__ADDRESS=0.0.0.0
+      - SFTPGO_DATA_PROVIDER__DRIVER=sqlite
+      - SFTPGO_DATA_PROVIDER__NAME=/var/lib/sftpgo/sftpgo.db
+      - SFTPGO_DEFAULT_ADMIN_USERNAME=${SFTPGO_ADMIN_USER}
+      - SFTPGO_DEFAULT_ADMIN_PASSWORD=${SFTPGO_ADMIN_PASS}
+    volumes:
+      - sftpgo_data:/var/lib/sftpgo
+      - ${DATA_DIR}:/srv/data
+    ports:
+      - "8080"
+      - "${SFTP_PORT}:2022"
+
+volumes:
+  sftpgo_data: {}

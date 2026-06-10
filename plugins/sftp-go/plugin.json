@@ -1,0 +1,7 @@
+{
+  "name": "sftp-go",
+  "description": "Personal SFTPGo file server — SFTP, WebDAV & WebClient over your own folder.",
+  "deploy_mode": "compose",
+  "type": "user",
+  "interactive": true
+}

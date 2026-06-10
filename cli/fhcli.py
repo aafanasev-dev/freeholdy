@@ -5,6 +5,7 @@ Reads TOKEN and BASE_DOMAIN from .env in the same directory as this script.
 
 Usage examples:
   fhcli health
+  fhcli -p 8000 health                  # talk to a local dev server (http://localhost:8000)
   fhcli projects
   fhcli plugins
   fhcli plugin-add hello-world mysite
@@ -21,8 +22,11 @@ Usage examples:
   fhcli abort  myapp
 """
 
+import asyncio
+import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -117,6 +121,23 @@ def _delete(path: str) -> dict:
         sys.exit(1)
 
 
+def _post_or_409(path: str, json: dict | None = None) -> dict | None:
+    """Like _post, but returns None on HTTP 409 instead of exiting — used by
+    plugin-add to resume an interrupted interactive install."""
+    try:
+        r = requests.post(_url(path), headers=_headers(), json=json or {}, timeout=30)
+        if r.status_code == 409:
+            return None
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.ConnectionError:
+        console.print(f"[bold red]Connection error:[/] cannot reach {BASE_URL}")
+        sys.exit(1)
+    except requests.exceptions.HTTPError as e:
+        _print_http_error(e.response)
+        sys.exit(1)
+
+
 def _print_http_error(response: requests.Response):
     try:
         detail = response.json().get("detail", response.text)
@@ -162,6 +183,65 @@ def _poll_job(
     )
 
 
+# ── Interactive install session ────────────────────────────────────────────────
+
+async def _interactive_install(ws_path: str) -> int:
+    """Bridge the terminal to a plugin's interactive install.sh over a WebSocket.
+
+    Protocol: we send {"type":"auth","token":…} first, then {"type":"stdin","data":…}
+    for every line the user types; the server streams {"type":"stdout","data":…} and
+    finishes with {"type":"exit","code":N}. The server-side pty has echo disabled, so
+    the terminal's own (canonical-mode) echo is the only one the user sees.
+    Returns the script's exit code (1 on protocol/connection errors)."""
+    import websockets
+
+    # BASE_URL is module state mutated by -p/--port — resolve it here, like _url().
+    if not BASE_URL:
+        console.print("[bold red]Error:[/] BASE_DOMAIN is not set in cli/.env")
+        sys.exit(1)
+    ws_url = BASE_URL.replace("https://", "wss://").replace("http://", "ws://") + ws_path
+
+    loop = asyncio.get_running_loop()
+    stdin_queue: asyncio.Queue = asyncio.Queue()
+
+    # A daemon thread feeds stdin lines into the loop. (Not run_in_executor: a worker
+    # blocked on stdin would hang asyncio.run() at executor shutdown.)
+    def _feed_stdin():
+        for line in sys.stdin:
+            loop.call_soon_threadsafe(stdin_queue.put_nowait, line)
+    threading.Thread(target=_feed_stdin, daemon=True).start()
+
+    try:
+        async with websockets.connect(ws_url) as ws:
+            await ws.send(json.dumps({"type": "auth", "token": TOKEN}))
+
+            async def _writer():
+                while True:
+                    line = await stdin_queue.get()
+                    await ws.send(json.dumps({"type": "stdin", "data": line}))
+            writer_task = asyncio.ensure_future(_writer())
+
+            try:
+                async for raw in ws:
+                    msg = json.loads(raw)
+                    if msg.get("type") == "stdout":
+                        sys.stdout.write(msg.get("data", ""))
+                        sys.stdout.flush()
+                    elif msg.get("type") == "exit":
+                        return int(msg.get("code", 1))
+                    elif msg.get("type") == "error":
+                        console.print(f"\n[bold red]Error:[/] {msg.get('message', 'unknown error')}")
+                        return 1
+                # Connection closed without an exit frame.
+                console.print("\n[bold red]Connection closed unexpectedly[/]")
+                return 1
+            finally:
+                writer_task.cancel()
+    except OSError:
+        console.print(f"[bold red]Connection error:[/] cannot reach {ws_url}")
+        return 1
+
+
 def _print_job_result(data: dict, success_msg: str = "", fail_msg: str = ""):
     """Print a coloured summary line after a job finishes."""
     status = data.get("status", "error")
@@ -199,8 +279,14 @@ def _status_text(status: str) -> Text:
 # ── CLI root ───────────────────────────────────────────────────────────────────
 
 @click.group()
-def cli():
+@click.option("-p", "--port", type=int, default=None,
+              help="Target a local API at http://localhost:PORT instead of "
+                   "the BASE_DOMAIN from .env (for a dev server).")
+def cli(port: int | None):
     """freeholdy CLI  —  deploy pet projects on your_domain.com"""
+    if port is not None:
+        global BASE_URL
+        BASE_URL = f"http://localhost:{port}"
 
 
 # ── health ─────────────────────────────────────────────────────────────────────
@@ -354,31 +440,61 @@ def plugin_add(plugin: str, project: str, follow: bool):
     """
     console.print(f"Installing plugin [cyan]{plugin}[/] as project [bold cyan]{project}[/]…")
     with console.status("Creating project (certbot runs during creation)…"):
-        data = _post(f"/plugins/{plugin}/add", json={"project_name": project})
+        data = _post_or_409(f"/plugins/{plugin}/add", json={"project_name": project})
 
-    proj = data["project"]
-    console.print(f"\n[bold green]✓ {data.get('message', 'Project created')}[/]\n")
-
-    table = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold")
-    table.add_column("Part")
-    table.add_column("Subdomain", style="blue")
-    table.add_column("Local port", justify="right")
-    table.add_column("SSL")
-    is_compose = proj.get("deploy_mode") == "compose"
-    if is_compose:
-        entries = proj.get("services", [])
+    if data is None:
+        # 409: the project already exists. For an interactive plugin that's the retry
+        # path — the install session is re-runnable until it succeeds — so reconnect.
+        plugins = {p["name"]: p for p in _get("/plugins")}
+        info = plugins.get(plugin)
+        if not (info and info.get("interactive")):
+            console.print(f"[bold red]HTTP 409:[/] Project '{project}' already exists")
+            sys.exit(1)
+        console.print(f"[yellow]Project '{project}' already exists — resuming interactive install[/]")
+        is_compose = info.get("deploy_mode") == "compose"
+        data = {
+            "job": {"status": "waiting_interactive"},
+            "ws_path": f"/plugins/{plugin}/install/{project}",
+        }
     else:
-        c = proj.get("container") or {}
-        entries = [c] if c else []
-    for part in entries:
-        ssl_icon = "[green]✓[/]" if part.get("ssl_enabled") else "[yellow]pending[/]"
-        table.add_row(
-            part.get("name", "container"),
-            part.get("subdomain", ""),
-            str(part.get("local_port", "")),
-            ssl_icon,
-        )
-    console.print(table)
+        proj = data["project"]
+        console.print(f"\n[bold green]✓ {data.get('message', 'Project created')}[/]\n")
+
+        table = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold")
+        table.add_column("Part")
+        table.add_column("Subdomain", style="blue")
+        table.add_column("Local port", justify="right")
+        table.add_column("SSL")
+        is_compose = proj.get("deploy_mode") == "compose"
+        if is_compose:
+            entries = proj.get("services", [])
+        else:
+            c = proj.get("container") or {}
+            entries = [c] if c else []
+        for part in entries:
+            ssl_icon = "[green]✓[/]" if part.get("ssl_enabled") else "[yellow]pending[/]"
+            table.add_row(
+                part.get("name", "container"),
+                part.get("subdomain", ""),
+                str(part.get("local_port", "")),
+                ssl_icon,
+            )
+        console.print(table)
+
+    # Interactive plugins: install.sh prompts the user, so it runs over a WebSocket
+    # session now (mandatory — build/compose-up only happen after it exits 0).
+    if data.get("job", {}).get("status") == "waiting_interactive":
+        ws_path = data.get("ws_path") or f"/plugins/{plugin}/install/{project}"
+        console.print("\n[dim]─── interactive install (answer the prompts, Enter to send) ───[/]")
+        code = asyncio.run(_interactive_install(ws_path))
+        if code != 0:
+            console.print(
+                f"\n[red]✗ install.sh failed (exit {code})[/] — re-run "
+                f"[bold]fhcli plugin-add {plugin} {project}[/] to retry the install, "
+                f"or [bold]fhcli delete {project}[/] to start over"
+            )
+            sys.exit(1)
+        console.print("\n[green]✓[/] Interactive install finished")
 
     if not follow:
         hint = (f"fhcli compose-status {project}" if is_compose
