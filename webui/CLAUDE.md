@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The React control panel for freeholdy (`webui/`). It is a pure browser-side client of the
 FastAPI server documented in `../CLAUDE.md` — it ships no backend of its own and talks to the
-live API over HTTPS. It covers every `fhold` CLI command **except** raw SFTP transfer
-(`fhold sftp-upload`), which is intentionally CLI-only (see the footer banner in `Dashboard`).
+live API over HTTPS. It covers every `fhcli` CLI command **except** raw SFTP transfer
+(`fhcli sftp-upload`), which is intentionally CLI-only (see the footer banner in `Dashboard`).
 Note the web UI *does* do file/folder upload over the API via the unified `UploadModal`.
 
 ## Commands

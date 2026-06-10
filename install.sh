@@ -97,6 +97,17 @@ confirm() {
     [[ "$ans" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
 
+# Y/N confirmation defaulting to YES. -y, an empty answer, or no tty all mean yes
+# (used for optional add-ons whose default is to install).
+confirm_yes() {
+    [[ "${ASSUME_YES:-0}" -eq 1 ]] && return 0
+    [[ -r /dev/tty ]] || return 0
+    local ans
+    printf "  %b?%b  %s [Y/n]: " "$CYAN" "$NC" "$1" > /dev/tty
+    read -r ans < /dev/tty
+    [[ ! "$ans" =~ ^[Nn]([Oo])?$ ]]
+}
+
 # Wait (politely) for any other apt/dpkg process to release the lock.
 wait_for_apt() {
     command -v fuser &>/dev/null || return 0
@@ -997,6 +1008,52 @@ echo ""
 step_mark_done api_token
 fi
 
+# ── 14. Web UI control panel (optional plugin, default yes) ─────────────────────
+# The webui plugin is a managed project served at ui.<domain>. We mint a dedicated
+# token and hand it back as a one-click login link (ui.<domain>/token/<TOKEN>):
+# the React app captures the token from that path, stores it, and drops the user
+# straight into the dashboard — no copy/paste of the token needed.
+section "Web UI control panel"
+WEBUI_DOMAIN="ui.${DOMAIN}"
+WEBUI_LINK=""
+if step_is_done webui_plugin; then
+    ok "webui_plugin already complete — skipping"
+    step_mark_skipped webui_plugin
+elif confirm_yes "Install the freeholdy web UI control panel (served at ${WEBUI_DOMAIN})?"; then
+    step_mark_started webui_plugin
+
+    # Dedicated token for the web UI — embedded in the login link below.
+    WEBUI_TOKEN="$(as_user "${VENV_DIR}/bin/python" "${APP_DIR}/scripts/generate_token.py" \
+        generate --name webui 2>/dev/null | grep -oE '[A-Za-z0-9_-]{40,}' | head -n1 || true)"
+
+    if [[ -z "$WEBUI_TOKEN" ]]; then
+        warn "Could not generate a web UI token — skipping the web UI install."
+        warn "Install it later from the API: POST /plugins/webui/add"
+    elif WEBUI_RESP="$(curl -fsS -X POST "http://127.0.0.1:${APP_PORT}/plugins/webui/add" \
+            -H "Authorization: Bearer ${WEBUI_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"project_name":"webui"}' 2>/dev/null)"; then
+        # nginx/SSL is wired synchronously by the add; the container then builds in
+        # the background, so the link goes live once that build finishes.
+        if grep -q '"ssl_enabled":true' <<<"$WEBUI_RESP"; then
+            WEBUI_SCHEME="https"
+        else
+            WEBUI_SCHEME="http"
+        fi
+        WEBUI_LINK="${WEBUI_SCHEME}://${WEBUI_DOMAIN}/token/${WEBUI_TOKEN}"
+        ok "Web UI plugin provisioned — container is building in the background"
+        info "Open the control panel (auto-logs-in via the embedded token):"
+        echo -e "      ${CYAN}${WEBUI_LINK}${NC}"
+        warn "Treat this link like a password — it grants full API access."
+        step_mark_done webui_plugin
+    else
+        warn "Web UI install request failed (is the API up at 127.0.0.1:${APP_PORT}?)."
+        warn "Install it later from the API: POST /plugins/webui/add"
+    fi
+else
+    info "Skipping the web UI — install it later from the API: POST /plugins/webui/add"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────────
 SCHEME=$([[ "$SSL_OK" -eq 1 ]] && echo "https" || echo "http")
 log "INSTALL_RUN end mode=${MODE} ssl_ok=${SSL_OK} port=${APP_PORT}"
@@ -1014,6 +1071,11 @@ if [[ "$MODE" == "coexist" ]]; then
     echo -e "  Other apps on this nginx/docker were left untouched."
 fi
 echo -e "  Save the API token printed above — it is shown only once."
+if [[ -n "${WEBUI_LINK:-}" ]]; then
+    echo ""
+    echo -e "  Web UI         : ${CYAN}${WEBUI_LINK}${NC}"
+    echo -e "  ${YELLOW}One-click login link${NC} (token embedded) — live once the container finishes building."
+fi
 if [[ "$SSL_OK" -ne 1 ]]; then
     echo ""
     echo -e "  ${YELLOW}SSL not yet active.${NC} Point ${API_DOMAIN}'s DNS at this server, then run:"

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A FastAPI service (`app/`) that orchestrates Docker containers behind nginx + Let's Encrypt on a single VPS, exposing each as `*.your_domain.com`. A standalone CLI (`cli/fhold.py`) wraps the HTTP API; it has its own venv and `.env` and is not imported by the server.
+A FastAPI service (`app/`) that orchestrates Docker containers behind nginx + Let's Encrypt on a single VPS, exposing each as `*.your_domain.com`. A standalone CLI (`cli/fhcli.py`) wraps the HTTP API; it has its own venv and `.env` and is not imported by the server.
 
 
 ## System components vs pet projects
@@ -15,7 +15,7 @@ freeholdy manages two distinct layers:
 - `nginx` (system service)
 - `certbot` (system service)
 
-**Managed pet projects** — created via `POST /projects` or `fhold plugin-add`, tracked in SQLite, proxied by nginx. Includes `type: "system"` projects (SFTPGo, webui) that are hidden from the web UI but are otherwise normal managed projects.
+**Managed pet projects** — created via `POST /projects` or `fhcli plugin-add`, tracked in SQLite, proxied by nginx. Includes `type: "system"` projects (SFTPGo, webui) that are hidden from the web UI but are otherwise normal managed projects.
 
 ## Common commands
 
@@ -29,11 +29,11 @@ python scripts/generate_token.py list | revoke --id N
 CLI (separate package, see `cli/README.md`):
 ```bash
 cd cli && source venv/bin/activate
-./fhold.py health | projects | create NAME
-./fhold.py plugins                      # list available plugins
-./fhold.py plugin-add PLUGIN PROJECT    # create a project from a plugin
-./fhold.py upload PROJECT PATH          # upload a file or folder → auto-detect + provision
-./fhold.py sftp-upload PROJECT FILE...  # raw SFTP transfer (CLI-only, no provisioning)
+./fhcli.py health | projects | create NAME
+./fhcli.py plugins                      # list available plugins
+./fhcli.py plugin-add PLUGIN PROJECT    # create a project from a plugin
+./fhcli.py upload PROJECT PATH          # upload a file or folder → auto-detect + provision
+./fhcli.py sftp-upload PROJECT FILE...  # raw SFTP transfer (CLI-only, no provisioning)
 ```
 
 No test suite, linter, or formatter is configured — do not invent commands for them.

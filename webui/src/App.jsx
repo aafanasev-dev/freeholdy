@@ -1020,7 +1020,7 @@ const Dashboard = ({ token, onLogout }) => {
 
         <div style={{ marginTop: "20px", padding: "12px 14px", background: C.s2, border: `1px solid ${C.bd}`, borderRadius: "8px" }}>
           <span style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px" }}>
-            ⚠ direct SFTP transfers (fhold sftp-upload) are CLI-only — the web UI uploads files over the API via the upload button
+            ⚠ direct SFTP transfers (fhcli sftp-upload) are CLI-only — the web UI uploads files over the API via the upload button
           </span>
         </div>
       </div>
@@ -1029,8 +1029,19 @@ const Dashboard = ({ token, onLogout }) => {
 };
 
 // ── App root ──────────────────────────────────────────────────────────────────
+// Capture a token handed in via the /token/{TOKEN} deep link: store it like a normal
+// login, then strip it from the address bar / history so it isn't left lying around.
+const tokenFromPath = () => {
+  const m = window.location.pathname.match(/^\/token\/(.+)$/);
+  if (!m) return "";
+  const t = decodeURIComponent(m[1]).trim();
+  if (t) localStorage.setItem("freeholdy_token", t);
+  window.history.replaceState(null, "", "/");  // back to the app root, token-free URL
+  return t;
+};
+
 export default function App() {
-  const [token, setToken] = useState(() => localStorage.getItem("freeholdy_token") || "");
+  const [token, setToken] = useState(() => tokenFromPath() || localStorage.getItem("freeholdy_token") || "");
 
   if (!token) return <LoginScreen onAuth={(t) => { localStorage.setItem("freeholdy_token", t); setToken(t); }} />;
 

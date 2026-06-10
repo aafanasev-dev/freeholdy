@@ -1,6 +1,6 @@
 # freeholdy — Web UI
 
-React-based control panel for freeholdy. Covers all `fhold` CLI commands except SFTP upload.
+React-based control panel for freeholdy. Covers all `fhcli` CLI commands except SFTP upload.
 
 ## Quick start
 

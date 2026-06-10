@@ -6,7 +6,7 @@
 # served at https://{name}.BASE_DOMAIN through nginx + Let's Encrypt, and the
 # domain-change feature repoints it at another domain and re-issues the cert.
 #
-# It stands up a real echo project via the `fhold` CLI, then sends a random nonce
+# It stands up a real echo project via the `fhcli` CLI, then sends a random nonce
 # to the project's URL and asserts the response body equals what was sent — once
 # on the auto subdomain, once after changing the domain.
 #
@@ -15,7 +15,7 @@
 #                         → remove (teardown)
 #
 # REQUIREMENTS (this is a VPS/integration test, not a hermetic unit test):
-#   • the freeholdy server is running and reachable (fhold health)
+#   • the freeholdy server is running and reachable (fhcli health)
 #   • cli/.env is configured with TOKEN and BASE_DOMAIN
 #   • *.BASE_DOMAIN resolves to this host so certbot can issue real certs
 #
@@ -27,8 +27,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FHOLD_PY="$ROOT/cli/fhold.py"
-FHOLD_BIN="$ROOT/cli/venv/bin/python"
+FHCLI_PY="$ROOT/cli/fhcli.py"
+FHCLI_BIN="$ROOT/cli/venv/bin/python"
 
 # ── Output helpers (style shared with test_install.sh) ──────────────────────────
 RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -42,7 +42,7 @@ PASS=0; FAIL=0; FAILURES=()
 record_pass() { PASS=$((PASS + 1)); }
 record_fail() { FAIL=$((FAIL + 1)); FAILURES+=("$1"); }
 
-fhold() { "$FHOLD_BIN" "$FHOLD_PY" "$@"; }
+fhcli() { "$FHCLI_BIN" "$FHCLI_PY" "$@"; }
 
 # ── Config + pre-flight ─────────────────────────────────────────────────────────
 PROJECT="test"
@@ -50,8 +50,8 @@ ENV_FILE="$ROOT/cli/.env"
 
 preflight() {
     hr "pre-flight"
-    if [[ ! -x "$FHOLD_BIN" ]]; then
-        fail "fhold venv python not found at $FHOLD_BIN — set up cli/ (see cli/README.md)"; exit 2
+    if [[ ! -x "$FHCLI_BIN" ]]; then
+        fail "fhcli venv python not found at $FHCLI_BIN — set up cli/ (see cli/README.md)"; exit 2
     fi
     if [[ ! -f "$ENV_FILE" ]]; then
         fail "missing $ENV_FILE — the CLI needs TOKEN + BASE_DOMAIN"; exit 2
@@ -66,8 +66,8 @@ preflight() {
     fi
     ok "cli/.env ok (BASE_DOMAIN=$BASE_DOMAIN)"
 
-    if ! fhold health >/dev/null 2>&1; then
-        fail "freeholdy server not reachable (fhold health failed) — is it running?"; exit 2
+    if ! fhcli health >/dev/null 2>&1; then
+        fail "freeholdy server not reachable (fhcli health failed) — is it running?"; exit 2
     fi
     ok "server reachable"
 
@@ -80,7 +80,7 @@ preflight() {
 # ── Teardown (always) ───────────────────────────────────────────────────────────
 teardown() {
     hr "teardown"
-    if fhold remove "$PROJECT" --yes >/dev/null 2>&1; then
+    if fhcli remove "$PROJECT" --yes >/dev/null 2>&1; then
         info "removed project $PROJECT"
     else
         info "nothing to remove (or already gone)"
@@ -129,19 +129,19 @@ main() {
     preflight
 
     # Clean slate so a leftover 'test' project can't wedge the run.
-    fhold remove "$PROJECT" --yes >/dev/null 2>&1 || true
+    fhcli remove "$PROJECT" --yes >/dev/null 2>&1 || true
 
     hr "provision echo project"
-    fhold create "$PROJECT"
-    fhold upload "$PROJECT" "$ROOT/tests/fixtures/echo"   # auto nginx + certbot for BASE_HOST
-    fhold build "$PROJECT"
-    fhold start "$PROJECT"
+    fhcli create "$PROJECT"
+    fhcli upload "$PROJECT" "$ROOT/tests/fixtures/echo"   # auto nginx + certbot for BASE_HOST
+    fhcli build "$PROJECT"
+    fhcli start "$PROJECT"
 
     hr "echo on auto subdomain"
     assert_echo "auto subdomain" "https://$BASE_HOST"
 
     hr "domain change feature"
-    fhold domain "$PROJECT" "$CHANGE_HOST"               # rewrites nginx + issues new cert
+    fhcli domain "$PROJECT" "$CHANGE_HOST"               # rewrites nginx + issues new cert
     assert_echo "changed domain" "https://$CHANGE_HOST"
     refute_echo "old subdomain" "https://$BASE_HOST"
 

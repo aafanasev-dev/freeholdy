@@ -18,12 +18,12 @@ examples/hello-world/
 ## Prerequisites
 
 - freeholdy API is running at `https://manager.your_domain.com`
-- CLI is set up and `fhold` is in your PATH (see `cli/README.md`)
+- CLI is set up and `fhcli` is in your PATH (see `cli/README.md`)
 - `cli/.env` has a valid TOKEN and BASE_URL
 
 Verify with:
 ```bash
-fhold health
+fhcli health
 # ✓ API is ok  (https://manager.your_domain.com)
 ```
 
@@ -32,7 +32,7 @@ fhold health
 ## Step 1 — Create the project
 
 ```bash
-fhold create hello-world
+fhcli create hello-world
 ```
 
 Expected output:
@@ -41,7 +41,7 @@ Creating project hello-world…
 
 ✓ Project 'hello-world' created  (deploy mode: pending)
 
-  Next: fhold upload hello-world ./path-to-your-project
+  Next: fhcli upload hello-world ./path-to-your-project
   The folder should contain a Dockerfile or a docker-compose.yml.
 ```
 
@@ -56,7 +56,7 @@ of project it is.
 Run this from the `examples/hello-world/` directory:
 
 ```bash
-fhold upload hello-world ./
+fhcli upload hello-world ./
 ```
 
 freeholdy writes the files into the project's directory, scans the root, finds the
@@ -75,7 +75,7 @@ Deploy mode: dockerfile
   Container    Subdomain                      Port   SSL
   hello-world  hello-world.your_domain.com    8100   ✓
 
-  Next: fhold build hello-world
+  Next: fhcli build hello-world
 ```
 (The exact `✓` message comes from the server; the file list and table are rendered
 by the CLI.)
@@ -83,7 +83,7 @@ by the CLI.)
 > The `Port` (here `8100`) is a loopback port freeholdy allocates automatically from
 > its configured range — yours may differ. Public traffic always goes through nginx.
 >
-> If SSL shows `pending` instead of `✓`, run `fhold ssl hello-world` once the domain
+> If SSL shows `pending` instead of `✓`, run `fhcli ssl hello-world` once the domain
 > resolves to your VPS. SSL issuance needs the DNS record to already point at the host.
 
 ---
@@ -91,7 +91,7 @@ by the CLI.)
 ## Step 3 — Build the Docker image
 
 ```bash
-fhold build hello-world
+fhcli build hello-world
 ```
 
 The build streams live and finishes with:
@@ -99,14 +99,14 @@ The build streams live and finishes with:
 ✓ Image built successfully
 ```
 Image name: `freeholdy_hello-world:latest`. Add `--no-follow` to return immediately
-and poll with `fhold status hello-world`.
+and poll with `fhcli status hello-world`.
 
 ---
 
 ## Step 4 — Start the container
 
 ```bash
-fhold start hello-world
+fhcli start hello-world
 ```
 
 Expected output:
@@ -121,13 +121,13 @@ Container name: `freeholdy_hello-world`, bound to `127.0.0.1:<local-port>`.
 
 **Check container status:**
 ```bash
-fhold projects
+fhcli projects
 ```
 
 `hello-world` should show `▶ running`, along with its subdomain and local port.
 
 **Check directly on the VPS** (bypasses nginx/SSL — useful for a quick sanity check;
-use the port shown by `fhold projects`):
+use the port shown by `fhcli projects`):
 ```bash
 curl http://localhost:8100
 # returns the HTML
@@ -147,24 +147,24 @@ You should see: **Hello, World! 👋**
 ## Troubleshooting
 
 **Container shows `no_image`**
-→ Run `fhold build hello-world` first.
+→ Run `fhcli build hello-world` first.
 
 **Container shows `exited`**
 → Check what happened inside:
 ```bash
-fhold exec hello-world "ls /www"
+fhcli exec hello-world "ls /www"
 ```
 
 **curl returns `502 Bad Gateway`**
 → Container is not running. Check status and start it:
 ```bash
-fhold projects
-fhold start hello-world
+fhcli projects
+fhcli start hello-world
 ```
 
 **SSL cert missing / browser shows security warning**
 ```bash
-fhold ssl hello-world
+fhcli ssl hello-world
 ```
 This re-runs certbot for `hello-world.your_domain.com`. The domain's DNS must
 point to your VPS for this to succeed.
@@ -180,15 +180,15 @@ docker logs -f freeholdy_hello-world   # follow
 ## Lifecycle commands
 
 ```bash
-fhold stop  hello-world   # stop the container
-fhold start hello-world   # start it again
-fhold build hello-world   # rebuild after changing the Dockerfile
+fhcli stop  hello-world   # stop the container
+fhcli start hello-world   # start it again
+fhcli build hello-world   # rebuild after changing the Dockerfile
 ```
 
 If you change `HelloWorld.html` (or any file in the build context), re-upload before
 rebuilding so the server has the new files:
 ```bash
-fhold upload hello-world ./ && \
-fhold build  hello-world && \
-fhold start  hello-world
+fhcli upload hello-world ./ && \
+fhcli build  hello-world && \
+fhcli start  hello-world
 ```

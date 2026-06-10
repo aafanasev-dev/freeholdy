@@ -42,7 +42,7 @@ A Dockerfile must declare its listening port with `EXPOSE` — that becomes the 
 proxies to (the upload is rejected if it's missing).
 
 Pre-packaged stacks (SFTPGo, the web UI, examples) ship as **plugins** — see `POST /plugins/{name}/add`
-and `fhold plugin-add`.
+and `fhcli plugin-add`.
 
 ---
 
@@ -366,14 +366,14 @@ SFTPGo ships as a freeholdy **plugin** (`plugins/sftpgo/`, a compose plugin of `
 Deploy it like any other plugin (run once after setup, with the API running):
 
 ```bash
-fhold plugin-add sftpgo sftpgo
+fhcli plugin-add sftpgo sftpgo
 ```
 
 This single command:
 1. Creates a compose project, allocates a loopback port, and wires up nginx + SSL for `files.your_domain.com`
 2. Runs the plugin's `install.sh` **pre** phase — generates the admin password into the project's `.env`
 3. Starts the stack (`docker compose up -d`) — image `drakkan/sftpgo:latest`, with `/var/lib/sftpgo` (persistent DB/config) and `projects/ → /srv/projects` mounted, and `restart: unless-stopped` so it survives reboots
-4. Runs the **post** phase (background) — waits for the REST API, creates the `freeholdy` SFTP user with `/srv/projects` as home, writes `/etc/sftpgo-credentials` (mode 600), and patches `cli/.env` with `SFTP_USER` / `SFTP_PASSWORD` so `fhold sftp-upload` works immediately
+4. Runs the **post** phase (background) — waits for the REST API, creates the `freeholdy` SFTP user with `/srv/projects` as home, writes `/etc/sftpgo-credentials` (mode 600), and patches `cli/.env` with `SFTP_USER` / `SFTP_PASSWORD` so `fhcli sftp-upload` works immediately
 
 After it finishes, the admin panel is at `https://files.your_domain.com/web/admin`. The generated admin and SFTP credentials are in `/etc/sftpgo-credentials`.
 
@@ -384,12 +384,12 @@ After it finishes, the admin panel is at `https://files.your_domain.com/web/admi
 docker logs freeholdy_sftpgo_sftpgo -f
 
 # Lifecycle (compose project named "sftpgo")
-fhold compose-status sftpgo
-fhold compose-down sftpgo
-fhold compose-up sftpgo
+fhcli compose-status sftpgo
+fhcli compose-down sftpgo
+fhcli compose-up sftpgo
 
 # Remove entirely (containers, image, nginx entry; /var/lib/sftpgo data persists)
-fhold remove sftpgo
+fhcli remove sftpgo
 ```
 
 ---
@@ -457,7 +457,7 @@ curl -X POST "$BASE/projects/myapp/stop" -H "Authorization: Bearer $TOKEN"
 
 For a multi-container stack, upload a folder whose root contains a `docker-compose.yml` (it wins over
 a Dockerfile); the project becomes compose-mode and you drive it with `.../compose/{build,up,down}`.
-The `fhold` CLI wraps all of this (`fhold create` → `fhold upload` → `fhold build`/`fhold compose-up`) — see
+The `fhcli` CLI wraps all of this (`fhcli create` → `fhcli upload` → `fhcli build`/`fhcli compose-up`) — see
 `cli/README.md`.
 
 ---
@@ -508,7 +508,7 @@ freeholdy/
 │       ├── nginx_http.conf.j2  # HTTP-only (for ACME challenge)
 │       └── nginx_ssl.conf.j2   # Full HTTPS config
 ├── plugins/                  # Built-in plugins (sftpgo, webui, about, hello-world, ws-chat)
-├── cli/                      # Standalone `fhold` CLI (own venv + .env)
+├── cli/                      # Standalone `fhcli` CLI (own venv + .env)
 ├── webui/                    # React control panel (source for the webui plugin)
 ├── scripts/
 │   ├── generate_token.py     # Token management CLI
