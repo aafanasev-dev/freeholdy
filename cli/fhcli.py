@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-fhold  —  CLI for freeholdy API
+fhcli  —  CLI for freeholdy API
 Reads TOKEN and BASE_DOMAIN from .env in the same directory as this script.
 
 Usage examples:
-  fhold health
-  fhold projects
-  fhold plugins
-  fhold plugin-add hello-world mysite
-  fhold create myapp                    # then upload the project files (see below)
-  fhold upload myapp ./myapp            # uploads a file or folder; auto-detects
+  fhcli health
+  fhcli projects
+  fhcli plugins
+  fhcli plugin-add hello-world mysite
+  fhcli create myapp                    # then upload the project files (see below)
+  fhcli upload myapp ./myapp            # uploads a file or folder; auto-detects
                                       # Dockerfile / docker-compose.yml and provisions
-  fhold build myapp
-  fhold build myapp --no-follow
-  fhold start myapp
-  fhold stop  myapp
-  fhold exec  myapp "ls /app"
-  fhold ssl   myapp
-  fhold status myapp
-  fhold abort  myapp
+  fhcli build myapp
+  fhcli build myapp --no-follow
+  fhcli start myapp
+  fhcli stop  myapp
+  fhcli exec  myapp "ls /app"
+  fhcli ssl   myapp
+  fhcli status myapp
+  fhcli abort  myapp
 """
 
 import os
@@ -220,7 +220,7 @@ def list_projects():
     data = _get("/projects")
 
     if not data:
-        console.print("[dim]No projects yet. Use [bold]fhold create[/] to add one.[/]")
+        console.print("[dim]No projects yet. Use [bold]fhcli create[/] to add one.[/]")
         return
 
     for project in data:
@@ -275,19 +275,19 @@ def create_project(name: str):
     """Create a new (empty) project.
 
     The project starts with no deploy mode. Upload your files next with
-    [bold]fhold upload NAME PATH[/]: the server scans the uploaded root for a Dockerfile
+    [bold]fhcli upload NAME PATH[/]: the server scans the uploaded root for a Dockerfile
     or docker-compose.yml, picks the deploy mode automatically, and wires up nginx + SSL.
 
     \b
     Example:
-      fhold create myapp                    # then: fhold upload myapp ./myapp
+      fhcli create myapp                    # then: fhcli upload myapp ./myapp
     """
     console.print(f"Creating project [bold cyan]{name}[/]…")
     data = _post("/projects", json={"name": name})
 
     console.print(f"\n[bold green]✓ Project '{data['name']}' created[/]  [dim](deploy mode: "
                   f"{data.get('deploy_mode', 'pending')})[/]\n")
-    console.print(f"  Next: [bold]fhold upload {name} ./path-to-your-project[/]")
+    console.print(f"  Next: [bold]fhcli upload {name} ./path-to-your-project[/]")
     console.print("  [dim]The folder should contain a Dockerfile or a docker-compose.yml.[/]")
 
 
@@ -349,8 +349,8 @@ def plugin_add(plugin: str, project: str, follow: bool):
 
     \b
     Examples:
-      fhold plugin-add hello-world mysite
-      fhold plugin-add hello-world mysite --no-follow
+      fhcli plugin-add hello-world mysite
+      fhcli plugin-add hello-world mysite --no-follow
     """
     console.print(f"Installing plugin [cyan]{plugin}[/] as project [bold cyan]{project}[/]…")
     with console.status("Creating project (certbot runs during creation)…"):
@@ -381,8 +381,8 @@ def plugin_add(plugin: str, project: str, follow: bool):
     console.print(table)
 
     if not follow:
-        hint = (f"fhold compose-status {project}" if is_compose
-                else f"fhold status {project}")
+        hint = (f"fhcli compose-status {project}" if is_compose
+                else f"fhcli status {project}")
         console.print(f"\n[green]✓[/] Provisioning started. Check progress with: [bold]{hint}[/]")
         return
 
@@ -412,7 +412,7 @@ def _compose_lifecycle(project: str, action: str, follow: bool, verb: str):
     if not follow:
         console.print(
             f"[green]✓[/] compose {verb} started. "
-            f"Check progress with: [bold]fhold compose-status {project}[/]"
+            f"Check progress with: [bold]fhcli compose-status {project}[/]"
         )
         return
 
@@ -485,7 +485,7 @@ def _print_provisioned(data: dict):
                       str(info.get("local_port") or "—"), ssl_icon)
     console.print(table)
 
-    nxt = f"fhold compose-up {name}" if mode == "compose" else f"fhold build {name}"
+    nxt = f"fhcli compose-up {name}" if mode == "compose" else f"fhcli build {name}"
     console.print(f"\n  Next: [bold]{nxt}[/]")
 
 
@@ -505,9 +505,9 @@ def upload(project: str, path: str, dest: str):
 
     \b
     Examples:
-      fhold upload myapp ./myapp            # a project folder (Dockerfile or compose inside)
-      fhold upload myapp ./Dockerfile       # a single file
-      fhold upload myapp ./assets --dest static
+      fhcli upload myapp ./myapp            # a project folder (Dockerfile or compose inside)
+      fhcli upload myapp ./Dockerfile       # a single file
+      fhcli upload myapp ./assets --dest static
     """
     if os.path.isdir(path):
         paths = [os.path.join(root, n) for root, _dirs, names in os.walk(path) for n in names]
@@ -565,8 +565,8 @@ def build_image(project: str, follow: bool):
 
     \b
     Examples:
-      fhold build myapp
-      fhold build myapp --no-follow
+      fhcli build myapp
+      fhcli build myapp --no-follow
     """
     console.print(f"Starting build for [cyan]{project}[/]…")
     data = _post(f"/projects/{project}/build")
@@ -578,7 +578,7 @@ def build_image(project: str, follow: bool):
     if not follow:
         console.print(
             f"[green]✓[/] Build started. "
-            f"Check progress with: [bold]fhold status {project}[/]"
+            f"Check progress with: [bold]fhcli status {project}[/]"
         )
         return
 
@@ -604,7 +604,7 @@ def start_container(project: str, follow: bool):
 
     \b
     Example:
-      fhold start myapp
+      fhcli start myapp
     """
     console.print(f"Starting container for [cyan]{project}[/]…")
     data = _post(f"/projects/{project}/start")
@@ -616,7 +616,7 @@ def start_container(project: str, follow: bool):
     if not follow:
         console.print(
             f"[green]✓[/] Start issued. "
-            f"Check with: [bold]fhold status {project}[/]"
+            f"Check with: [bold]fhcli status {project}[/]"
         )
         return
 
@@ -641,7 +641,7 @@ def stop_container(project: str, follow: bool):
 
     \b
     Example:
-      fhold stop myapp
+      fhcli stop myapp
     """
     console.print(f"Stopping container for [cyan]{project}[/]…")
     data = _post(f"/projects/{project}/stop")
@@ -653,7 +653,7 @@ def stop_container(project: str, follow: bool):
     if not follow:
         console.print(
             f"[green]✓[/] Stop issued. "
-            f"Check with: [bold]fhold status {project}[/]"
+            f"Check with: [bold]fhcli status {project}[/]"
         )
         return
 
@@ -679,8 +679,8 @@ def exec_command(project: str, command: str, follow: bool):
 
     \b
     Examples:
-      fhold exec myapp "ls /app"
-      fhold exec myapp "python manage.py migrate"
+      fhcli exec myapp "ls /app"
+      fhcli exec myapp "python manage.py migrate"
     """
     console.print(f"Running command in [cyan]{project}[/]…")
     data = _post(
@@ -695,7 +695,7 @@ def exec_command(project: str, command: str, follow: bool):
     if not follow:
         console.print(
             f"[green]✓[/] Command launched. "
-            f"Check output with: [bold]fhold status {project}[/]"
+            f"Check output with: [bold]fhcli status {project}[/]"
         )
         return
 
@@ -726,9 +726,9 @@ def get_status(project: str, follow: bool, logs: bool):
 
     \b
     Examples:
-      fhold status myapp
-      fhold status myapp --follow
-      fhold status myapp --no-logs
+      fhcli status myapp
+      fhcli status myapp --follow
+      fhcli status myapp --no-logs
     """
     if follow:
         console.print(
@@ -784,7 +784,7 @@ def abort_job(project: str):
 
     \b
     Example:
-      fhold abort myapp
+      fhcli abort myapp
     """
     console.print(f"Aborting job for [cyan]{project}[/]…")
     data = _post(f"/projects/{project}/abort")
@@ -806,8 +806,8 @@ def remove_project(name: str, yes: bool):
 
     \b
     Example:
-      fhold remove myapp
-      fhold remove myapp --yes
+      fhcli remove myapp
+      fhcli remove myapp --yes
     """
     if not yes:
         console.print(
@@ -835,7 +835,7 @@ def issue_ssl(project: str):
 
     \b
     Example:
-      fhold ssl myapp
+      fhcli ssl myapp
     """
     console.print(f"Requesting SSL cert for [cyan]{project}[/]…")
     with console.status("certbot running…"):
@@ -861,14 +861,14 @@ def set_domain(project: str, domain: str | None, service: str | None, clear: boo
 
     Without a custom domain a component is served at its auto-generated subdomain. Point
     your domain's A record at the VPS first; if DNS hasn't propagated the component is
-    served HTTP-only and you can re-run `fhold ssl` (dockerfile) or set the domain again
+    served HTTP-only and you can re-run `fhcli ssl` (dockerfile) or set the domain again
     later.
 
     \b
     Examples:
-      fhold domain myapp app.acme.com           # dockerfile project
-      fhold domain myproj acme.com -s web        # one compose service
-      fhold domain myapp --clear                 # revert to the subdomain
+      fhcli domain myapp app.acme.com           # dockerfile project
+      fhcli domain myproj acme.com -s web        # one compose service
+      fhcli domain myapp --clear                 # revert to the subdomain
     """
     if clear and domain:
         console.print("[bold red]Error:[/] pass either a DOMAIN or --clear, not both")
@@ -957,14 +957,14 @@ def _sftp_makedirs(sftp: paramiko.SFTPClient, remote_path: str) -> None:
 def sftp_upload_files(project: str, files: tuple, dest: str):
     """Upload files to a project's folder over SFTP (raw transfer, no provisioning).
 
-    For getting files into a project and auto-provisioning, prefer [bold]fhold upload[/];
+    For getting files into a project and auto-provisioning, prefer [bold]fhcli upload[/];
     this SFTP path is for large archives / direct transfers to /srv/projects/PROJECT/.
 
     \b
     Examples:
-      fhold sftp-upload myapp ./app.tar.gz
-      fhold sftp-upload myapp ./dist.zip ./assets.tar.gz
-      fhold sftp-upload myapp ./data/seed.sql --dest db
+      fhcli sftp-upload myapp ./app.tar.gz
+      fhcli sftp-upload myapp ./dist.zip ./assets.tar.gz
+      fhcli sftp-upload myapp ./data/seed.sql --dest db
     """
     ssh, sftp = _sftp_connect()
 
@@ -1016,4 +1016,4 @@ def sftp_upload_files(project: str, files: tuple, dest: str):
 # ── entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    cli(prog_name="fhold")
+    cli(prog_name="fhcli")

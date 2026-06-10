@@ -64,7 +64,7 @@ NGINX_CONF=""; NGINX_LINK=""; NGINX_BRIDGE=""; NGINX_TARGET_MODE=""
 #   prebuilt wheels. Source-building on newer Python pulls in Rust + a matching
 #   PyO3, which broke installs on 3.14. Bump MAX when upstream catches up.
 PYTHON_MIN_MINOR=11
-PYTHON_MAX_MINOR=13
+PYTHON_MAX_MINOR=14
 
 # ── Colours / helpers ──────────────────────────────────────────────────────────
 RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
