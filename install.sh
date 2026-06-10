@@ -298,7 +298,13 @@ if [[ "${ID:-}" != "ubuntu" ]]; then
     fail "This script only supports Ubuntu. Detected: ${PRETTY_NAME:-unknown}"
     exit 1
 fi
-ok "Ubuntu ${VERSION_ID:-?} detected"
+# Supported target is Ubuntu 26.04 only (for now). Other releases are untested:
+# Python minor + docker.io's bundled plugins (buildx/compose) differ per release.
+if [[ "${VERSION_ID:-}" != "26.04" ]]; then
+    warn "Only Ubuntu 26.04 is supported for now — detected ${VERSION_ID:-unknown}. Continuing, but this is untested."
+else
+    ok "Ubuntu ${VERSION_ID} detected"
+fi
 
 # ── Mode detection (FRESH vs COEXIST) ───────────────────────────────────────────
 section "Detecting installation mode"
@@ -527,6 +533,24 @@ else
     else
         fail "Could not provide 'docker compose' — compose-mode projects (e.g. ws-chat) will fail."
         fail "Install the Compose v2 plugin manually, then re-run."
+        exit 1
+    fi
+fi
+
+# Buildx / BuildKit plugin. Image builds shell out to `docker build --progress=plain`
+# (docker_service.py), which is a BuildKit flag the legacy builder rejects with
+# "unknown flag: --progress". Like compose above, on Ubuntu 26.04 `docker.io` no
+# longer bundles buildx, so we gate on the subcommand and install docker-buildx
+# only when absent — never clobbering a docker-ce box that ships its own plugin.
+if docker buildx version &>/dev/null; then
+    ok "docker buildx  ($(docker buildx version 2>/dev/null | head -n1))"
+else
+    info "docker buildx plugin missing — installing docker-buildx"
+    if apt_retry install -y docker-buildx && docker buildx version &>/dev/null; then
+        ok "docker buildx  ($(docker buildx version 2>/dev/null | head -n1))"
+    else
+        fail "Could not provide 'docker buildx' — image builds use --progress=plain (BuildKit) and will fail on the legacy builder."
+        fail "Install the buildx plugin manually (apt-get install docker-buildx), then re-run."
         exit 1
     fi
 fi
