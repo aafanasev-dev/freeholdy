@@ -17,7 +17,7 @@ nano .env   # set TOKEN and BASE_DOMAIN
 `.env` (stays in this directory, never committed):
 ```
 TOKEN=your_api_token_here
-BASE_DOMAIN=cloudopen.space
+BASE_DOMAIN=your_domain.com
 
 # SFTP — for fhold sftp-upload (SFTPGo on port 2022)
 SFTP_USER=your_sftpgo_username

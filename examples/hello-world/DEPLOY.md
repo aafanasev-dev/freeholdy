@@ -3,7 +3,7 @@
 This example runs the simplest possible HTTP server — a single static HTML page
 served by Python's built-in `http.server`. No dependencies, no build step.
 
-**What you'll get:** `https://hello-world.cloudopen.space`
+**What you'll get:** `https://hello-world.your_domain.com`
 
 The folder contains everything freeholdy needs:
 
@@ -17,14 +17,14 @@ examples/hello-world/
 
 ## Prerequisites
 
-- freeholdy API is running at `https://manager.cloudopen.space`
+- freeholdy API is running at `https://manager.your_domain.com`
 - CLI is set up and `fhold` is in your PATH (see `cli/README.md`)
 - `cli/.env` has a valid TOKEN and BASE_URL
 
 Verify with:
 ```bash
 fhold health
-# ✓ API is ok  (https://manager.cloudopen.space)
+# ✓ API is ok  (https://manager.your_domain.com)
 ```
 
 ---
@@ -73,7 +73,7 @@ Uploading 2 file(s) → hello-world…
 Deploy mode: dockerfile
 
   Container    Subdomain                      Port   SSL
-  hello-world  hello-world.cloudopen.space    8100   ✓
+  hello-world  hello-world.your_domain.com    8100   ✓
 
   Next: fhold build hello-world
 ```
@@ -135,10 +135,10 @@ curl http://localhost:8100
 
 **Check via HTTPS** (the real test):
 ```bash
-curl https://hello-world.cloudopen.space
+curl https://hello-world.your_domain.com
 ```
 
-Or open `https://hello-world.cloudopen.space` in a browser.
+Or open `https://hello-world.your_domain.com` in a browser.
 
 You should see: **Hello, World! 👋**
 
@@ -166,7 +166,7 @@ fhold start hello-world
 ```bash
 fhold ssl hello-world
 ```
-This re-runs certbot for `hello-world.cloudopen.space`. The domain's DNS must
+This re-runs certbot for `hello-world.your_domain.com`. The domain's DNS must
 point to your VPS for this to succeed.
 
 **See container logs on the VPS directly:**

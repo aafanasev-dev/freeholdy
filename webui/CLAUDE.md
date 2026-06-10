@@ -20,7 +20,7 @@ npm run preview   # serve the built bundle locally
 ```
 
 No tests, linter, or formatter are configured. Production deploy is a static copy of `dist/`
-behind nginx (`ui.cloudopen.space`); see `README.md`.
+behind nginx (`ui.your_domain.com`); see `README.md`.
 
 ## Architecture
 
@@ -31,7 +31,7 @@ introduce new files or a styling library unless asked.
 
 Things that require reading the whole file to understand:
 
-- **API base URL:** `const BASE = import.meta.env.VITE_API_URL || "https://api.cloudopen.space"` at
+- **API base URL:** `const BASE = import.meta.env.VITE_API_URL || "https://api.your_domain.com"` at
   the top of `App.jsx`. `VITE_API_URL` is baked in at build time (the webui plugin's `install.sh`
   writes it into `.env`); fall back is the production API.
 - **`mkApi(token)` is the single HTTP layer.** Every request goes through it; `get/post/del` send
@@ -43,8 +43,13 @@ Things that require reading the whole file to understand:
   validates by calling `/health` before storing. Logout clears the key. There is no refresh/expiry
   handling — a rejected request just shows an error, it does not force re-login.
 - **All styling is inline.** Colors come from the `C` object; there are no class names except the
-  one global `<style>` block in `App` (font import, scrollbar, resets). Match this — pass `style`
-  props, reuse `C`, do not write CSS.
+  one global `<style>` block in `App` (font import, scrollbar, resets, input focus ring). Match
+  this — pass `style` props, reuse `C`, do not write CSS.
+- **Light "Hostinger-style" theme.** `C` is a light palette: lavender-white surfaces (`bg/s1/s2/s3`),
+  a royal-purple brand/primary accent (`C.purple`), dark-navy text (`C.txt`), and a soft `C.shadow`
+  for cards. `C.ff` is the UI sans font (DM Sans); `C.mono` (JetBrains Mono) is **only** for
+  log/code output (LogPane, status/SSL output, the login token command). Green/amber/red/blue stay
+  reserved for status semantics (`SC`/`SI`/`Tag`), not branding.
 - **Container/job status is a fixed vocabulary** rendered by the `SC` (color) and `SI` (glyph)
   maps and the `<Tag>` component: `running | done | exited | aborted | error | no_image |
   not_found | no_job`. These mirror the server's synthesized states — keep the maps in sync if the
@@ -55,6 +60,11 @@ Things that require reading the whole file to understand:
 The UI assumes these endpoints and is the place this contract is exercised from the client side:
 
 - `GET /health`, `GET /projects`, `POST /projects` (name only — no deploy_mode), `DELETE /projects/{name}`
+- `GET /plugins` — each item carries `name`, `description`, `about` (Markdown from the plugin's
+  `ABOUT.md`, empty when none), `deploy_mode`, `container_port`, `has_install`, `type`. `PluginPanel`
+  is a master-detail view: a ~25% name list on the left, a ~75% detail pane on the right that renders
+  `about` (falling back to `description`) via the tiny inline `Markdown` component, with a solid-green
+  **install** button (`Btn v="green"`) in the pane's top-right. `system`-type plugins are filtered out.
 - One upload endpoint: `POST /projects/{name}/upload` (multipart `files[]`; each file's multipart
   filename carries its relative path). Writes the tree under the project dir, then the server
   auto-detects a `Dockerfile`/`docker-compose.yml` in the root and provisions (compose wins).
@@ -90,8 +100,8 @@ Operation flow (`Dashboard` + `ContainerRow`):
 
 ## Project = subdomain; mode + port auto-detected from the upload
 
-A project's name is its subdomain label — a dockerfile project is served at `{name}.cloudopen.space`
-(`CreateForm` previews this), compose services at `{service}.{name}.cloudopen.space`. `CreateForm`
+A project's name is its subdomain label — a dockerfile project is served at `{name}.your_domain.com`
+(`CreateForm` previews this), compose services at `{service}.{name}.your_domain.com`. `CreateForm`
 takes **only a name** — there is no deploy-mode or port input. The deploy mode is auto-detected
 server-side from the first `upload` (a `docker-compose.yml` wins over a `Dockerfile`), and a
 dockerfile project's container port is read from the Dockerfile's `EXPOSE` instruction, so the

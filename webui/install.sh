@@ -43,8 +43,8 @@ ok "Docker is available"
 
 # ── API URL ───────────────────────────────────────────────────────────────────
 if [[ -z "$API_URL" ]]; then
-    read -rp "  freeholdy API URL [https://api.cloudopen.space]: " API_URL
-    API_URL="${API_URL:-https://api.cloudopen.space}"
+    read -rp "  freeholdy API URL [https://api.your_domain.com]: " API_URL
+    API_URL="${API_URL:-https://api.your_domain.com}"
 fi
 ok "API URL: ${API_URL}"
 

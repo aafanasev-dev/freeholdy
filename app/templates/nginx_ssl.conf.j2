@@ -5,7 +5,16 @@
 server {
     listen 80;
     server_name {{ part.subdomain }};
-    return 301 https://$host$request_uri;
+
+    # Keep serving the ACME challenge over HTTP so `certbot renew` (webroot) works
+    # without disabling the HTTPS redirect.
+    location /.well-known/acme-challenge/ {
+        root {{ webroot }};
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
 }
 
 server {

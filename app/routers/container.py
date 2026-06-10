@@ -16,6 +16,8 @@ from app.models.schemas import (
     DockerJobStatusResponse,
     ExecRequest,
     SslResponse,
+    SetDomainRequest,
+    ProjectResponse,
 )
 from app.auth import require_auth
 from app.services import docker_service, nginx_service
@@ -135,12 +137,12 @@ def abort_docker_job(project_name: str, db: Session = Depends(get_db), _=Depends
              summary="(Re)issue the Let's Encrypt SSL certificate for the project")
 def issue_ssl(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
     project = _get_dockerfile_project(project_name, db)
-    success, message = nginx_service.issue_cert(project.subdomain)
+    success, message = nginx_service.issue_cert(project.effective_domain)
     if success:
         project.ssl_enabled = True
         db.commit()
         nginx_service.write_ssl_config(project_name, [{
-            "subdomain": project.subdomain, "local_port": project.local_port,
+            "subdomain": project.effective_domain, "local_port": project.local_port,
             "websocket": bool(project.websocket),
         }])
     return SslResponse(
@@ -148,3 +150,36 @@ def issue_ssl(project_name: str, db: Session = Depends(get_db), _=Depends(requir
         message=message,
         ssl_enabled=bool(project.ssl_enabled),
     )
+
+
+# ── Custom domain ─────────────────────────────────────────────────────────────────
+
+@router.post("/{project_name}/domain", response_model=ProjectResponse,
+             summary="Set or clear the project's custom domain (re-runs nginx + certbot)")
+def set_domain(project_name: str, request: SetDomainRequest,
+               db: Session = Depends(get_db), _=Depends(require_auth)):
+    """Point this dockerfile project at a custom domain instead of its auto subdomain.
+    Pass `custom_domain: null` (or empty) to revert to the subdomain. Rewrites the nginx
+    config and issues a Let's Encrypt cert for the effective domain; if DNS doesn't yet
+    point here the project stays HTTP-only (ssl_enabled=False) and SSL can be retried."""
+    # Local imports avoid a circular import at module load (projects imports service fns).
+    from app.routers.projects import assert_domain_available, project_response
+
+    project = _get_dockerfile_project(project_name, db)
+    if not project.subdomain or not project.local_port:
+        raise HTTPException(status_code=400, detail="Project is not provisioned yet — upload a Dockerfile first")
+
+    if request.custom_domain:
+        assert_domain_available(db, request.custom_domain, exclude_project_id=project.id)
+    project.custom_domain = request.custom_domain
+    db.commit()
+
+    ssl_result = nginx_service.setup_nginx(project_name, [{
+        "subdomain": project.effective_domain,
+        "local_port": project.local_port,
+        "websocket": bool(project.websocket),
+    }])
+    project.ssl_enabled = bool(ssl_result["ssl"].get(project.effective_domain, {}).get("success"))
+    db.commit()
+    db.refresh(project)
+    return project_response(project)

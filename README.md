@@ -1,6 +1,6 @@
 # freeholdy
 
-Docker + Nginx orchestrator for pet projects on **cloudopen.space**.
+Docker + Nginx orchestrator for pet projects on **your_domain.com**.
 
 REST API to deploy, manage, and expose Docker containers via HTTPS subdomains — no manual nginx or certbot work needed after setup.
 
@@ -18,7 +18,7 @@ that project.
 POST   /projects                       →  create an empty project (deploy_mode: "pending")
 POST   /projects/{name}/upload         →  upload a file/folder; auto-detect Dockerfile or
                                           docker-compose.yml in the root → provision
-                                          ({name}.cloudopen.space + nginx config + Let's Encrypt cert)
+                                          ({name}.your_domain.com + nginx config + Let's Encrypt cert)
 DELETE /projects/{name}                →  stop containers, remove images, delete nginx config, remove from DB
 
 # dockerfile mode (detected from a Dockerfile) — one container per project:
@@ -28,11 +28,14 @@ POST   /projects/{name}/stop        →  docker stop   (async, poll /status)
 POST   /projects/{name}/exec        →  docker exec   (async, poll /status)
 GET    /projects/{name}/status      →  logs + status of last docker op
 POST   /projects/{name}/abort       →  kill running docker subprocess
+POST   /projects/{name}/ssl         →  (re)issue the Let's Encrypt cert
+POST   /projects/{name}/domain      →  set/clear a custom domain (re-runs nginx + certbot)
 
 # compose mode (detected from a docker-compose.yml) — multi-container stack:
 POST   /projects/{name}/compose/{build|up|down}       →  run the stack (async, poll /compose/status)
 GET    /projects/{name}/compose/status                →  logs + status of last compose op
 POST   /projects/{name}/compose/abort                 →  kill running compose subprocess
+POST   /projects/{name}/services/{service}/domain     →  set/clear a service's custom domain
 ```
 
 A Dockerfile must declare its listening port with `EXPOSE` — that becomes the container port nginx
@@ -183,23 +186,25 @@ Key settings:
 
 | Variable | Default | Description |
 |---|---|---|
-| `BASE_DOMAIN` | `cloudopen.space` | Root domain for all projects |
-| `CERTBOT_EMAIL` | `admin@cloudopen.space` | Let's Encrypt notifications |
+| `BASE_DOMAIN` | `your_domain.com` | Root domain for all projects |
+| `CERTBOT_EMAIL` | `admin@your_domain.com` | Let's Encrypt notifications |
+| `CERTBOT_WEBROOT` | `/var/www/certbot` | ACME HTTP-01 webroot; project certs are issued with `certbot certonly --webroot` (see below) |
 | `PORT_RANGE_START` | `8100` | First local port for containers |
 | `PORT_RANGE_END` | `9000` | Last local port |
-| `HOST` | `0.0.0.0` | freeholdy listen address |
-| `PORT` | `8000` | freeholdy listen port |
+| `HOST` | `0.0.0.0` | freeholdy listen address (the installer sets `127.0.0.1`) |
+| `PORT` | `8000` | freeholdy listen port (the installer defaults to `27182`) |
+| `CORS_ORIGINS` | localhost dev ports | Browser origins allowed to call the API; `https://{BASE_DOMAIN}` and `https://ui.{BASE_DOMAIN}` are injected automatically |
 
 ---
 
 ## Nginx setup for freeholdy itself
 
-freeholdy needs its own nginx reverse proxy so the API is reachable at `https://api.cloudopen.space`.
+freeholdy needs its own nginx reverse proxy so the API is reachable at `https://api.your_domain.com`.
 
 **1. Issue SSL cert:**
 ```bash
 sudo certbot certonly --nginx --non-interactive --agree-tos \
-    --email admin@cloudopen.space -d api.cloudopen.space
+    --email admin@your_domain.com -d api.your_domain.com
 ```
 
 **2. Create nginx config:**
@@ -210,16 +215,16 @@ sudo nano /etc/nginx/sites-available/freeholdy.conf
 ```nginx
 server {
     listen 80;
-    server_name api.cloudopen.space;
+    server_name api.your_domain.com;
     return 301 https://$host$request_uri;
 }
 
 server {
     listen 443 ssl;
-    server_name api.cloudopen.space;
+    server_name api.your_domain.com;
 
-    ssl_certificate     /etc/letsencrypt/live/api.cloudopen.space/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/api.cloudopen.space/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/api.your_domain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.your_domain.com/privkey.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
 
     location / {
@@ -352,8 +357,8 @@ sudo -u freeholdy sudo nginx -t
 SFTPGo ships as a freeholdy **plugin** (`plugins/sftpgo/`, a compose plugin of `type: system`). It is a normal managed project — deployed, inspected, and removed through the standard API/CLI — but hidden from the web UI.
 
 **What it exposes:**
-- `https://files.cloudopen.space` — browser-based WebClient UI + WebDAV (via nginx)
-- `sftp://cloudopen.space:2022` — raw SFTP access (bypasses nginx, direct TCP)
+- `https://files.your_domain.com` — browser-based WebClient UI + WebDAV (via nginx)
+- `sftp://your_domain.com:2022` — raw SFTP access (bypasses nginx, direct TCP)
 - `/srv/projects` inside the container is mounted from `projects/` on the host, giving full read-write access to all pet project files
 
 ### Deployment
@@ -365,12 +370,12 @@ fhold plugin-add sftpgo sftpgo
 ```
 
 This single command:
-1. Creates a compose project, allocates a loopback port, and wires up nginx + SSL for `files.cloudopen.space`
+1. Creates a compose project, allocates a loopback port, and wires up nginx + SSL for `files.your_domain.com`
 2. Runs the plugin's `install.sh` **pre** phase — generates the admin password into the project's `.env`
 3. Starts the stack (`docker compose up -d`) — image `drakkan/sftpgo:latest`, with `/var/lib/sftpgo` (persistent DB/config) and `projects/ → /srv/projects` mounted, and `restart: unless-stopped` so it survives reboots
 4. Runs the **post** phase (background) — waits for the REST API, creates the `freeholdy` SFTP user with `/srv/projects` as home, writes `/etc/sftpgo-credentials` (mode 600), and patches `cli/.env` with `SFTP_USER` / `SFTP_PASSWORD` so `fhold sftp-upload` works immediately
 
-After it finishes, the admin panel is at `https://files.cloudopen.space/web/admin`. The generated admin and SFTP credentials are in `/etc/sftpgo-credentials`.
+After it finishes, the admin panel is at `https://files.your_domain.com/web/admin`. The generated admin and SFTP credentials are in `/etc/sftpgo-credentials`.
 
 ### Useful commands
 
@@ -391,8 +396,9 @@ fhold remove sftpgo
 
 ## SSL certificate renewal (crontab)
 
-The script in `scripts/cert-manager.sh` handles renewal for `api.cloudopen.space` and any other fixed domains.  
-Certs for project subdomains are issued automatically by freeholdy when a project is created.
+The script in `scripts/cert-manager.sh` handles renewal for `api.your_domain.com` and any other fixed domains (it uses `certbot certonly --nginx`).
+
+Certs for **project** subdomains are issued automatically by freeholdy when a project is created (and on the `/ssl` and `/domain` endpoints). For these, freeholdy deliberately uses `certbot certonly --webroot` rather than `--nginx`: it owns the per-project vhost files, so the `--nginx` plugin must not rewrite them. The ACME HTTP-01 challenge is served from `CERTBOT_WEBROOT` (default `/var/www/certbot`); the generated `nginx_http.conf.j2` / `nginx_ssl.conf.j2` vhosts expose `/.well-known/acme-challenge/` from there, and `install.sh` creates the directory. For a manual setup, create it yourself: `sudo mkdir -p /var/www/certbot/.well-known/acme-challenge`.
 
 ```bash
 sudo crontab -e
@@ -409,14 +415,14 @@ All endpoints require `Authorization: Bearer <token>`.
 
 ### Interactive docs
 ```
-https://api.cloudopen.space/docs
+https://api.your_domain.com/docs
 ```
 
 ### Example workflow (dockerfile mode)
 
 ```bash
 TOKEN="your_token_here"
-BASE="https://api.cloudopen.space"
+BASE="https://api.your_domain.com"
 
 # 1. Create an empty project (deploy mode decided at upload time)
 curl -X POST "$BASE/projects" \
@@ -426,7 +432,7 @@ curl -X POST "$BASE/projects" \
 
 # 2. Upload the project folder (must contain a Dockerfile that EXPOSEs a port).
 #    The server detects the Dockerfile, sets the container port from EXPOSE, and
-#    provisions nginx + SSL for myapp.cloudopen.space.
+#    provisions nginx + SSL for myapp.your_domain.com.
 curl -X POST "$BASE/projects/myapp/upload" \
   -H "Authorization: Bearer $TOKEN" \
   -F "files=@./Dockerfile;filename=Dockerfile" \
@@ -458,9 +464,19 @@ The `fhold` CLI wraps all of this (`fhold create` → `fhold upload` → `fhold 
 
 ## Subdomains & ports
 
-- **dockerfile mode:** the project is served at `{name}.cloudopen.space` (one container, one subdomain).
-- **compose mode:** each service that publishes a port gets `{service}.{name}.cloudopen.space`.
+- **dockerfile mode:** the project is served at `{name}.your_domain.com` (one container, one subdomain).
+- **compose mode:** each service that publishes a port gets `{service}.{name}.your_domain.com`.
 - Plugins may override the subdomain label via `domain_prefix` (e.g. SFTPGo → `files.`, web UI → `ui.`).
+- **Custom domains:** point your own FQDN at a project — or at a single compose service — instead of the auto subdomain:
+  ```bash
+  curl -X POST "$BASE/projects/myapp/domain" \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"custom_domain": "app.acme.com"}'        # send {"custom_domain": null} to revert
+  # compose service variant: POST /projects/{name}/services/{service}/domain
+  ```
+  freeholdy rewrites the nginx config and issues a Let's Encrypt cert for the domain. Point its A record
+  at this server **first**; if DNS hasn't propagated the component stays HTTP-only (`ssl_enabled: false`)
+  and you can POST again later to retry.
 - Local container ports are auto-assigned from the `PORT_RANGE_START–PORT_RANGE_END` range and bound to `127.0.0.1` only; public traffic always goes through nginx.
 
 ---

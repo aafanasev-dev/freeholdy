@@ -17,7 +17,7 @@
 #   PROJECT_NAME               — project name (e.g. "sftpgo")
 #   PROJECTS_DIR               — absolute path to freeholdy's unified projects/ directory
 #   DOCKERFILES_DIR            — legacy alias kept for backward compatibility
-#   BASE_DOMAIN                — e.g. "cloudopen.space"
+#   BASE_DOMAIN                — e.g. "your_domain.com"
 #   SERVICE_SFTPGO_LOCAL_PORT  — loopback port allocated for nginx → WebClient
 
 set -euo pipefail

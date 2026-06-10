@@ -6,8 +6,10 @@ server {
     listen 80;
     server_name {{ part.subdomain }};
 
+    # ACME HTTP-01: certbot --webroot drops the token under {{ webroot }}; serve it
+    # over plain HTTP (this prefix location wins over the redirect below).
     location /.well-known/acme-challenge/ {
-        root /var/www/certbot;
+        root {{ webroot }};
     }
 
     location / {

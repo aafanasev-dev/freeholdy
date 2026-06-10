@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
-const BASE = import.meta.env.VITE_API_URL || "https://api.cloudopen.space";
+const BASE = import.meta.env.VITE_API_URL || "https://api.your_domain.com";
 const POLL_MS = 1000;
 
 // ── API factory ───────────────────────────────────────────────────────────────
@@ -23,21 +23,26 @@ const mkApi = (token) => {
 };
 
 // ── Theme ─────────────────────────────────────────────────────────────────────
+// Light, calm palette inspired by hostinger.com: lavender-white surfaces, a
+// royal-purple primary accent, dark-navy text, soft borders and gentle shadows.
 const C = {
-  bg:    "#07070f",
-  s1:    "#0c0c1a",
-  s2:    "#111120",
-  s3:    "#191928",
-  bd:    "#1e1e32",
-  bdB:   "#2c2c48",
-  green: "#3dd68c",
-  amber: "#f0a835",
-  red:   "#e05c5c",
-  blue:  "#6aa3f5",
-  txt:   "#c8d0e8",
-  muted: "#606880",
-  dim:   "#383d55",
-  ff:    "'JetBrains Mono', 'Fira Code', monospace",
+  bg:     "#f4f4fb",   // app background — light lavender
+  s1:     "#ffffff",   // primary card surface
+  s2:     "#faf9ff",   // header / secondary surface
+  s3:     "#f1f0fa",   // tertiary surface (default buttons, fills)
+  bd:     "#ececf4",   // subtle border
+  bdB:    "#dedaee",   // stronger border
+  purple: "#673de6",   // brand / primary accent
+  green:  "#149a6a",   // success / running
+  amber:  "#c77f1a",   // warning / exited
+  red:    "#dc4549",   // error / danger
+  blue:   "#2f6bff",   // info / links
+  txt:    "#1b1a3a",   // primary text (dark meteorite)
+  muted:  "#6c6a86",   // secondary text
+  dim:    "#a6a3c0",   // tertiary text / placeholders
+  shadow: "0 1px 2px rgba(27,26,58,.05), 0 6px 20px rgba(27,26,58,.05)",
+  ff:     "'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+  mono:   "'JetBrains Mono', 'Fira Code', monospace",
 };
 
 const SC = {
@@ -54,22 +59,23 @@ const SI = {
 // ── Tiny shared components ────────────────────────────────────────────────────
 const Btn = ({ children, onClick, v = "default", sm, disabled, busy, title, style: st = {} }) => {
   const vs = {
-    default: { bg: C.s3,           color: C.txt,   bd: C.bdB },
-    primary: { bg: "#182e22",      color: C.green, bd: "#254838" },
-    danger:  { bg: "#2b1414",      color: C.red,   bd: "#482020" },
-    amber:   { bg: "#28220e",      color: C.amber, bd: "#473a18" },
-    ghost:   { bg: "transparent",  color: C.muted, bd: "transparent" },
-    blue:    { bg: "#111e33",      color: C.blue,  bd: "#1e3358" },
+    default: { bg: C.s3,           color: C.txt,    bd: C.bdB },
+    primary: { bg: "#f0ecfe",      color: C.purple, bd: "#dccffb" },
+    danger:  { bg: "#fdecec",      color: C.red,    bd: "#f6d2d3" },
+    amber:   { bg: "#fbf2e0",      color: C.amber,  bd: "#f0e1bc" },
+    ghost:   { bg: "transparent",  color: C.muted,  bd: "transparent" },
+    blue:    { bg: "#e9f0ff",      color: C.blue,   bd: "#cfddff" },
+    green:   { bg: C.green,        color: "#ffffff", bd: C.green },
   };
   const vv = vs[v] || vs.default;
   return (
     <button onClick={onClick} disabled={disabled || busy} title={title} style={{
       background: vv.bg, color: (disabled || busy) ? C.dim : vv.color,
       border: `1px solid ${(disabled || busy) ? C.bd : vv.bd}`,
-      fontFamily: C.ff, fontSize: sm ? "10px" : "11px",
-      padding: sm ? "2px 7px" : "5px 12px", cursor: (disabled || busy) ? "not-allowed" : "pointer",
-      borderRadius: "2px", opacity: (disabled || busy) ? 0.55 : 1,
-      whiteSpace: "nowrap", letterSpacing: "0.02em", transition: "opacity .1s",
+      fontFamily: C.ff, fontSize: sm ? "11px" : "12px", fontWeight: 500,
+      padding: sm ? "3px 9px" : "7px 15px", cursor: (disabled || busy) ? "not-allowed" : "pointer",
+      borderRadius: "8px", opacity: (disabled || busy) ? 0.55 : 1,
+      whiteSpace: "nowrap", letterSpacing: "0.01em",
       ...st,
     }}>
       {busy ? "…" : children}
@@ -95,24 +101,87 @@ const TextIn = ({ value, onChange, placeholder, type = "text", style: st = {} })
     type={type} value={value} placeholder={placeholder}
     onChange={e => onChange(e.target.value)}
     style={{
-      background: C.s1, border: `1px solid ${C.bd}`, color: C.txt,
-      fontFamily: C.ff, fontSize: "11px", padding: "5px 10px",
-      borderRadius: "2px", outline: "none", width: "100%", boxSizing: "border-box", ...st,
+      background: C.s2, border: `1px solid ${C.bdB}`, color: C.txt,
+      fontFamily: C.ff, fontSize: "12px", padding: "8px 11px",
+      borderRadius: "8px", outline: "none", width: "100%", boxSizing: "border-box", ...st,
     }}
   />
 );
 
 const Err = ({ msg }) => msg ? (
-  <div style={{ color: C.red, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: "#280f0f", border: `1px solid #442020`, borderRadius: "2px" }}>
+  <div style={{ color: C.red, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: "#fdecec", border: `1px solid #f6d2d3`, borderRadius: "8px" }}>
     ✗ {msg}
   </div>
 ) : null;
 
 const Ok = ({ msg }) => msg ? (
-  <div style={{ color: C.green, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: "#0f2518", border: `1px solid #204030`, borderRadius: "2px" }}>
+  <div style={{ color: C.green, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: "#e6f6ef", border: `1px solid #c6e9d9`, borderRadius: "8px" }}>
     ✓ {msg}
   </div>
 ) : null;
+
+// ── Minimal Markdown renderer ───────────────────────────────────────────────────
+// Just enough for plugin ABOUT.md detail panes: headings, paragraphs, bullet lists,
+// fenced code, and inline **bold** / `code` / [links](url). Not a full CommonMark parser.
+const mdInline = (text, kp) => {
+  const out = [];
+  const re = /(\*\*([^*]+)\*\*)|(`([^`]+)`)|(\[([^\]]+)\]\(([^)]+)\))/g;
+  let last = 0, m, i = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[2] !== undefined) out.push(<strong key={`${kp}b${i}`} style={{ color: C.txt, fontWeight: 600 }}>{m[2]}</strong>);
+    else if (m[4] !== undefined) out.push(<code key={`${kp}c${i}`} style={{ fontFamily: C.mono, fontSize: "11px", background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "5px", padding: "1px 5px", color: C.txt }}>{m[4]}</code>);
+    else if (m[6] !== undefined) out.push(<a key={`${kp}a${i}`} href={m[7]} target="_blank" rel="noreferrer" style={{ color: C.blue, textDecoration: "none" }}>{m[6]}</a>);
+    last = re.lastIndex; i++;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+};
+
+const Markdown = ({ text }) => {
+  if (!text) return null;
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const blocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.trim().startsWith("```")) {
+      const buf = []; i++;
+      while (i < lines.length && !lines[i].trim().startsWith("```")) { buf.push(lines[i]); i++; }
+      i++; blocks.push({ type: "code", text: buf.join("\n") }); continue;
+    }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) { blocks.push({ type: "h", level: h[1].length, text: h[2] }); i++; continue; }
+    if (/^\s*[-*]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*[-*]\s+/, "")); i++; }
+      blocks.push({ type: "ul", items }); continue;
+    }
+    if (line.trim() === "") { i++; continue; }
+    const buf = [line]; i++;
+    while (i < lines.length && lines[i].trim() !== "" && !/^#{1,4}\s+/.test(lines[i]) && !/^\s*[-*]\s+/.test(lines[i]) && !lines[i].trim().startsWith("```")) { buf.push(lines[i]); i++; }
+    blocks.push({ type: "p", text: buf.join(" ") });
+  }
+  const hSize = { 1: "20px", 2: "15px", 3: "12px", 4: "11px" };
+  return (
+    <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", lineHeight: "1.7" }}>
+      {blocks.map((b, k) => {
+        if (b.type === "h") return (
+          <div key={k} style={{ color: b.level === 1 ? C.txt : C.purple, fontWeight: b.level === 1 ? 700 : 600, fontSize: hSize[b.level] || "12px", letterSpacing: b.level >= 3 ? "0.06em" : 0, textTransform: b.level >= 3 ? "uppercase" : "none", margin: k === 0 ? "0 0 10px" : "18px 0 8px" }}>{mdInline(b.text, `h${k}`)}</div>
+        );
+        if (b.type === "ul") return (
+          <ul key={k} style={{ margin: "0 0 12px", paddingLeft: "18px" }}>
+            {b.items.map((it, j) => <li key={j} style={{ margin: "4px 0" }}>{mdInline(it, `l${k}-${j}-`)}</li>)}
+          </ul>
+        );
+        if (b.type === "code") return (
+          <pre key={k} style={{ background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "10px 12px", fontFamily: C.mono, fontSize: "11px", color: C.txt, overflow: "auto", margin: "0 0 12px", lineHeight: "1.6" }}>{b.text}</pre>
+        );
+        return <p key={k} style={{ margin: "0 0 12px" }}>{mdInline(b.text, `p${k}`)}</p>;
+      })}
+    </div>
+  );
+};
 
 // ── Log pane ──────────────────────────────────────────────────────────────────
 const LogPane = ({ log, onClose, onAbort }) => {
@@ -120,7 +189,7 @@ const LogPane = ({ log, onClose, onAbort }) => {
   useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [log?.logs]);
   if (!log) return null;
   return (
-    <div style={{ background: C.s1, border: `1px solid ${C.bdB}`, borderRadius: "2px", display: "flex", flexDirection: "column", height: "280px", marginTop: "10px" }}>
+    <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", display: "flex", flexDirection: "column", height: "280px", marginTop: "10px", boxShadow: C.shadow }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 12px", borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
           <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.12em" }}>OP LOG</span>
@@ -132,7 +201,7 @@ const LogPane = ({ log, onClose, onAbort }) => {
           <Btn v="ghost" sm onClick={onClose}>✕</Btn>
         </div>
       </div>
-      <div ref={ref} style={{ flex: 1, overflow: "auto", padding: "10px 14px", fontFamily: C.ff, fontSize: "11px", color: C.txt, lineHeight: "1.65", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+      <div ref={ref} style={{ flex: 1, overflow: "auto", padding: "10px 14px", fontFamily: C.mono, fontSize: "11px", color: C.txt, lineHeight: "1.65", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
         {log.logs || <span style={{ color: C.dim }}>waiting for output…</span>}
       </div>
     </div>
@@ -141,8 +210,8 @@ const LogPane = ({ log, onClose, onAbort }) => {
 
 // ── Modal wrapper ─────────────────────────────────────────────────────────────
 const Modal = ({ onClose, width = 460, children }) => (
-  <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.72)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 }} onClick={onClose}>
-    <div style={{ background: C.s2, border: `1px solid ${C.bdB}`, borderRadius: "2px", padding: "22px", width, maxWidth: "95vw", boxShadow: "0 24px 64px rgba(0,0,0,.6)" }} onClick={e => e.stopPropagation()}>
+  <div style={{ position: "fixed", inset: 0, background: "rgba(27,26,58,.38)", backdropFilter: "blur(2px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 }} onClick={onClose}>
+    <div style={{ background: C.s1, border: `1px solid ${C.bdB}`, borderRadius: "8px", padding: "22px", width, maxWidth: "95vw", boxShadow: "0 24px 64px rgba(27,26,58,.18)" }} onClick={e => e.stopPropagation()}>
       {children}
     </div>
   </div>
@@ -190,7 +259,7 @@ const InstallPluginModal = ({ token, plugin, onClose, onInstalled }) => {
 
   return (
     <Modal onClose={onClose}>
-      <ModalHeader title="INSTALL PLUGIN" color={C.green} onClose={onClose} />
+      <ModalHeader title="INSTALL PLUGIN" color={C.purple} onClose={onClose} />
       <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "14px" }}>
         {plugin.name} · {plugin.deploy_mode === "compose" ? "compose" : `port ${plugin.container_port}`}
       </div>
@@ -259,11 +328,11 @@ const UploadModal = ({ token, project, onClose, onUploaded }) => {
     finally { setBusy(false); }
   };
 
-  const dropStyle = { flex: 1, display: "block", border: `2px dashed ${C.bdB}`, borderRadius: "2px", padding: "16px", textAlign: "center", background: C.s1, cursor: "pointer" };
+  const dropStyle = { flex: 1, display: "block", border: `2px dashed ${C.bdB}`, borderRadius: "8px", padding: "16px", textAlign: "center", background: C.s1, cursor: "pointer" };
 
   return (
     <Modal onClose={onClose} width={540}>
-      <ModalHeader title="UPLOAD FILES" color={C.green} onClose={onClose} />
+      <ModalHeader title="UPLOAD FILES" color={C.purple} onClose={onClose} />
       <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "14px", lineHeight: "1.6" }}>
         {project} · a <span style={{ color: C.txt }}>Dockerfile</span> or <span style={{ color: C.txt }}>docker-compose.yml</span> in the
         uploaded root sets the deploy mode and provisions automatically (compose wins).
@@ -312,14 +381,14 @@ const StatusModal = ({ data, project, onClose }) => (
     <ModalHeader title={`STATUS — ${project}`} color={C.muted} onClose={onClose} />
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px", marginBottom: "14px" }}>
       {[["operation", data.operation || "—"], ["status", data.status], ["exit code", data.exit_code ?? "—"]].map(([k, v]) => (
-        <div key={k} style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "2px", padding: "8px 12px" }}>
+        <div key={k} style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "8px 12px" }}>
           <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.1em", marginBottom: "4px" }}>{k.toUpperCase()}</div>
           <div style={{ color: k === "status" ? (SC[v] || C.txt) : C.txt, fontFamily: C.ff, fontSize: "12px" }}>{String(v)}</div>
         </div>
       ))}
     </div>
     <Field label="LOGS">
-      <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "2px", padding: "10px 12px", fontFamily: C.ff, fontSize: "11px", color: C.txt, lineHeight: "1.65", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: "220px", overflow: "auto" }}>
+      <div style={{ background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "10px 12px", fontFamily: C.mono, fontSize: "11px", color: C.txt, lineHeight: "1.65", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: "220px", overflow: "auto" }}>
         {data.logs || <span style={{ color: C.dim }}>(no logs)</span>}
       </div>
     </Field>
@@ -340,7 +409,7 @@ const SslModal = ({ data, project, onClose }) => (
     </div>
     {data.message && (
       <Field label="CERTBOT OUTPUT">
-        <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "2px", padding: "10px 12px", fontFamily: C.ff, fontSize: "11px", color: C.txt, lineHeight: "1.6", whiteSpace: "pre-wrap", maxHeight: "200px", overflow: "auto" }}>
+        <div style={{ background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "10px 12px", fontFamily: C.mono, fontSize: "11px", color: C.txt, lineHeight: "1.6", whiteSpace: "pre-wrap", maxHeight: "200px", overflow: "auto" }}>
           {data.message}
         </div>
       </Field>
@@ -351,6 +420,71 @@ const SslModal = ({ data, project, onClose }) => (
   </Modal>
 );
 
+// ── Domain modal (set / clear a component's custom domain) ──────────────────────
+const DomainModal = ({ token, project, service = null, info, onClose, onDone }) => {
+  const [domain, setDomain] = useState(info.custom_domain || "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const title = service ? `${project} → ${service}` : project;
+
+  const path = service
+    ? `/projects/${project}/services/${service}/domain`
+    : `/projects/${project}/domain`;
+
+  const submit = async (clear) => {
+    const value = clear ? null : domain.trim();
+    if (!clear && (!value || !value.includes("."))) return setError("Enter a valid domain (e.g. app.acme.com)");
+    setError(""); setBusy(true);
+    try {
+      const data = await mkApi(token).post(path, { custom_domain: value });
+      setResult(data);
+      onDone && onDone();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  // Pull the affected component out of the returned project to report its new state.
+  const after = result && (service ? (result.services || []).find(s => s.name === service) : result.container);
+
+  return (
+    <Modal onClose={onClose}>
+      <ModalHeader title={`CUSTOM DOMAIN — ${title}`} color={C.blue} onClose={onClose} />
+      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "12px", lineHeight: "1.6" }}>
+        currently served at <span style={{ color: C.blue }}>{info.subdomain || "—"}</span>
+        {info.custom_domain && <span style={{ color: C.dim }}> (custom)</span>}
+      </div>
+      <Field label="CUSTOM DOMAIN (FQDN)" style={{ marginBottom: "8px" }}>
+        <TextIn value={domain} onChange={setDomain} placeholder="app.acme.com" />
+      </Field>
+      <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", marginBottom: "12px" }}>
+        Point the domain's A record at this server first. SSL is issued on save; if DNS hasn't
+        propagated yet the component stays HTTP-only and you can save again later to retry.
+      </div>
+
+      {after && (
+        <div style={{ marginBottom: "12px" }}>
+          <Ok msg={`now serving ${after.subdomain}`} />
+          <div style={{ color: after.ssl_enabled ? C.green : C.amber, fontFamily: C.ff, fontSize: "11px", marginTop: "8px" }}>
+            {after.ssl_enabled ? "✓ SSL enabled" : "⚠ SSL not yet enabled (retry once DNS points here)"}
+          </div>
+        </div>
+      )}
+      {error && <Err msg={error} />}
+
+      <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", marginTop: "12px" }}>
+        <div>
+          {info.custom_domain && <Btn v="amber" onClick={() => submit(true)} busy={busy}>clear</Btn>}
+        </div>
+        <div style={{ display: "flex", gap: "8px" }}>
+          <Btn v="ghost" onClick={onClose} disabled={busy}>close</Btn>
+          <Btn v="primary" onClick={() => submit(false)} busy={busy}>set domain</Btn>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
 // ── Row cells (shared layout) ───────────────────────────────────────────────────
 const Cells = ({ label, info }) => (
   <>
@@ -359,6 +493,9 @@ const Cells = ({ label, info }) => (
       {info.subdomain
         ? <a href={`https://${info.subdomain}`} target="_blank" rel="noreferrer" style={{ color: C.muted, textDecoration: "none" }}>{info.subdomain}</a>
         : <span style={{ color: C.dim }}>—</span>}
+      {info.custom_domain && (
+        <span style={{ color: C.blue, background: "#e9f0ff", border: "1px solid #cfddff", fontSize: "8px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "8px", marginLeft: "7px" }}>custom</span>
+      )}
     </td>
     <td style={{ padding: "7px 10px", fontFamily: C.ff, fontSize: "11px", color: C.txt, textAlign: "right", minWidth: "55px" }}>{info.local_port ?? "—"}</td>
     <td style={{ padding: "7px 10px", textAlign: "center", minWidth: "38px" }}>
@@ -369,7 +506,7 @@ const Cells = ({ label, info }) => (
 );
 
 // ── Container row (dockerfile mode: one container per project, project-level ops) ──
-const ContainerRow = ({ project, info, token, onOperation }) => {
+const ContainerRow = ({ project, info, token, onOperation, onRefresh }) => {
   const [busy, setBusy] = useState({});
   const [modal, setModal] = useState(null); // null | {type, data?}
 
@@ -402,6 +539,7 @@ const ContainerRow = ({ project, info, token, onOperation }) => {
             <Btn sm v="danger" onClick={() => act("stop")} busy={busy.stop} disabled={!isRunning} title="Stop container">stop</Btn>
             <Btn sm v="amber" onClick={() => setModal({ type: "exec" })} disabled={!isRunning} title="Exec command in container">exec</Btn>
             <Btn sm onClick={() => act("ssl")} busy={busy.ssl} title="Issue/renew SSL cert">ssl</Btn>
+            <Btn sm v="blue" onClick={() => setModal({ type: "domain" })} title="Set or clear a custom domain">domain</Btn>
             <Btn sm v="ghost" onClick={() => act("status")} busy={busy.status} title="View job status & logs">status</Btn>
           </div>
         </td>
@@ -410,17 +548,24 @@ const ContainerRow = ({ project, info, token, onOperation }) => {
       {modal?.type === "exec"       && <ExecModal project={project} onClose={() => setModal(null)} onSubmit={(cmd) => act("exec", { command: cmd })} />}
       {modal?.type === "status"     && <StatusModal data={modal.data} project={project} onClose={() => setModal(null)} />}
       {modal?.type === "ssl"        && <SslModal data={modal.data} project={project} onClose={() => setModal(null)} />}
+      {modal?.type === "domain"     && <DomainModal token={token} project={project} info={info} onClose={() => setModal(null)} onDone={onRefresh} />}
     </>
   );
 };
 
-// ── Service row (compose mode: display-only — lifecycle is project-level) ─────────
-const ServiceRow = ({ info }) => (
-  <tr style={{ borderBottom: `1px solid ${C.bd}` }}>
-    <Cells label={info.name} info={info} />
-    <td style={{ padding: "6px 8px", fontFamily: C.ff, fontSize: "10px", color: C.dim }}>—</td>
-  </tr>
-);
+// ── Service row (compose mode: display-only lifecycle, but custom domain is per-service) ──
+const ServiceRow = ({ project, info, token, onRefresh }) => {
+  const [modal, setModal] = useState(null);
+  return (
+    <tr style={{ borderBottom: `1px solid ${C.bd}` }}>
+      <Cells label={info.name} info={info} />
+      <td style={{ padding: "6px 8px" }}>
+        <Btn sm v="blue" onClick={() => setModal("domain")} title="Set or clear a custom domain">domain</Btn>
+        {modal === "domain" && <DomainModal token={token} project={project} service={info.name} info={info} onClose={() => setModal(null)} onDone={onRefresh} />}
+      </td>
+    </tr>
+  );
+};
 
 // ── Project card ──────────────────────────────────────────────────────────────
 const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh }) => {
@@ -461,15 +606,15 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh }) => {
 
   return (
     <>
-      <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "2px", marginBottom: "8px", overflow: "hidden" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: C.s2, borderBottom: `1px solid ${C.bd}` }}>
+      <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", marginBottom: "10px", overflow: "hidden", boxShadow: C.shadow }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: C.s2, borderBottom: `1px solid ${C.bd}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <span style={{ color: C.green, fontFamily: C.ff, fontSize: "13px", fontWeight: 600 }}>{project.name}</span>
+            <span style={{ color: C.purple, fontFamily: C.ff, fontSize: "14px", fontWeight: 600 }}>{project.name}</span>
             {isCompose && (
-              <span style={{ color: C.green, background: "#182e22", border: "1px solid #254838", fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "2px" }}>compose</span>
+              <span style={{ color: C.purple, background: "#f0ecfe", border: "1px solid #dccffb", fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "8px" }}>compose</span>
             )}
             {isPending && (
-              <span style={{ color: C.amber, background: "#28220e", border: "1px solid #473a18", fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "2px" }}>pending</span>
+              <span style={{ color: C.amber, background: "#fbf2e0", border: "1px solid #f0e1bc", fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "8px" }}>pending</span>
             )}
             <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>
               {isCompose ? `${project.services?.length ?? 0} service${project.services?.length !== 1 ? "s" : ""}` : isPending ? "awaiting upload" : "container"}
@@ -493,11 +638,11 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh }) => {
 
         {isPending ? (
           <div style={{ padding: "18px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
-            awaiting upload — use <span style={{ color: C.green }}>upload</span> to add a Dockerfile or docker-compose.yml
+            awaiting upload — use <span style={{ color: C.purple }}>upload</span> to add a Dockerfile or docker-compose.yml
           </div>
         ) : isCompose && (project.services || []).length === 0 ? (
           <div style={{ padding: "18px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
-            no services yet — use <span style={{ color: C.green }}>upload</span> to add a docker-compose.yml
+            no services yet — use <span style={{ color: C.purple }}>upload</span> to add a docker-compose.yml
           </div>
         ) : (
         <div style={{ overflowX: "auto" }}>
@@ -509,9 +654,9 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh }) => {
             </thead>
             <tbody>
               {isCompose
-                ? (project.services || []).map(s => <ServiceRow key={s.name} info={s} />)
+                ? (project.services || []).map(s => <ServiceRow key={s.name} project={project.name} info={s} token={token} onRefresh={onRefresh} />)
                 : (project.container
-                    ? <ContainerRow project={project.name} info={project.container} token={token} onOperation={onOperation} />
+                    ? <ContainerRow project={project.name} info={project.container} token={token} onOperation={onOperation} onRefresh={onRefresh} />
                     : null)}
             </tbody>
           </table>
@@ -545,9 +690,9 @@ const CreateForm = ({ token, onCreated, onCancel }) => {
   const slug = name.trim().toLowerCase();
 
   return (
-    <div style={{ background: C.s2, border: `1px solid ${C.bdB}`, borderRadius: "2px", padding: "18px", marginBottom: "12px" }}>
+    <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "18px", marginBottom: "12px", boxShadow: C.shadow }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
-        <span style={{ color: C.green, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em" }}>NEW PROJECT</span>
+        <span style={{ color: C.purple, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>NEW PROJECT</span>
         <Btn v="ghost" sm onClick={onCancel}>✕</Btn>
       </div>
 
@@ -555,12 +700,13 @@ const CreateForm = ({ token, onCreated, onCancel }) => {
         <Field label="PROJECT NAME (used as the subdomain)">
           <TextIn value={name} onChange={setName} placeholder="myapp" />
           <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", marginTop: "5px" }}>
-            → served at <span style={{ color: C.blue }}>https://{slug || "myapp"}.cloudopen.space</span>
+            → served at <span style={{ color: C.blue }}>https://{slug || "myapp"}.your_domain.com</span>
+            <span style={{ color: C.dim }}> · point a custom domain at it later from the project card</span>
           </div>
         </Field>
 
-        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "2px", padding: "10px 12px" }}>
-          Creates an empty project. After creating it, use <span style={{ color: C.green }}>upload</span> on the project card to
+        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "10px 12px" }}>
+          Creates an empty project. After creating it, use <span style={{ color: C.purple }}>upload</span> on the project card to
           send your files (a single file or a whole folder). The server scans the uploaded root for a
           <span style={{ color: C.txt }}> Dockerfile</span> or <span style={{ color: C.txt }}>docker-compose.yml</span>, picks the
           deploy mode automatically (compose wins), and wires up nginx + SSL. A Dockerfile must
@@ -578,53 +724,87 @@ const CreateForm = ({ token, onCreated, onCancel }) => {
   );
 };
 
-// ── Plugin panel ──────────────────────────────────────────────────────────────
+// ── Plugin panel (master-detail: name list ←25% │ 75%→ selected plugin detail) ──
 const PluginPanel = ({ token, onInstalled, onCancel }) => {
   const [plugins, setPlugins] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [selected, setSelected] = useState(null);   // plugin name
   const [installing, setInstalling] = useState(null);
 
   useEffect(() => {
     mkApi(token).get("/plugins")
       // `system` plugins create hidden projects and are not offered in the UI
-      .then(ps => setPlugins(ps.filter(p => p.type !== "system")))
+      .then(ps => {
+        const list = ps.filter(p => p.type !== "system");
+        setPlugins(list);
+        if (list.length) setSelected(list[0].name);
+      })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
   }, [token]);
 
   const chip = (text, accent) => (
-    <span style={{ background: accent ? "#182e22" : C.s3, color: accent ? C.green : C.txt, border: `1px solid ${accent ? "#254838" : C.bd}`, borderRadius: "2px", padding: "2px 8px", fontFamily: C.ff, fontSize: "10px" }}>{text}</span>
+    <span style={{ background: accent ? "#f0ecfe" : C.s3, color: accent ? C.purple : C.muted, border: `1px solid ${accent ? "#dccffb" : C.bd}`, borderRadius: "8px", padding: "2px 9px", fontFamily: C.ff, fontSize: "10px" }}>{text}</span>
   );
 
+  const active = plugins.find(p => p.name === selected) || null;
+
   return (
-    <div style={{ background: C.s2, border: `1px solid ${C.bdB}`, borderRadius: "2px", padding: "18px", marginBottom: "12px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
-        <span style={{ color: C.green, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em" }}>AVAILABLE PLUGINS</span>
+    <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", marginBottom: "12px", boxShadow: C.shadow, overflow: "hidden" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
+        <span style={{ color: C.purple, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>AVAILABLE PLUGINS</span>
         <Btn v="ghost" sm onClick={onCancel}>✕</Btn>
       </div>
 
       {loading ? (
-        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", padding: "10px 0" }}>loading plugins…</div>
+        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", padding: "20px" }}>loading plugins…</div>
       ) : error ? (
-        <Err msg={error} />
+        <div style={{ padding: "16px" }}><Err msg={error} /></div>
       ) : plugins.length === 0 ? (
-        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", padding: "10px 0" }}>no plugins available</div>
+        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", padding: "20px" }}>no plugins available</div>
       ) : (
-        <div style={{ display: "grid", gap: "8px" }}>
-          {plugins.map(p => (
-            <div key={p.name} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "2px", padding: "10px 12px" }}>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px", flexWrap: "wrap" }}>
-                  <span style={{ color: C.green, fontFamily: C.ff, fontSize: "12px", fontWeight: 600 }}>{p.name}</span>
-                  {chip(p.deploy_mode === "compose" ? "compose" : `port ${p.container_port}`)}
-                  {p.has_install && chip("install.sh", true)}
+        <div style={{ display: "flex", minHeight: "360px" }}>
+          {/* Left: plugin name list (~25%) */}
+          <div style={{ width: "25%", minWidth: "170px", maxWidth: "260px", flexShrink: 0, borderRight: `1px solid ${C.bd}`, background: C.s2, padding: "8px" }}>
+            {plugins.map(p => {
+              const sel = p.name === selected;
+              return (
+                <button key={p.name} onClick={() => setSelected(p.name)} style={{
+                  display: "block", width: "100%", textAlign: "left",
+                  background: sel ? "#f0ecfe" : "transparent",
+                  color: sel ? C.purple : C.txt,
+                  border: `1px solid ${sel ? "#dccffb" : "transparent"}`,
+                  borderRadius: "8px", padding: "9px 11px", marginBottom: "2px", cursor: "pointer",
+                  fontFamily: C.ff, fontSize: "13px", fontWeight: sel ? 600 : 500,
+                }}>
+                  {p.name}
+                  <div style={{ color: sel ? C.purple : C.dim, fontSize: "10px", fontWeight: 400, marginTop: "2px", opacity: sel ? 0.8 : 1 }}>
+                    {p.deploy_mode === "compose" ? "compose" : "dockerfile"}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Right: selected plugin detail (~75%) */}
+          <div style={{ flex: 1, minWidth: 0, padding: "20px 22px", position: "relative" }}>
+            {active && (
+              <>
+                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "16px", marginBottom: "16px" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ color: C.txt, fontFamily: C.ff, fontSize: "20px", fontWeight: 700, marginBottom: "8px" }}>{active.name}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "7px", flexWrap: "wrap" }}>
+                      {chip(active.deploy_mode === "compose" ? "compose" : `port ${active.container_port}`)}
+                      {active.has_install && chip("install.sh", true)}
+                    </div>
+                  </div>
+                  <Btn v="green" onClick={() => setInstalling(active)} style={{ flexShrink: 0 }}>install</Btn>
                 </div>
-                {p.description && <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.5" }}>{p.description}</div>}
-              </div>
-              <Btn v="primary" onClick={() => setInstalling(p)}>install</Btn>
-            </div>
-          ))}
+                <Markdown text={active.about || active.description} />
+              </>
+            )}
+          </div>
         </div>
       )}
 
@@ -658,9 +838,9 @@ const LoginScreen = ({ onAuth }) => {
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ width: 380, background: C.s1, border: `1px solid ${C.bdB}`, borderRadius: "2px", padding: "36px" }}>
+      <div style={{ width: 380, background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "36px", boxShadow: "0 12px 48px rgba(27,26,58,.12)" }}>
         <div style={{ marginBottom: "30px" }}>
-          <div style={{ color: C.green, fontFamily: C.ff, fontSize: "20px", marginBottom: "6px" }}>🐾 freeholdy</div>
+          <div style={{ color: C.purple, fontFamily: C.ff, fontSize: "22px", fontWeight: 700, marginBottom: "6px" }}>🐾 freeholdy</div>
           <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", letterSpacing: "0.12em" }}>CLOUDOPEN.SPACE CONTROL PANEL</div>
         </div>
 
@@ -674,9 +854,11 @@ const LoginScreen = ({ onAuth }) => {
           connect →
         </Btn>
 
-        <div style={{ marginTop: "22px", color: C.dim, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.7", borderTop: `1px solid ${C.bd}`, paddingTop: "14px" }}>
-          generate token:<br />
-          python scripts/generate_token.py generate --name web_ui
+        <div style={{ marginTop: "22px", color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.7", borderTop: `1px solid ${C.bd}`, paddingTop: "14px" }}>
+          generate token:
+          <div style={{ marginTop: "6px", color: C.txt, fontFamily: C.mono, fontSize: "10px", background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "7px 9px", wordBreak: "break-all" }}>
+            python scripts/generate_token.py generate --name web_ui
+          </div>
         </div>
       </div>
     </div>
@@ -777,11 +959,11 @@ const Dashboard = ({ token, onLogout }) => {
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.txt, fontFamily: C.ff }}>
       {/* Header */}
-      <div style={{ background: C.s1, borderBottom: `1px solid ${C.bd}`, padding: "0 20px", display: "flex", alignItems: "center", justifyContent: "space-between", height: "44px", position: "sticky", top: 0, zIndex: 50 }}>
+      <div style={{ background: C.s1, borderBottom: `1px solid ${C.bd}`, padding: "0 22px", display: "flex", alignItems: "center", justifyContent: "space-between", height: "52px", position: "sticky", top: 0, zIndex: 50, boxShadow: "0 1px 3px rgba(27,26,58,.06)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
-          <span style={{ color: C.green, fontSize: "14px" }}>🐾 freeholdy</span>
+          <span style={{ color: C.purple, fontSize: "15px", fontWeight: 700 }}>🐾 freeholdy</span>
           <span style={{ width: 1, height: 16, background: C.bd, display: "inline-block" }} />
-          <span style={{ color: C.dim, fontSize: "10px" }}>cloudopen.space</span>
+          <span style={{ color: C.dim, fontSize: "10px" }}>your_domain.com</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
           <span style={{ color: healthColor, fontFamily: C.ff, fontSize: "10px", display: "flex", alignItems: "center", gap: "5px" }}>
@@ -822,7 +1004,7 @@ const Dashboard = ({ token, onLogout }) => {
         {loading ? (
           <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", padding: "24px 0" }}>loading projects…</div>
         ) : projects.length === 0 ? (
-          <div style={{ border: `1px dashed ${C.bd}`, borderRadius: "2px", padding: "40px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
+          <div style={{ border: `1px dashed ${C.bd}`, borderRadius: "8px", padding: "40px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
             no projects yet — create one above
           </div>
         ) : (
@@ -836,8 +1018,8 @@ const Dashboard = ({ token, onLogout }) => {
 
         <LogPane log={activeLog} onClose={() => { setActiveLog(null); if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } }} onAbort={handleAbort} />
 
-        <div style={{ marginTop: "20px", padding: "12px", background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "2px" }}>
-          <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>
+        <div style={{ marginTop: "20px", padding: "12px 14px", background: C.s2, border: `1px solid ${C.bd}`, borderRadius: "8px" }}>
+          <span style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px" }}>
             ⚠ direct SFTP transfers (fhold sftp-upload) are CLI-only — the web UI uploads files over the API via the upload button
           </span>
         </div>
@@ -855,17 +1037,21 @@ export default function App() {
   return (
     <>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap');
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: #07070f; }
-        ::-webkit-scrollbar { width: 5px; height: 5px; }
-        ::-webkit-scrollbar-track { background: #0c0c1a; }
-        ::-webkit-scrollbar-thumb { background: #2c2c48; border-radius: 3px; }
-        input::placeholder { color: #383d55; }
-        select option { background: #111120; color: #c8d0e8; }
+        html, body { background: #f4f4fb; }
+        body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; color: #1b1a3a; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f0fa; }
+        ::-webkit-scrollbar-thumb { background: #d6d2e8; border-radius: 8px; }
+        ::-webkit-scrollbar-thumb:hover { background: #c2bdde; }
+        input::placeholder { color: #a6a3c0; }
+        input:focus { border-color: #673de6 !important; box-shadow: 0 0 0 3px rgba(103,61,230,.12); }
+        select option { background: #ffffff; color: #1b1a3a; }
         a { transition: color .15s; }
-        button { transition: opacity .1s; }
-        button:hover:not(:disabled) { opacity: 0.85; }
+        a:hover { color: #673de6; }
+        button { transition: background .12s, opacity .12s, box-shadow .12s; }
+        button:hover:not(:disabled) { filter: brightness(0.98); }
       `}</style>
       <Dashboard token={token} onLogout={() => { localStorage.removeItem("freeholdy_token"); setToken(""); }} />
     </>

@@ -19,13 +19,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="freeholdy",
-    description="Docker + Nginx orchestrator for pet projects on cloudopen.space",
+    description="Docker + Nginx orchestrator for pet projects on your_domain.com",
     version="0.1.0",
     lifespan=lifespan,
 )
 
-# The web UI is served from a different origin (cloudopen.space) than the API
-# (api.cloudopen.space), so the browser issues CORS preflight requests. Auth is via
+# The web UI is served from a different origin (your_domain.com) than the API
+# (api.your_domain.com), so the browser issues CORS preflight requests. Auth is via
 # the Authorization header (no cookies), so credentials are not allowed.
 app.add_middleware(
     CORSMiddleware,

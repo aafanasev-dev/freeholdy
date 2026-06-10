@@ -15,11 +15,11 @@ from sqlalchemy.orm import Session
 
 from app.models.database import get_db
 from app.models.orm import Project, ComposeService
-from app.models.schemas import DockerJobStatusResponse
+from app.models.schemas import DockerJobStatusResponse, SetDomainRequest, ProjectResponse
 from app.auth import require_auth
 from app.config import settings
 from app.services import docker_service, nginx_service, compose_service
-from app.routers.projects import _next_port
+from app.routers.projects import _next_port, assert_domain_available, project_response
 
 router = APIRouter()
 
@@ -84,7 +84,9 @@ def provision_compose(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Re-provision: drop existing service rows first so their ports are freed.
+    # Re-provision: capture any custom domains keyed by service name so they survive,
+    # then drop existing service rows first so their ports are freed.
+    prior_custom_domains = {s.name: s.custom_domain for s in project.services if s.custom_domain}
     for old in list(project.services):
         db.delete(old)
     db.flush()
@@ -107,12 +109,15 @@ def provision_compose(
                 subdomain = ".".join(s for s in [svc["name"], domain_prefix, settings.BASE_DOMAIN] if s)
         else:
             subdomain = f"{svc['name']}.{project_name}.{settings.BASE_DOMAIN}"
+        custom_domain = prior_custom_domains.get(svc["name"])
+        effective = custom_domain or subdomain
         svc["local_port"] = port      # augment for write_files + response
         svc["subdomain"] = subdomain
         row = ComposeService(
             project_id=project.id,
             name=svc["name"],
             subdomain=subdomain,
+            custom_domain=custom_domain,
             local_port=port,
             container_port=svc["container_port"],
             container_name=f"freeholdy_{project_name}_{svc['name']}",
@@ -120,7 +125,7 @@ def provision_compose(
         )
         db.add(row)
         rows_by_name[svc["name"]] = row
-        endpoints.append({"subdomain": subdomain, "local_port": port, "websocket": svc["websocket"]})
+        endpoints.append({"subdomain": effective, "local_port": port, "websocket": svc["websocket"]})
 
     db.flush()
 
@@ -129,18 +134,25 @@ def provision_compose(
     project.compose_path = compose_path
 
     # nginx + SSL for the exposed services.
-    try:
-        if endpoints:
+    if endpoints:
+        try:
             ssl_result = nginx_service.setup_nginx(project_name, endpoints)
-            for name, row in rows_by_name.items():
-                if ssl_result["ssl"].get(row.subdomain, {}).get("success"):
-                    row.ssl_enabled = True
-    except PermissionError:
-        db.rollback()
-        raise HTTPException(
-            status_code=500,
-            detail="Permission denied writing nginx config — run freeholdy with sudo or grant write access to nginx dirs",
-        )
+        except PermissionError:
+            db.rollback()
+            nginx_service.remove_config(project_name)
+            raise HTTPException(
+                status_code=500,
+                detail="Permission denied writing nginx config — run freeholdy with sudo or grant write access to nginx dirs",
+            )
+        if ssl_result.get("error"):
+            # nginx -t rejected the generated config: roll back so we don't leave a broken
+            # nginx config on disk paired with "live" service rows.
+            db.rollback()
+            nginx_service.remove_config(project_name)
+            raise HTTPException(status_code=500, detail=ssl_result["error"])
+        for name, row in rows_by_name.items():
+            if ssl_result["ssl"].get(row.effective_domain, {}).get("success"):
+                row.ssl_enabled = True
 
     db.commit()
 
@@ -153,6 +165,47 @@ def provision_compose(
 # app/routers/projects.py): it writes the file into the per-project directory, detects it,
 # and calls provision_compose below. provision_compose stays here as the shared service
 # function (the plugins router imports it too).
+
+
+# ── Custom domain ─────────────────────────────────────────────────────────────
+
+@router.post(
+    "/{project_name}/services/{service_name}/domain",
+    response_model=ProjectResponse,
+    summary="Set or clear a compose service's custom domain (re-runs nginx + certbot)",
+)
+def set_service_domain(
+    project_name: str,
+    service_name: str,
+    request: SetDomainRequest,
+    db: Session = Depends(get_db),
+    _=Depends(require_auth),
+):
+    """Point one exposed service at a custom domain instead of its
+    `{service}.{project}.{domain}` subdomain. Pass `custom_domain: null` (or empty) to
+    revert. Rewrites the whole project's nginx config and (re)issues certs for every
+    exposed service; if DNS doesn't yet point here the service stays HTTP-only."""
+    project = _get_compose_project(project_name, db)
+    target = next((s for s in project.services if s.name == service_name), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found in project '{project_name}'")
+
+    if request.custom_domain:
+        assert_domain_available(db, request.custom_domain, exclude_service_id=target.id)
+    target.custom_domain = request.custom_domain
+    db.commit()
+
+    endpoints = [{
+        "subdomain": s.effective_domain,
+        "local_port": s.local_port,
+        "websocket": bool(s.websocket),
+    } for s in project.services]
+    ssl_result = nginx_service.setup_nginx(project_name, endpoints)
+    for s in project.services:
+        s.ssl_enabled = bool(ssl_result["ssl"].get(s.effective_domain, {}).get("success"))
+    db.commit()
+    db.refresh(project)
+    return project_response(project)
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────

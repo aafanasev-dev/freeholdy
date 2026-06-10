@@ -15,12 +15,12 @@ def _config_filename(project_name: str) -> str:
 
 
 def generate_http_config(project_name: str, parts: list[dict]) -> str:
-    """HTTP-only config — used first so certbot can complete ACME challenge.
+    """HTTP-only config — used first so certbot can complete the ACME challenge.
 
     `parts` must already be filtered to the endpoints that should be proxied
     (callers drop `database` parts; compose passes only its exposed services)."""
     template = _jinja.get_template("nginx_http.conf.j2")
-    return template.render(parts=parts)
+    return template.render(parts=parts, webroot=settings.CERTBOT_WEBROOT)
 
 
 def generate_ssl_config(project_name: str, parts: list[dict]) -> str:
@@ -28,7 +28,7 @@ def generate_ssl_config(project_name: str, parts: list[dict]) -> str:
 
     `parts` must already be filtered to the endpoints that should be proxied."""
     template = _jinja.get_template("nginx_ssl.conf.j2")
-    return template.render(parts=parts)
+    return template.render(parts=parts, webroot=settings.CERTBOT_WEBROOT)
 
 
 def _write_config(project_name: str, content: str) -> str:
@@ -78,11 +78,23 @@ def reload() -> Tuple[bool, str]:
 # ── SSL ───────────────────────────────────────────────────────────────────────
 
 def issue_cert(subdomain: str) -> Tuple[bool, str]:
-    """Issue Let's Encrypt cert for subdomain via certbot --nginx plugin."""
+    """Issue a Let's Encrypt cert for `subdomain` via certbot's webroot authenticator.
+
+    We deliberately use `--webroot` (not `--nginx`): freeholdy owns the nginx config
+    files (sites dirs are root:nginx-managers 1775), and the `--nginx` plugin rewrites
+    those files in place with a checkpoint/revert dance that fights that ownership and,
+    if interrupted, leaves a poison checkpoint that bricks all later issuance. With
+    webroot, certbot only drops the challenge token under CERTBOT_WEBROOT (served by the
+    `/.well-known/acme-challenge/` location both nginx templates emit) and never touches
+    nginx config. The webroot is created by install.sh; we also try here best-effort."""
+    try:
+        os.makedirs(os.path.join(settings.CERTBOT_WEBROOT, ".well-known", "acme-challenge"), exist_ok=True)
+    except OSError:
+        pass  # /var/www is root-owned; install.sh creates it. certbot (as root) fills it in.
     result = subprocess.run(
         [
             "sudo", "certbot", "certonly",
-            "--nginx",
+            "--webroot", "-w", settings.CERTBOT_WEBROOT,
             "--non-interactive",
             "--agree-tos",
             "--email", settings.CERTBOT_EMAIL,

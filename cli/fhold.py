@@ -200,7 +200,7 @@ def _status_text(status: str) -> Text:
 
 @click.group()
 def cli():
-    """freeholdy CLI  —  deploy pet projects on cloudopen.space"""
+    """freeholdy CLI  —  deploy pet projects on your_domain.com"""
 
 
 # ── health ─────────────────────────────────────────────────────────────────────
@@ -252,9 +252,12 @@ def list_projects():
 
         for label, info in rows:
             ssl_icon = "[green]✓[/]" if info.get("ssl_enabled") else "[dim]✗[/]"
+            domain = info.get("subdomain") or "[dim]—[/]"
+            if info.get("custom_domain"):
+                domain += "  [magenta]· custom[/]"
             table.add_row(
                 label,
-                info.get("subdomain") or "[dim]—[/]",
+                domain,
                 str(info.get("local_port") or "—"),
                 info.get("container_name") or "[dim]—[/]",
                 ssl_icon,
@@ -843,6 +846,55 @@ def issue_ssl(project: str):
     console.print(f"{icon} SSL: {ssl_status}")
     if data.get("message"):
         console.print(Panel(data["message"].strip(), title="certbot output", border_style="dim"))
+
+
+# ── domain ───────────────────────────────────────────────────────────────────────
+
+@cli.command("domain")
+@click.argument("project")
+@click.argument("domain", required=False)
+@click.option("--service", "-s", default=None, metavar="SERVICE",
+              help="For compose projects: the service to point at the domain.")
+@click.option("--clear", is_flag=True, help="Remove the custom domain (revert to the auto subdomain).")
+def set_domain(project: str, domain: str | None, service: str | None, clear: bool):
+    """Set or clear a custom domain for a project (or a compose SERVICE).
+
+    Without a custom domain a component is served at its auto-generated subdomain. Point
+    your domain's A record at the VPS first; if DNS hasn't propagated the component is
+    served HTTP-only and you can re-run `fhold ssl` (dockerfile) or set the domain again
+    later.
+
+    \b
+    Examples:
+      fhold domain myapp app.acme.com           # dockerfile project
+      fhold domain myproj acme.com -s web        # one compose service
+      fhold domain myapp --clear                 # revert to the subdomain
+    """
+    if clear and domain:
+        console.print("[bold red]Error:[/] pass either a DOMAIN or --clear, not both")
+        sys.exit(1)
+    if not clear and not domain:
+        console.print("[bold red]Error:[/] provide a DOMAIN (or use --clear)")
+        sys.exit(1)
+
+    path = (f"/projects/{project}/services/{service}/domain" if service
+            else f"/projects/{project}/domain")
+    target = f"[cyan]{project}[/]" + (f" service [cyan]{service}[/]" if service else "")
+    action = "Clearing custom domain for" if clear else f"Pointing {target} at [blue]{domain}[/] —"
+    console.print(f"{action} {target if clear else ''}…")
+    with console.status("nginx + certbot running…"):
+        data = _post(path, json={"custom_domain": None if clear else domain})
+
+    # Find the affected component in the returned project to report its effective domain + SSL.
+    if service:
+        info = next((s for s in data.get("services", []) if s["name"] == service), None)
+    else:
+        info = data.get("container")
+    if info:
+        ssl_status = "[green]enabled[/]" if info.get("ssl_enabled") else "[yellow]not yet enabled (retry once DNS points here)[/]"
+        console.print(f"[bold green]✓[/] Now serving [blue]{info.get('subdomain')}[/]  ·  SSL: {ssl_status}")
+    else:
+        console.print("[bold green]✓ Done[/]")
 
 
 # ── SFTP helpers ───────────────────────────────────────────────────────────────

@@ -20,9 +20,9 @@ npm run preview    # preview the build locally
 ## Deploy (Docker + nginx)
 
 The app runs as a Docker container (builds the bundle and serves it with `vite preview`),
-fronted by the host's nginx for TLS at `https://cloudopen.space`.
+fronted by the host's nginx for TLS at `https://your_domain.com`.
 
-The API URL is baked in at build time (`BASE` in `src/App.jsx` → `https://api.cloudopen.space`),
+The API URL is baked in at build time (`BASE` in `src/App.jsx` → `https://api.your_domain.com`),
 so rebuild the image after changing it.
 
 **1. Build and run the container** (bound to loopback, like all freeholdy containers):
@@ -38,20 +38,20 @@ docker run -d --name freeholdy_webui --restart unless-stopped \
 ```bash
 sudo cp nginx-webui.conf /etc/nginx/sites-available/freeholdy_webui.conf
 sudo ln -s /etc/nginx/sites-available/freeholdy_webui.conf /etc/nginx/sites-enabled/
-sudo certbot certonly --nginx -d cloudopen.space   # the HTTP block must be live first
+sudo certbot certonly --nginx -d your_domain.com   # the HTTP block must be live first
 sudo nginx -t && sudo nginx -s reload
 ```
 
-`nginx-webui.conf` redirects `:80` → `:443` and proxies `https://cloudopen.space` to the
-container on `127.0.0.1:14173`. Add `cloudopen.space` to the `DOMAINS` array in
+`nginx-webui.conf` redirects `:80` → `:443` and proxies `https://your_domain.com` to the
+container on `127.0.0.1:14173`. Add `your_domain.com` to the `DOMAINS` array in
 `scripts/cert-manager.sh` so the cert is included in the nightly renewal cron job.
 
-The container serves a single-page app; `vite preview` allows the `cloudopen.space` host via
+The container serves a single-page app; `vite preview` allows the `your_domain.com` host via
 `allowedHosts` in `vite.config.js`. To add another public hostname, extend that list and rebuild.
 
 ### CORS
 
-The UI is served from `cloudopen.space` but calls the API at `api.cloudopen.space` (cross-origin).
+The UI is served from `your_domain.com` but calls the API at `api.your_domain.com` (cross-origin).
 The API allows the UI origin via `CORS_ORIGINS` in `app/config.py`. If you serve the UI from a
 different hostname, add it there (or override `CORS_ORIGINS` in the server's `.env`) and restart
 the API.

@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    BASE_DOMAIN: str = "cloudopen.space"
+    BASE_DOMAIN: str = "your_domain.com"
     DATA_DIR: str = "data"
     NGINX_CONFIGS_DIR: str = "nginx_configs"
     NGINX_SITES_AVAILABLE: str = "/etc/nginx/sites-available"
@@ -17,7 +17,11 @@ class Settings(BaseSettings):
     PLUGINS_DIR: str = "plugins"
     PORT_RANGE_START: int = 8100
     PORT_RANGE_END: int = 9000
-    CERTBOT_EMAIL: str = "admin@cloudopen.space"
+    CERTBOT_EMAIL: str = "admin@your_domain.com"
+    # ACME HTTP-01 webroot. Certs are issued with `certbot certonly --webroot -w
+    # CERTBOT_WEBROOT`, so certbot never rewrites nginx config (freeholdy owns those
+    # files). nginx serves /.well-known/acme-challenge/ from here; install.sh creates it.
+    CERTBOT_WEBROOT: str = "/var/www/certbot"
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     DEBUG: bool = False

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A FastAPI service (`app/`) that orchestrates Docker containers behind nginx + Let's Encrypt on a single VPS, exposing each as `*.cloudopen.space`. A standalone CLI (`cli/fhold.py`) wraps the HTTP API; it has its own venv and `.env` and is not imported by the server.
+A FastAPI service (`app/`) that orchestrates Docker containers behind nginx + Let's Encrypt on a single VPS, exposing each as `*.your_domain.com`. A standalone CLI (`cli/fhold.py`) wraps the HTTP API; it has its own venv and `.env` and is not imported by the server.
 
 
 ## System components vs pet projects
@@ -56,6 +56,7 @@ The deploy mode is **not** chosen at create — it is auto-detected by scanning 
 
 **Plugins** — pre-packaged project templates in `plugins/{name}/`:
 - Each plugin has a `plugin.json` manifest: `name`, `description`, `deploy_mode`, `container_port` (dockerfile only), `type` (`user`|`plugin`|`system`), optional `domain_prefix`.
+- A plugin may ship an optional `ABOUT.md` (Markdown) — long-form detail shown in the web UI's plugin panel. It is read by `plugin_service` into the plugin's `about` field, surfaced on `GET /plugins`, and is **not** staged into the build context. Absent → the UI falls back to `description`.
 - `type: "system"` plugins (e.g. `sftpgo`, `webui`) are hidden from the web UI but are otherwise normal managed projects — created/deleted via the standard API.
 - `POST /plugins/{name}/add` provisions the project (nginx/SSL via `provision_dockerfile` / `provision_compose` — the same service functions the unified upload calls, not the HTTP upload endpoint) then launches an async build+run job. A plugin may ship an `install.sh` that runs in two phases: `pre` (synchronous, before compose up — generate secrets) and `post` (background thread, after containers start — configure via REST API).
 - Discovery and staging live in `app/services/plugin_service.py`; the router is `app/routers/plugins.py`.

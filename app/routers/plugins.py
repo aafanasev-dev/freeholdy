@@ -28,6 +28,7 @@ def list_plugins(_=Depends(require_auth)):
         {
             "name": p["name"],
             "description": p["description"],
+            "about": p["about"],
             "deploy_mode": p["deploy_mode"],
             "container_port": p["container_port"],
             "has_install": p["has_install"],
@@ -79,7 +80,7 @@ def add_plugin(
             project.websocket = True
             if project.ssl_enabled:
                 nginx_service.write_ssl_config(project.name, [{
-                    "subdomain": project.subdomain, "local_port": project.local_port, "websocket": True,
+                    "subdomain": project.effective_domain, "local_port": project.local_port, "websocket": True,
                 }])
     db.commit()
     db.refresh(project)

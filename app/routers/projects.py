@@ -33,6 +33,29 @@ def _next_port(db: Session, reserved: set[int]) -> int:
     raise HTTPException(status_code=500, detail="No free ports available in configured range")
 
 
+def assert_domain_available(
+    db: Session,
+    domain: str,
+    *,
+    exclude_project_id: int | None = None,
+    exclude_service_id: int | None = None,
+) -> None:
+    """Raise 409 if `domain` is already claimed by another component's custom domain or
+    auto subdomain. The current component is excluded so re-setting its own domain is fine."""
+    pq = db.query(Project).filter(
+        (Project.custom_domain == domain) | (Project.subdomain == domain)
+    )
+    if exclude_project_id is not None:
+        pq = pq.filter(Project.id != exclude_project_id)
+    sq = db.query(ComposeService).filter(
+        (ComposeService.custom_domain == domain) | (ComposeService.subdomain == domain)
+    )
+    if exclude_service_id is not None:
+        sq = sq.filter(ComposeService.id != exclude_service_id)
+    if pq.first() or sq.first():
+        raise HTTPException(status_code=409, detail=f"Domain '{domain}' is already in use by another component")
+
+
 # ── Status enrichment ───────────────────────────────────────────────────────────
 
 def _container_status(container_name: str | None, image_name: str | None) -> str:
@@ -46,7 +69,8 @@ def _container_status(container_name: str | None, image_name: str | None) -> str
 
 def _container_info(project: Project) -> dict:
     return {
-        "subdomain": project.subdomain,
+        "subdomain": project.effective_domain,
+        "custom_domain": project.custom_domain,
         "local_port": project.local_port,
         "container_port": project.container_port,
         "image_name": project.image_name,
@@ -60,7 +84,8 @@ def _container_info(project: Project) -> dict:
 def _service_info(svc: ComposeService) -> dict:
     return {
         "name": svc.name,
-        "subdomain": svc.subdomain,
+        "subdomain": svc.effective_domain,
+        "custom_domain": svc.custom_domain,
         "local_port": svc.local_port,
         "container_port": svc.container_port,
         "container_name": svc.container_name,
@@ -119,20 +144,27 @@ def provision_dockerfile(
     db.flush()
 
     endpoints = [{
-        "subdomain": project.subdomain,
+        "subdomain": project.effective_domain,
         "local_port": project.local_port,
         "websocket": bool(project.websocket),
     }]
     try:
         ssl_result = nginx_service.setup_nginx(name, endpoints)
-        if ssl_result["ssl"].get(project.subdomain, {}).get("success"):
-            project.ssl_enabled = True
     except PermissionError:
         db.rollback()
+        nginx_service.remove_config(name)
         raise HTTPException(
             status_code=500,
             detail="Permission denied writing nginx config — run freeholdy with sudo or grant write access to nginx dirs",
         )
+    if ssl_result.get("error"):
+        # nginx -t rejected the generated config: roll back so we don't leave a broken
+        # nginx config on disk paired with a "live" project row.
+        db.rollback()
+        nginx_service.remove_config(name)
+        raise HTTPException(status_code=500, detail=ssl_result["error"])
+    if ssl_result["ssl"].get(project.effective_domain, {}).get("success"):
+        project.ssl_enabled = True
 
     db.commit()
     db.refresh(project)
@@ -157,50 +189,62 @@ def create_project(
     return project_response(project)
 
 
-@router.delete("/{project_name}", response_model=ProjectDeleteResponse)
-def delete_project(
-    project_name: str,
-    db: Session = Depends(get_db),
-    _=Depends(require_auth),
-):
-    """Delete a project: stop+remove its container(s), remove image(s), nginx config, DB row."""
-    project = db.query(Project).filter(Project.name == project_name).first()
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+def _teardown_compose(project: Project, details: list[str], errors: list[str]) -> None:
+    """Stop+remove a compose stack's containers/images and drop its on-disk directory."""
+    name = project.name
+    docker_service.abort_job(f"compose:{name}")
+    cdir = os.path.abspath(compose_service.project_dir(name))
 
-    details: list[str] = []
-    errors: list[str] = []
+    # Preferred path: let docker compose tear the whole stack down (containers, networks, images).
+    if os.path.exists(compose_service.override_file_path(name)):
+        result = subprocess.run(
+            docker_service._compose_cmd(name, cdir, "down", "--rmi", "all"),
+            capture_output=True, text=True,
+        )
+        details.append(f"docker compose down ({'ok' if result.returncode == 0 else 'warning'})")
+        if result.returncode != 0:
+            errors.append(f"compose down: {result.stderr.strip()}")
 
-    if project.deploy_mode == "compose":
-        # Tear the whole stack down (also removes internal, untracked services) + drop the dir.
-        docker_service.abort_job(f"compose:{project_name}")
-        cdir = os.path.abspath(compose_service.project_dir(project_name))
-        if os.path.exists(compose_service.override_file_path(project_name)):
-            result = subprocess.run(
-                docker_service._compose_cmd(project_name, cdir, "down", "--rmi", "all"),
-                capture_output=True, text=True,
-            )
-            details.append(f"docker compose down ({'ok' if result.returncode == 0 else 'warning'})")
-            if result.returncode != 0:
-                errors.append(f"compose down: {result.stderr.strip()}")
-        if os.path.isdir(cdir):
-            shutil.rmtree(cdir, ignore_errors=True)
-            details.append(f"Compose directory '{cdir}' removed")
-    else:
-        # Single container.
-        if project.container_name:
-            docker_service.abort_job(project.container_name)
-            ok, msg = docker_service.remove_container(project.container_name)
-            details.append(msg)
-            if not ok:
-                errors.append(msg)
-        if project.image_name:
-            ok, msg = docker_service.remove_image(project.image_name)
+    # Fallback: remove any tracked container compose left behind (e.g. a missing override file),
+    # so we never delete the nginx config while a container is still running.
+    for svc in project.services:
+        if docker_service.get_container_status(svc.container_name) != "not_found":
+            ok, msg = docker_service.remove_container(svc.container_name)
             details.append(msg)
             if not ok:
                 errors.append(msg)
 
-    # nginx config + reload
+    if os.path.isdir(cdir):
+        shutil.rmtree(cdir, ignore_errors=True)
+        details.append(f"Compose directory '{cdir}' removed")
+
+
+def _teardown_dockerfile(project: Project, details: list[str], errors: list[str]) -> None:
+    """Stop+remove a single-container project's container/image and drop its files dir.
+
+    Also handles `pending` projects (no container/image yet): only the files dir is removed."""
+    if project.container_name:
+        docker_service.abort_job(project.container_name)
+        ok, msg = docker_service.remove_container(project.container_name)
+        details.append(msg)
+        if not ok:
+            errors.append(msg)
+    if project.image_name:
+        ok, msg = docker_service.remove_image(project.image_name)
+        details.append(msg)
+        if not ok:
+            errors.append(msg)
+
+    # Drop the project's files dir too — compose mode already does this; keep both modes symmetric.
+    pdir = os.path.abspath(compose_service.project_dir(project.name))
+    if os.path.isdir(pdir):
+        shutil.rmtree(pdir, ignore_errors=True)
+        details.append(f"Project directory '{pdir}' removed")
+
+
+def _teardown_nginx(project_name: str, details: list[str], errors: list[str]) -> None:
+    """Remove a project's nginx config and reload — runs regardless of the docker outcome,
+    so a project never ends up with its nginx config lingering after its container is gone."""
     try:
         nginx_service.remove_config(project_name)
         details.append(f"Nginx config 'freeholdy_{project_name}.conf' removed")
@@ -213,6 +257,37 @@ def delete_project(
     except Exception as e:
         errors.append(f"Failed to remove nginx config: {e}")
 
+
+@router.delete("/{project_name}", response_model=ProjectDeleteResponse)
+def delete_project(
+    project_name: str,
+    db: Session = Depends(get_db),
+    _=Depends(require_auth),
+):
+    """Full teardown: stop+remove container(s)/image(s), drop the files dir, remove the nginx
+    config, and delete the DB row. Every phase runs even if an earlier one fails, so a project
+    is never left half-deleted (e.g. an nginx config still pointing at an already-removed
+    container)."""
+    project = db.query(Project).filter(Project.name == project_name).first()
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    details: list[str] = []
+    errors: list[str] = []
+
+    # 1. Docker resources (mode-specific, best-effort — failures must not block nginx/DB cleanup).
+    try:
+        if project.deploy_mode == "compose":
+            _teardown_compose(project, details, errors)
+        else:
+            _teardown_dockerfile(project, details, errors)
+    except Exception as e:
+        errors.append(f"Docker teardown error: {e}")
+
+    # 2. nginx config + reload (always runs).
+    _teardown_nginx(project_name, details, errors)
+
+    # 3. DB row (cascades to ComposeService).
     db.delete(project)
     db.commit()
     details.append(f"Project '{project_name}' deleted from database")
@@ -297,7 +372,7 @@ def _provision_from_dockerfile(db: Session, project: Project, dockerfile_path: s
         project.websocket = ws
         if project.ssl_enabled:
             nginx_service.write_ssl_config(project.name, [{
-                "subdomain": project.subdomain, "local_port": project.local_port, "websocket": ws,
+                "subdomain": project.effective_domain, "local_port": project.local_port, "websocket": ws,
             }])
     db.commit()
     db.refresh(project)

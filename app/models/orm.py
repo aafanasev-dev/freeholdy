@@ -14,7 +14,8 @@ class Project(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # ── dockerfile mode: the project IS a single container (these fields unused for compose) ──
-    subdomain = Column(String, nullable=True)         # e.g. myapp.cloudopen.space
+    subdomain = Column(String, nullable=True)         # auto-generated, e.g. myapp.your_domain.com
+    custom_domain = Column(String, nullable=True)     # optional override; when set it wins over subdomain
     local_port = Column(Integer, nullable=True, unique=True)   # VPS-side loopback port
     container_port = Column(Integer, nullable=True, default=80)  # port inside the container
     dockerfile_path = Column(String, nullable=True)
@@ -28,6 +29,11 @@ class Project(Base):
 
     services = relationship("ComposeService", back_populates="project", cascade="all, delete-orphan")
 
+    @property
+    def effective_domain(self) -> str | None:
+        """The hostname actually served: the custom domain when set, else the auto subdomain."""
+        return self.custom_domain or self.subdomain
+
 
 class ComposeService(Base):
     """One exposed service of a compose project (one per published port). Compose-only;
@@ -37,7 +43,8 @@ class ComposeService(Base):
     id = Column(Integer, primary_key=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     name = Column(String, nullable=False)             # the compose service name
-    subdomain = Column(String, nullable=False)        # {service}.{project}.cloudopen.space
+    subdomain = Column(String, nullable=False)        # auto-generated, {service}.{project}.your_domain.com
+    custom_domain = Column(String, nullable=True)     # optional override; when set it wins over subdomain
     local_port = Column(Integer, nullable=False, unique=True)
     container_port = Column(Integer, nullable=False, default=80)
     container_name = Column(String, nullable=False)   # freeholdy_{project}_{service}
@@ -45,6 +52,11 @@ class ComposeService(Base):
     websocket = Column(Boolean, default=False)        # detected from this service's compose block
 
     project = relationship("Project", back_populates="services")
+
+    @property
+    def effective_domain(self) -> str:
+        """The hostname actually served: the custom domain when set, else the auto subdomain."""
+        return self.custom_domain or self.subdomain
 
 
 class Token(Base):

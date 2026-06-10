@@ -21,7 +21,7 @@ if [[ ! -d "$WEBUI_SRC" ]]; then
 fi
 
 # ── Read BASE_DOMAIN from freeholdy .env ───────────────────────────────────
-BASE_DOMAIN="cloudopen.space"
+BASE_DOMAIN="your_domain.com"
 if [[ -f "${PM_ROOT}/.env" ]]; then
     _raw="$(grep -E '^BASE_DOMAIN=' "${PM_ROOT}/.env" | head -1 || true)"
     if [[ -n "$_raw" ]]; then

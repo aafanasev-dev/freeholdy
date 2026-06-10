@@ -18,6 +18,20 @@ def validate_project_slug(v: str) -> str:
     return v
 
 
+def validate_custom_domain(v: str) -> str:
+    """A custom domain must be a valid fully-qualified hostname (e.g. app.acme.com).
+
+    Lowercased; ≤253 chars; at least one dot; each label 1-63 chars, alphanumeric or
+    hyphen with no leading/trailing hyphen. This is the hostname used verbatim for nginx
+    server_name + the Let's Encrypt cert path."""
+    import re
+    v = v.strip().lower().rstrip(".")
+    label = r'(?!-)[a-z0-9-]{1,63}(?<!-)'
+    if len(v) > 253 or not re.match(rf'^{label}(\.{label})+$', v):
+        raise ValueError("custom_domain must be a valid fully-qualified domain (e.g. app.acme.com)")
+    return v
+
+
 # ── Requests ──────────────────────────────────────────────────────────────────
 
 class DeployMode(str, Enum):
@@ -40,6 +54,19 @@ class ExecRequest(BaseModel):
     command: str
 
 
+class SetDomainRequest(BaseModel):
+    """Set or clear a component's custom domain. None/empty clears it (reverts to the
+    auto-generated subdomain)."""
+    custom_domain: Optional[str] = None
+
+    @field_validator("custom_domain")
+    @classmethod
+    def domain_must_be_fqdn(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v.strip() == "":
+            return None
+        return validate_custom_domain(v)
+
+
 class PluginAddRequest(BaseModel):
     project_name: str
 
@@ -53,7 +80,8 @@ class PluginAddRequest(BaseModel):
 
 class ContainerInfo(BaseModel):
     """The single container of a dockerfile-mode project."""
-    subdomain: Optional[str] = None
+    subdomain: Optional[str] = None        # effective hostname served (custom domain if set, else auto subdomain)
+    custom_domain: Optional[str] = None    # the override, when one is set
     local_port: Optional[int] = None
     container_port: Optional[int] = None
     image_name: Optional[str] = None
@@ -66,7 +94,8 @@ class ContainerInfo(BaseModel):
 class ServiceInfo(BaseModel):
     """One exposed service of a compose-mode project."""
     name: str
-    subdomain: str
+    subdomain: str                         # effective hostname served (custom domain if set, else auto subdomain)
+    custom_domain: Optional[str] = None    # the override, when one is set
     local_port: int
     container_port: int
     container_name: str
@@ -106,6 +135,7 @@ class DockerJobStatusResponse(BaseModel):
 class PluginResponse(BaseModel):
     name: str
     description: str
+    about: str = ""     # long-form Markdown (ABOUT.md); empty when the plugin ships none
     deploy_mode: str = "dockerfile"       # dockerfile | compose
     container_port: Optional[int] = None  # dockerfile-mode only
     has_install: bool   # whether the plugin ships an install.sh

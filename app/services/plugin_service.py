@@ -86,9 +86,22 @@ def _load_manifest(plugin_dir: str, name: str) -> Optional[dict]:
 
     install_path = os.path.join(plugin_dir, "install.sh")
     has_install = os.path.isfile(install_path)
+
+    # Optional long-form description rendered in the web UI's plugin detail pane.
+    # Falls back to the manifest "description" when no ABOUT.md ships with the plugin.
+    about_path = os.path.join(plugin_dir, "ABOUT.md")
+    about = ""
+    if os.path.isfile(about_path):
+        try:
+            with open(about_path, encoding="utf-8") as f:
+                about = f.read()
+        except OSError:
+            about = ""
+
     return {
         "name": plugin_name,
         "description": str(data.get("description", "")),
+        "about": about,
         "deploy_mode": deploy_mode,
         "container_port": container_port,
         "has_install": has_install,
@@ -146,7 +159,7 @@ def stage_compose(plugin: dict, project_dir: str) -> str:
     Skips plugin.json. Returns the staged docker-compose.yml path."""
     os.makedirs(project_dir, exist_ok=True)
     for entry in os.listdir(plugin["dir"]):
-        if entry == "plugin.json":
+        if entry in ("plugin.json", "ABOUT.md"):
             continue
         src = os.path.join(plugin["dir"], entry)
         dst = os.path.join(project_dir, entry)

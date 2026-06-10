@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# cert-manager.sh  —  cloudopen.space
+# cert-manager.sh  —  your_domain.com
 # Checks and renews SSL certificates for freeholdy fixed domains.
 # Pet project subdomains are handled by freeholdy itself via certbot.
 #
@@ -12,12 +12,12 @@ set -euo pipefail
 
 # Fixed domains that always need certs (freeholdy itself + any static sites)
 DOMAINS=(
-    "api.cloudopen.space"
+    "api.your_domain.com"
 )
 
 RENEW_BEFORE_DAYS=30
 WEBSERVER="nginx"
-CERTBOT_EMAIL="admin@cloudopen.space"
+CERTBOT_EMAIL="admin@your_domain.com"
 CERTBOT_EXTRA_FLAGS=""
 LOG_FILE="/var/log/freeholdy-cert-manager.log"
 
