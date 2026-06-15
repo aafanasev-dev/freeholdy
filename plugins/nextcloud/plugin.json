@@ -1,0 +1,8 @@
+{
+  "name": "nextcloud",
+  "description": "Nextcloud file sync & share at nextcloud.<domain> (app, postgres, redis, cron). Interactive install: choose the admin account.",
+  "deploy_mode": "compose",
+  "type": "plugin",
+  "domain_prefix": "nextcloud",
+  "interactive": true
+}

@@ -1,0 +1,24 @@
+# SnappyMail — lightweight PHP webmail client at mailui.{BASE_DOMAIN}.
+#
+# Ports:
+#   127.0.0.1::8888 — the web UI; loopback-pinned so nothing is published
+#     beyond localhost (freeholdy's override appends the real allocated
+#     127.0.0.1:{local_port}:8888 binding for nginx; compose merges ports
+#     lists, so a bare "8888" here would also leak an ephemeral 0.0.0.0 port).
+#
+# Volumes:
+#   ./docker-data/snappymail — settings, the auto-generated admin password, and
+#     user data, inside the compose project dir (the freeholdy service user
+#     can't write /var/lib). DELETE /projects/{name} removes it all; install.sh's
+#     pre phase asks whether to keep or recreate data left by a failed install.
+#
+# The install.sh post phase drops a domain config into the data volume pointing
+# IMAP/SMTP at mail.{BASE_DOMAIN} (the mailserver plugin).
+
+services:
+  snappymail:
+    image: djmaze/snappymail:latest
+    ports:
+      - "127.0.0.1::8888"
+    volumes:
+      - ./docker-data/snappymail:/var/lib/snappymail

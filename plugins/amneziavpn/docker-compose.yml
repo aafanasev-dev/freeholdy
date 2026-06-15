@@ -1,0 +1,33 @@
+# AmneziaWG VPN server — a single UDP service, deliberately invisible to nginx.
+#
+# freeholdy only "exposes" compose services that publish a TCP port; this stack
+# publishes UDP only, so provisioning creates no subdomain, no nginx vhost, no
+# certificate — the ${AWG_PORT} binding below passes through the override merge
+# untouched and the generated override merely pins container_name
+# (freeholdy_{project}_awg) and restart: unless-stopped.
+#
+# Image pinned by digest: metaligh/amneziawg:latest as of 2024-10-01 (the image
+# is updated rarely; the digest is what install.sh and add-client.sh were
+# verified against — awguser/awgstart live INSIDE /etc/amnezia, which is why
+# install.sh seeds ./awg-data from the image before first start).
+#
+# NET_ADMIN + /dev/net/tun are required for WireGuard; the container's own
+# startup command adds its in-namespace MASQUERADE rule, and the sysctls entry
+# enables forwarding inside the container's network namespace only — nothing
+# touches host networking.
+#
+# AWG_PORT comes from ${PROJECT_DIR}/.env, written by install.sh's pre phase.
+# Host port == WireGuard listen port (clients connect to the same number).
+services:
+  awg:
+    image: metaligh/amneziawg@sha256:b9c97c8c764e03e74e3fc270e4fee94dd260b81232944af50829b67935fecfe6
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
+    ports:
+      - "${AWG_PORT}:${AWG_PORT}/udp"
+    volumes:
+      - ./awg-data:/etc/amnezia

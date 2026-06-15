@@ -28,6 +28,7 @@ import os
 import sys
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 import click
@@ -183,23 +184,28 @@ def _poll_job(
     )
 
 
-# ── Interactive install session ────────────────────────────────────────────────
+# ── Install session ────────────────────────────────────────────────────────────
 
-async def _interactive_install(ws_path: str) -> int:
-    """Bridge the terminal to a plugin's interactive install.sh over a WebSocket.
-
-    Protocol: we send {"type":"auth","token":…} first, then {"type":"stdin","data":…}
-    for every line the user types; the server streams {"type":"stdout","data":…} and
-    finishes with {"type":"exit","code":N}. The server-side pty has echo disabled, so
-    the terminal's own (canonical-mode) echo is the only one the user sees.
-    Returns the script's exit code (1 on protocol/connection errors)."""
-    import websockets
-
-    # BASE_URL is module state mutated by -p/--port — resolve it here, like _url().
+def _ws_url(ws_path: str) -> str:
+    # BASE_URL is module state mutated by -p/--port — resolve it lazily, like _url().
     if not BASE_URL:
         console.print("[bold red]Error:[/] BASE_DOMAIN is not set in cli/.env")
         sys.exit(1)
-    ws_url = BASE_URL.replace("https://", "wss://").replace("http://", "ws://") + ws_path
+    return BASE_URL.replace("https://", "wss://").replace("http://", "ws://") + ws_path
+
+
+async def _install_ws(ws_path: str) -> int:
+    """Watch (and, for interactive plugins, drive) an install over a WebSocket.
+
+    Protocol: we send {"type":"auth","token":…} first, then {"type":"stdin","data":…}
+    for every line the user types; the server streams {"type":"stdout","data":…} (install.sh
+    output and then the docker build) and finishes with {"type":"exit","code":N} reporting
+    the build result. The server-side pty has echo disabled, so the terminal's own
+    (canonical-mode) echo is the only one the user sees. For non-interactive plugins nothing
+    is typed — the build just streams. Returns the exit code (1 on protocol/connection errors)."""
+    import websockets
+
+    ws_url = _ws_url(ws_path)
 
     loop = asyncio.get_running_loop()
     stdin_queue: asyncio.Queue = asyncio.Queue()
@@ -240,6 +246,91 @@ async def _interactive_install(ws_path: str) -> int:
     except OSError:
         console.print(f"[bold red]Connection error:[/] cannot reach {ws_url}")
         return 1
+
+
+async def _exec_session(ws_path: str) -> int:
+    """Bridge the local terminal to an interactive `docker exec -it` shell over a WebSocket.
+
+    Sends {"type":"auth",…} then raw {"type":"stdin","data":…} keystrokes and
+    {"type":"resize",…} on SIGWINCH; the server streams {"type":"stdout","data":…} and
+    finishes with {"type":"exit","code":N}. Local stdin is put in raw mode (when it is a
+    tty) so keystrokes pass straight through and the container's shell owns echo/editing."""
+    import signal
+    import termios
+    import tty
+    import websockets
+
+    ws_url = _ws_url(ws_path)
+    loop = asyncio.get_running_loop()
+    fd = sys.stdin.fileno()
+    is_tty = sys.stdin.isatty()
+    old_attrs = termios.tcgetattr(fd) if is_tty else None
+    stdin_q: asyncio.Queue = asyncio.Queue()
+
+    # A daemon thread reads raw bytes from stdin into the loop. (Not run_in_executor: a
+    # worker blocked on os.read would hang asyncio.run() at executor shutdown.)
+    def _feed_stdin():
+        while True:
+            try:
+                data = os.read(fd, 1024)
+            except OSError:
+                data = b""
+            loop.call_soon_threadsafe(stdin_q.put_nowait, data)
+            if not data:
+                return
+
+    try:
+        async with websockets.connect(ws_url, max_size=None) as ws:
+            await ws.send(json.dumps({"type": "auth", "token": TOKEN}))
+            if is_tty:
+                tty.setraw(fd)
+            threading.Thread(target=_feed_stdin, daemon=True).start()
+
+            async def _send_resize():
+                try:
+                    cols, rows = os.get_terminal_size()
+                except OSError:
+                    return
+                await ws.send(json.dumps({"type": "resize", "rows": rows, "cols": cols}))
+
+            async def _writer():
+                while True:
+                    data = await stdin_q.get()
+                    if not data:
+                        return
+                    await ws.send(json.dumps({"type": "stdin", "data": data.decode(errors="replace")}))
+            writer_task = asyncio.ensure_future(_writer())
+
+            if is_tty:
+                loop.add_signal_handler(
+                    signal.SIGWINCH,
+                    lambda: asyncio.ensure_future(_send_resize()),
+                )
+                await _send_resize()
+
+            try:
+                async for raw in ws:
+                    msg = json.loads(raw)
+                    if msg.get("type") == "stdout":
+                        sys.stdout.write(msg.get("data", ""))
+                        sys.stdout.flush()
+                    elif msg.get("type") == "exit":
+                        return int(msg.get("code", 1))
+                    elif msg.get("type") == "error":
+                        console.print(f"\r\n[bold red]Error:[/] {msg.get('message', 'unknown error')}")
+                        return 1
+                console.print("\r\n[bold red]Connection closed unexpectedly[/]")
+                return 1
+            finally:
+                writer_task.cancel()
+                if is_tty:
+                    loop.remove_signal_handler(signal.SIGWINCH)
+    except OSError:
+        console.print(f"[bold red]Connection error:[/] cannot reach {ws_url}")
+        return 1
+    finally:
+        if old_attrs is not None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
 
 
 def _print_job_result(data: dict, success_msg: str = "", fail_msg: str = ""):
@@ -296,6 +387,15 @@ def health():
     """Check API reachability."""
     data = _get("/health")
     console.print(f"[green]✓[/] API is [bold]{data.get('status', '?')}[/]  ({BASE_URL})")
+
+
+@cli.command()
+def version():
+    """Show the API version and release stage."""
+    data = _get("/version")
+    console.print(f"[bold]{data.get('version', '?')}[/] [dim]({data.get('type', '?')})[/]")
+    if data.get("description"):
+        console.print(f"[yellow]{data['description']}[/]")
 
 
 # ── projects ───────────────────────────────────────────────────────────────────
@@ -481,37 +581,33 @@ def plugin_add(plugin: str, project: str, follow: bool):
             )
         console.print(table)
 
-    # Interactive plugins: install.sh prompts the user, so it runs over a WebSocket
-    # session now (mandatory — build/compose-up only happen after it exits 0).
-    if data.get("job", {}).get("status") == "waiting_interactive":
-        ws_path = data.get("ws_path") or f"/plugins/{plugin}/install/{project}"
-        console.print("\n[dim]─── interactive install (answer the prompts, Enter to send) ───[/]")
-        code = asyncio.run(_interactive_install(ws_path))
-        if code != 0:
-            console.print(
-                f"\n[red]✗ install.sh failed (exit {code})[/] — re-run "
-                f"[bold]fhcli plugin-add {plugin} {project}[/] to retry the install, "
-                f"or [bold]fhcli delete {project}[/] to start over"
-            )
-            sys.exit(1)
-        console.print("\n[green]✓[/] Interactive install finished")
+    ws_path = data.get("ws_path") or f"/plugins/{plugin}/install/{project}"
+    interactive = data.get("job", {}).get("status") == "waiting_interactive"
 
-    if not follow:
+    # Interactive plugins must run install.sh over the WebSocket now (it needs a user on
+    # stdin); the build streams over the same socket afterwards. Non-interactive plugins
+    # already have their build running on the server — --no-follow leaves it in the
+    # background, otherwise we connect and stream the build log live.
+    if not interactive and not follow:
         hint = (f"fhcli compose-status {project}" if is_compose
                 else f"fhcli status {project}")
         console.print(f"\n[green]✓[/] Provisioning started. Check progress with: [bold]{hint}[/]")
         return
 
-    if is_compose:
-        console.print("\n[dim]─── provision output (docker compose up) ───[/]")
-        result = _poll_status_path(f"/projects/{project}/compose/status", show_logs=True)
+    if interactive:
+        console.print("\n[dim]─── interactive install (answer the prompts, Enter to send) ───[/]")
     else:
-        console.print("\n[dim]─── provision output (install.sh → build → run) ───[/]")
-        result = _poll_status_path(f"/projects/{project}/status", show_logs=True)
-    _print_job_result(result, success_msg="Plugin installed and running", fail_msg="Provisioning failed")
+        console.print("\n[dim]─── provision output (build → run) ───[/]")
 
-    if result["status"] != "done":
+    code = asyncio.run(_install_ws(ws_path))
+    if code != 0:
+        console.print(
+            f"\n[red]✗ install failed (exit {code})[/] — re-run "
+            f"[bold]fhcli plugin-add {plugin} {project}[/] to retry, "
+            f"or [bold]fhcli delete {project}[/] to start over"
+        )
         sys.exit(1)
+    console.print("\n[green]✓[/] Plugin installed and running")
 
 
 # ── compose lifecycle ─────────────────────────────────────────────────────────────
@@ -784,42 +880,31 @@ def stop_container(project: str, follow: bool):
 
 @cli.command("exec")
 @click.argument("project")
-@click.argument("command", metavar="COMMAND")
-@click.option(
-    "--follow/--no-follow",
-    default=True,
-    help="Stream command output live (default: on).",
-)
-def exec_command(project: str, command: str, follow: bool):
-    """Run a command inside the running container and print output.
+@click.argument("command", metavar="[COMMAND]", required=False, default="")
+@click.option("--service", "-s", default=None,
+              help="For compose projects: the service to exec into.")
+def exec_command(project: str, command: str, service: str | None):
+    """Open an interactive shell (or run COMMAND) inside the running container.
+
+    Connects a live terminal over a WebSocket — full TTY, so editors and colours work.
+    With no COMMAND you get an interactive shell; pass one to run it interactively.
 
     \b
     Examples:
-      fhcli exec myapp "ls /app"
-      fhcli exec myapp "python manage.py migrate"
+      fhcli exec myapp                       # interactive shell
+      fhcli exec myapp "python manage.py shell"
+      fhcli exec mystack --service api       # shell into one compose service
     """
-    console.print(f"Running command in [cyan]{project}[/]…")
-    data = _post(
-        f"/projects/{project}/exec",
-        json={"command": command},
-    )
+    if service:
+        ws_path = f"/projects/{project}/services/{service}/exec"
+    else:
+        ws_path = f"/projects/{project}/exec"
+    if command:
+        ws_path += "?cmd=" + urllib.parse.quote(command)
 
-    if data.get("status") == "no_job":
-        console.print(f"[red]✗[/] {data.get('message', 'Unknown error')}")
-        sys.exit(1)
-
-    if not follow:
-        console.print(
-            f"[green]✓[/] Command launched. "
-            f"Check output with: [bold]fhcli status {project}[/]"
-        )
-        return
-
-    result = _poll_job(project, show_logs=True)
-    exit_code = result.get("exit_code", 0) or 0
-    if exit_code != 0:
-        console.print(f"[yellow]exit code {exit_code}[/]")
-        sys.exit(exit_code)
+    code = asyncio.run(_exec_session(ws_path))
+    if code != 0:
+        sys.exit(code)
 
 
 # ── status ─────────────────────────────────────────────────────────────────────

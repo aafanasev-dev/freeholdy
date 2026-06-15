@@ -3,22 +3,24 @@ compose.py — project-level endpoints for compose-mode projects.
 
 A compose project is created empty (POST /projects with deploy_mode="compose"),
 then a single docker-compose.yml is uploaded here. Every service that publishes
-a port becomes a tracked ComposeService exposed at {service}.{project}.{domain};
-lifecycle (build/up/down) runs against the whole stack via `docker compose`.
+a TCP port becomes a tracked ComposeService exposed at {service}.{project}.{domain}
+(UDP-only services are not exposed — nginx can't proxy UDP — and keep their
+original host bindings); lifecycle (build/up/down) runs against the whole stack
+via `docker compose`.
 """
 
 import os
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, WebSocket
 from sqlalchemy.orm import Session
 
-from app.models.database import get_db
+from app.models.database import get_db, SessionLocal
 from app.models.orm import Project, ComposeService
 from app.models.schemas import DockerJobStatusResponse, SetDomainRequest, ProjectResponse
 from app.auth import require_auth
 from app.config import settings
-from app.services import docker_service, nginx_service, compose_service
+from app.services import docker_service, nginx_service, compose_service, interactive_service, ws_session
 from app.routers.projects import _next_port, assert_domain_available, project_response
 
 router = APIRouter()
@@ -38,6 +40,11 @@ def _get_compose_project(project_name: str, db: Session) -> Project:
 
 def _job_key(project_name: str) -> str:
     return f"compose:{project_name}"
+
+
+def _exec_job_key(project_name: str, service_name: str) -> str:
+    """A per-service key so a service exec never clobbers the compose lifecycle job."""
+    return f"exec:{project_name}:{service_name}"
 
 
 def _job_response(project_name: str, launched_message: str) -> DockerJobStatusResponse:
@@ -206,6 +213,42 @@ def set_service_domain(
     db.commit()
     db.refresh(project)
     return project_response(project)
+
+
+# ── Per-service exec ──────────────────────────────────────────────────────────
+
+# Interactive exec shell over WebSocket — replaces the old POST .../exec + status
+# polling. Mirrors the dockerfile exec route (container.py::exec_session) but targets one
+# compose service's container, keyed per-service so it never clobbers the lifecycle job.
+@router.websocket("/{project_name}/services/{service_name}/exec")
+async def service_exec_session(
+    websocket: WebSocket, project_name: str, service_name: str, cmd: str = "",
+):
+    await websocket.accept()
+    if not await ws_session.authenticate(websocket):
+        return
+
+    db = SessionLocal()
+    try:
+        project = db.query(Project).filter(Project.name == project_name).first()
+        if project is None or project.deploy_mode != "compose":
+            await ws_session.reject(websocket, 4404, f"no compose project '{project_name}'")
+            return
+        target = next((s for s in project.services if s.name == service_name), None)
+        if target is None:
+            await ws_session.reject(
+                websocket, 4404, f"service '{service_name}' not found in '{project_name}'",
+            )
+            return
+        container_name = target.container_name
+        project_dir = _abs_project_dir(project_name)
+    finally:
+        db.close()
+
+    await interactive_service.run_exec_session(
+        websocket, container_name, project_dir,
+        _exec_job_key(project_name, service_name), cmd,
+    )
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────

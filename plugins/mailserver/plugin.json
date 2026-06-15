@@ -1,0 +1,8 @@
+{
+  "name": "mailserver",
+  "description": "Full e-mail server (docker-mailserver) — SMTP, IMAP, and DKIM at mail.<domain>. Interactive install: choose addons and the first mailbox.",
+  "deploy_mode": "compose",
+  "type": "plugin",
+  "domain_prefix": "mail",
+  "interactive": true
+}

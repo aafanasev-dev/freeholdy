@@ -1,0 +1,8 @@
+{
+  "name": "jitsi-meet",
+  "description": "Jitsi Meet video conferencing at meet.<domain> (web, prosody, jicofo, jvb). Interactive install: choose the moderator account. Requires UDP 10000 reachable from the internet.",
+  "deploy_mode": "compose",
+  "type": "plugin",
+  "domain_prefix": "meet",
+  "interactive": true
+}

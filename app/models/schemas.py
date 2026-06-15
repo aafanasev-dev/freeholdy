@@ -50,10 +50,6 @@ class ProjectCreateRequest(BaseModel):
         return validate_project_slug(v)
 
 
-class ExecRequest(BaseModel):
-    command: str
-
-
 class SetDomainRequest(BaseModel):
     """Set or clear a component's custom domain. None/empty clears it (reverts to the
     auto-generated subdomain)."""

@@ -3,6 +3,7 @@ import subprocess
 from typing import Tuple
 from jinja2 import Environment, FileSystemLoader
 from app.config import settings
+from app.services import compose_service
 
 _TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
 _jinja = Environment(loader=FileSystemLoader(_TEMPLATES_DIR), trim_blocks=True, lstrip_blocks=True)
@@ -23,12 +24,30 @@ def generate_http_config(project_name: str, parts: list[dict]) -> str:
     return template.render(parts=parts, webroot=settings.CERTBOT_WEBROOT)
 
 
+_EXTRA_CONF_NAME = "nginx-extra.conf"
+
+
+def _load_extra_config(project_name: str) -> str:
+    """Optional per-project nginx snippet, inlined into every SSL server block.
+
+    Plugins ship an `nginx-extra.conf` next to their compose file; staging copies
+    it into the project dir with the rest of the tree, so it is re-read on every
+    config regeneration and removed with the project. Empty string when absent."""
+    path = os.path.join(compose_service.project_dir(project_name), _EXTRA_CONF_NAME)
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 def generate_ssl_config(project_name: str, parts: list[dict]) -> str:
     """Full HTTPS config — written after certs have been issued.
 
     `parts` must already be filtered to the endpoints that should be proxied."""
     template = _jinja.get_template("nginx_ssl.conf.j2")
-    return template.render(parts=parts, webroot=settings.CERTBOT_WEBROOT)
+    return template.render(parts=parts, webroot=settings.CERTBOT_WEBROOT,
+                           extra_config=_load_extra_config(project_name))
 
 
 def _write_config(project_name: str, content: str) -> str:

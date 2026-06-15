@@ -1,0 +1,100 @@
+# Nextcloud — file sync & share (app, db, cache, cron) at nextcloud.{BASE_DOMAIN}.
+# Official nextcloud image, apache variant, pinned to a major — NOT All-in-One
+# (AIO self-orchestrates via the Docker socket and fights freeholdy's nginx/port
+# conventions) and NOT fpm (which would need nginx to speak FastCGI and mount the
+# source tree). app and cron MUST stay on the identical tag: they share the same
+# /var/www/html volume and a version mismatch corrupts it.
+#
+# Ports:
+#   app: 127.0.0.1::80 — loopback-pinned ephemeral; freeholdy's override appends
+#     the real allocated 127.0.0.1:{local_port}:80 binding for nginx (compose
+#     merges ports lists — a plain "8080:80" here would leave a public binding).
+#   db/cache/cron publish nothing — internal to the compose network only.
+#
+# Proxy awareness (the #1 Nextcloud-behind-a-proxy breakage): nginx terminates
+# TLS, so OVERWRITEHOST/OVERWRITEPROTOCOL/OVERWRITECLIURL + TRUSTED_PROXIES keep
+# Nextcloud from generating http:// links or rejecting forwarded requests.
+# TRUSTED_PROXIES covers Docker's bridge pools — the proxied connection reaches
+# the container from the compose network's gateway address.
+#
+# Uploads: PHP_UPLOAD_LIMIT here and client_max_body_size in nginx-extra.conf
+# must BOTH be raised (10G) or large uploads 413.
+#
+# Volumes: app (Nextcloud source + config + user files) and db are named volumes.
+# NOTE: project deletion (compose down --rmi all, no -v) leaves them in place —
+# data survives; see ABOUT.md for how to purge or why a re-add reattaches it.
+#
+# Variables (written to .env by install.sh's pre phase):
+#   BASE_DOMAIN                — freeholdy's base domain; public URL is
+#                                https://nextcloud.{BASE_DOMAIN}.
+#   NEXTCLOUD_ADMIN_USER/PASSWORD — chosen interactively; triggers the image's
+#     unattended maintenance:install on first boot (empty app volume only).
+#   POSTGRES_PASSWORD / REDIS_PASSWORD — generated keep-if-present: postgres
+#     bakes its password into the db volume at first init, so a pre re-run must
+#     never rotate them.
+
+services:
+  app:
+    image: nextcloud:34-apache
+    ports:
+      - "127.0.0.1::80"
+    volumes:
+      - app:/var/www/html
+    environment:
+      - POSTGRES_HOST=db
+      - POSTGRES_DB=nextcloud
+      - POSTGRES_USER=nextcloud
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - REDIS_HOST=cache
+      - REDIS_HOST_PASSWORD=${REDIS_PASSWORD}
+      - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER}
+      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD}
+      - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud.${BASE_DOMAIN}
+      - TRUSTED_PROXIES=172.16.0.0/12 192.168.0.0/16
+      - OVERWRITEHOST=nextcloud.${BASE_DOMAIN}
+      - OVERWRITEPROTOCOL=https
+      - OVERWRITECLIURL=https://nextcloud.${BASE_DOMAIN}
+      - PHP_UPLOAD_LIMIT=10G
+      - PHP_MEMORY_LIMIT=1G
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+
+  db:
+    image: postgres:16
+    volumes:
+      - db:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=nextcloud
+      - POSTGRES_USER=nextcloud
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    # service_healthy gate: without it the first-boot installer races initdb,
+    # gives up on the unreachable db, and the instance comes up broken.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nextcloud -d nextcloud"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  cache:
+    image: redis:alpine
+    # Redis is required, not optional: Nextcloud uses it for transactional file
+    # locking — without it locking falls back to the DB and corrupts under load.
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+
+  cron:
+    image: nextcloud:34-apache
+    entrypoint: /cron.sh
+    volumes:
+      - app:/var/www/html
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+
+volumes:
+  app:
+  db:

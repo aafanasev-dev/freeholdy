@@ -1,0 +1,59 @@
+# docker-mailserver — full e-mail server (Postfix + Dovecot) at mail.{BASE_DOMAIN}.
+#
+# Ports (all direct public bindings — SMTP/IMAP are not HTTP, they bypass nginx):
+#   25:25   — SMTP (server-to-server delivery). Also the first ports: entry, so
+#             freeholdy marks the service exposed and issues the Let's Encrypt
+#             cert for mail.{BASE_DOMAIN}; the nginx vhost serves no UI, it
+#             exists only so certbot runs for that subdomain.
+#   465:465 — SMTPS (implicit-TLS submission)
+#   587:587 — Submission (STARTTLS)
+#   993:993 — IMAPS
+#
+# Volumes:
+#   ./docker-data/dms/{mail-data,mail-state,mail-logs,config} — inside the
+#     compose project dir (the freeholdy service user can't write /var/lib).
+#     NOTE: DELETE /projects/{name} rmtree's this dir — stored mail goes with it.
+#   /etc/letsencrypt (ro) — SSL_TYPE=letsencrypt reads live/mail.{BASE_DOMAIN}/,
+#     issued by freeholdy's certbot pass before the container first starts.
+#
+# Variables (written to .env in the compose project dir by install.sh's pre phase):
+#   BASE_DOMAIN — freeholdy's base domain; also forms the container hostname.
+#   ENABLE_RSPAMD / ENABLE_CLAMAV / ENABLE_FAIL2BAN — addon toggles (default 0).
+#   ENABLE_OPENDKIM / ENABLE_OPENDMARC / ENABLE_POLICYD_SPF / ENABLE_AMAVIS —
+#     legacy filter chain; the pre phase turns these off when Rspamd is chosen.
+
+services:
+  mailserver:
+    image: ghcr.io/docker-mailserver/docker-mailserver:latest
+    hostname: mail.${BASE_DOMAIN}
+    ports:
+      - "25:25"
+      - "465:465"
+      - "587:587"
+      - "993:993"
+    environment:
+      - SSL_TYPE=letsencrypt
+      - SSL_DOMAIN=mail.${BASE_DOMAIN}
+      - ENABLE_RSPAMD=${ENABLE_RSPAMD:-0}
+      - ENABLE_CLAMAV=${ENABLE_CLAMAV:-0}
+      - ENABLE_FAIL2BAN=${ENABLE_FAIL2BAN:-0}
+      - ENABLE_OPENDKIM=${ENABLE_OPENDKIM:-1}
+      - ENABLE_OPENDMARC=${ENABLE_OPENDMARC:-1}
+      - ENABLE_POLICYD_SPF=${ENABLE_POLICYD_SPF:-1}
+      - ENABLE_AMAVIS=${ENABLE_AMAVIS:-1}
+    volumes:
+      - ./docker-data/dms/mail-data:/var/mail
+      - ./docker-data/dms/mail-state:/var/mail-state
+      - ./docker-data/dms/mail-logs:/var/log/mail
+      - ./docker-data/dms/config:/tmp/docker-mailserver
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /etc/localtime:/etc/localtime:ro
+    cap_add:
+      - NET_ADMIN   # only used when Fail2ban is enabled; harmless otherwise
+    stop_grace_period: 1m
+    healthcheck:
+      test: "ss --listening --tcp | grep -P 'LISTEN.+:smtp' || exit 1"
+      interval: 30s
+      timeout: 3s
+      retries: 5
+      start_period: 120s

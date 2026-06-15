@@ -1,0 +1,7 @@
+{
+  "name": "amneziavpn",
+  "description": "AmneziaWG (DPI-resistant WireGuard) VPN server on a raw UDP port — no subdomain, no SSL, nginx untouched. Interactive install: pick the UDP port, client DNS, and the first client name. Your cloud firewall must allow the UDP port in. Creates a public VPN endpoint — add deliberately.",
+  "deploy_mode": "compose",
+  "type": "plugin",
+  "interactive": true
+}

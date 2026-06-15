@@ -1,0 +1,8 @@
+{
+  "name": "snappymail",
+  "description": "SnappyMail webmail — web UI for your mail server at mailui.<domain>. Pairs with the mailserver plugin.",
+  "deploy_mode": "compose",
+  "type": "plugin",
+  "domain_prefix": "mailui",
+  "interactive": true
+}

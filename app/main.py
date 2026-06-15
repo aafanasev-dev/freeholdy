@@ -1,5 +1,7 @@
+import json
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
@@ -44,6 +46,12 @@ app.include_router(plugins.router,   prefix="/plugins",  tags=["plugins"])
 @app.get("/health", tags=["system"])
 def health():
     return {"status": "ok"}
+
+
+@app.get("/version", tags=["system"])
+def version():
+    version_file = Path(__file__).resolve().parent.parent / "version.json"
+    return json.loads(version_file.read_text())
 
 
 def main():

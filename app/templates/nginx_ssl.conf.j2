@@ -26,6 +26,11 @@ server {
     ssl_protocols       TLSv1.2 TLSv1.3;
     ssl_ciphers         HIGH:!aNULL:!MD5;
 
+{% if extra_config %}
+    # ── per-project extras (nginx-extra.conf in the project dir) ──
+{{ extra_config | indent(4, true) }}
+
+{% endif %}
     location / {
         proxy_pass         http://127.0.0.1:{{ part.local_port }};
         proxy_set_header   Host              $host;

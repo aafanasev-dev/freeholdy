@@ -4,11 +4,13 @@ compose_service.py
 Parsing and override generation for compose-mode projects.
 
 A compose project is described by a single user-supplied `docker-compose.yml`.
-freeholdy discovers its services, exposes every service that publishes a port
-at `{service}.{project}.{base_domain}`, and pins container names + loopback-only
-port bindings via a generated `docker-compose.override.yml`. Functions here are
-pure (parsing) or filesystem-only (file writing); orchestration lives in the
-compose router.
+freeholdy discovers its services, exposes every service that publishes a TCP
+port at `{service}.{project}.{base_domain}`, and pins container names +
+loopback-only port bindings via a generated `docker-compose.override.yml`.
+UDP-only services are never exposed (nginx is HTTP-only and can't proxy UDP);
+their original host bindings pass through the compose merge untouched.
+Functions here are pure (parsing) or filesystem-only (file writing);
+orchestration lives in the compose router.
 """
 
 import os
@@ -20,19 +22,28 @@ from app.services import scan
 
 
 def _extract_container_port(entry) -> int | None:
-    """Return the in-container (target) port for one compose `ports:` entry.
+    """Return the in-container (target) TCP port for one compose `ports:` entry.
 
     Handles the common short forms ("3000", "8080:80", "127.0.0.1:8080:80",
     "8080:80/tcp", port ranges) and the long dict form ({target: 80, ...}).
-    Returns None if no port can be determined.
+    UDP entries ("10000:10000/udp" or {..., protocol: udp}) return None —
+    nginx can't proxy UDP, so they never make a service exposed; the override
+    leaves them alone and the original host binding survives the compose merge.
+    Returns None if no TCP port can be determined.
     """
     # Long form: a mapping with an explicit target.
     if isinstance(entry, dict):
+        if str(entry.get("protocol", "tcp")).lower() == "udp":
+            return None
         target = entry.get("target")
         return int(target) if target is not None else None
 
     # Short form: a string/number "host:container" — the container port is last.
-    text = str(entry).split("/", 1)[0]          # drop "/tcp" / "/udp"
+    text = str(entry)
+    if "/" in text:
+        text, proto = text.rsplit("/", 1)
+        if proto.strip().lower() == "udp":
+            return None
     container = text.split(":")[-1]              # last segment = container port
     container = container.split("-")[0]          # first port of a range
     try:
@@ -45,7 +56,9 @@ def parse_services(compose_text: str) -> list[dict]:
     """Parse a compose file into a list of service descriptors.
 
     Each descriptor is `{name, exposed: bool, container_port: int | None}`.
-    A service is *exposed* (gets an nginx endpoint) iff it declares `ports:`.
+    A service is *exposed* (gets an nginx endpoint) iff it declares at least
+    one TCP `ports:` entry. UDP-only services are not exposed — no loopback
+    rebind, no nginx vhost, no subdomain — and keep their original bindings.
     Raises ValueError on malformed YAML, a missing `services:` block, or a
     service name that is not a DNS-safe slug (it becomes a subdomain label).
     """
@@ -62,14 +75,18 @@ def parse_services(compose_text: str) -> list[dict]:
         validate_project_slug(str(name))   # raises ValueError if not slug-safe
         spec = spec or {}
         ports = spec.get("ports") or []
+        # First entry that yields a TCP port wins; UDP entries are skipped, so a
+        # UDP-only service (e.g. a WebRTC media bridge) is never exposed.
         container_port = None
-        if ports:
-            container_port = _extract_container_port(ports[0])
+        for entry in ports:
+            container_port = _extract_container_port(entry)
+            if container_port is not None:
+                break
         # Per-service WebSocket detection: scan this service's name + its YAML block only.
         block = f"{name}\n{yaml.safe_dump(spec, default_flow_style=False)}"
         services.append({
             "name": str(name),
-            "exposed": bool(ports) and container_port is not None,
+            "exposed": container_port is not None,
             "container_port": container_port,
             "websocket": scan.uses_websocket(block),
         })

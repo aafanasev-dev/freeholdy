@@ -1,0 +1,125 @@
+# Jitsi Meet — video conferencing (web, prosody, jicofo, jvb) at meet.{BASE_DOMAIN}.
+# Pinned to the upstream stable release; do not switch to :unstable.
+#
+# Ports:
+#   web: 127.0.0.1::80 — loopback-pinned ephemeral; freeholdy's override appends
+#     the real allocated 127.0.0.1:{local_port}:80 binding for nginx (compose
+#     merges ports lists). The web container proxies XMPP signaling
+#     (/xmpp-websocket) and the bridge channel (/colibri-ws) internally, so one
+#     subdomain serves everything.
+#   jvb: 10000:10000/udp — WebRTC media, bound DIRECTLY on the host. nginx cannot
+#     proxy UDP; freeholdy leaves UDP-only services unexposed, so this binding
+#     passes through untouched. The host/cloud firewall must allow UDP 10000.
+#   prosody/jicofo publish nothing — internal to the meet.jitsi network only.
+#
+# Networks:
+#   meet.jitsi — prosody carries the alias xmpp.meet.jitsi (the XMPP FQDN every
+#     other service dials); freeholdy's override renames containers but never
+#     touches networks, so the alias survives.
+#
+# Volumes:
+#   ./jitsi-cfg/{web,prosody/config,prosody/prosody-plugins-custom,jicofo,jvb} —
+#     created by install.sh's pre phase, inside the compose project dir (the
+#     freeholdy service user can't write /var/lib). DELETE /projects/{name}
+#     rmtree's them.
+#
+# Variables (written to .env by install.sh's pre phase):
+#   BASE_DOMAIN          — freeholdy's base domain; PUBLIC_URL = https://meet.{BASE_DOMAIN}.
+#   JVB_ADVERTISE_IPS    — the server's public IP. The #1 cause of "remote
+#                          participants have no audio/video" when wrong.
+#   JICOFO_AUTH_PASSWORD / JVB_AUTH_PASSWORD — internal XMPP secrets; mismatched
+#     values break jicofo/prosody startup, so install.sh never rotates them.
+
+services:
+  web:
+    image: jitsi/web:stable-11031
+    ports:
+      - "127.0.0.1::80"
+    volumes:
+      - ./jitsi-cfg/web:/config:Z
+    environment:
+      - PUBLIC_URL=https://meet.${BASE_DOMAIN}
+      - DISABLE_HTTPS=1
+      - ENABLE_HTTP_REDIRECT=0
+      - ENABLE_LETSENCRYPT=0
+      - ENABLE_AUTH=1
+      - ENABLE_GUESTS=1
+      - AUTH_TYPE=internal
+      - ENABLE_XMPP_WEBSOCKET=1
+      - ENABLE_COLIBRI_WEBSOCKET=1
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_GUEST_DOMAIN=guest.meet.jitsi
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - XMPP_BOSH_URL_BASE=http://xmpp.meet.jitsi:5280
+      # Small-VPS load relief: joiners from the 10th on start with video muted.
+      - START_VIDEO_MUTED=10
+      - TZ=UTC
+    networks:
+      meet.jitsi:
+
+  prosody:
+    image: jitsi/prosody:stable-11031
+    volumes:
+      - ./jitsi-cfg/prosody/config:/config:Z
+      - ./jitsi-cfg/prosody/prosody-plugins-custom:/prosody-plugins-custom:Z
+    environment:
+      - PUBLIC_URL=https://meet.${BASE_DOMAIN}
+      - ENABLE_AUTH=1
+      - ENABLE_GUESTS=1
+      - AUTH_TYPE=internal
+      - ENABLE_XMPP_WEBSOCKET=1
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_GUEST_DOMAIN=guest.meet.jitsi
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD}
+      - JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD}
+      - TZ=UTC
+    networks:
+      meet.jitsi:
+        aliases:
+          - xmpp.meet.jitsi
+
+  jicofo:
+    image: jitsi/jicofo:stable-11031
+    depends_on:
+      - prosody
+    volumes:
+      - ./jitsi-cfg/jicofo:/config:Z
+    environment:
+      - ENABLE_AUTH=1
+      - AUTH_TYPE=internal
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - XMPP_SERVER=xmpp.meet.jitsi
+      - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD}
+      - TZ=UTC
+    networks:
+      meet.jitsi:
+
+  jvb:
+    image: jitsi/jvb:stable-11031
+    depends_on:
+      - prosody
+    ports:
+      - "10000:10000/udp"
+    volumes:
+      - ./jitsi-cfg/jvb:/config:Z
+    environment:
+      - PUBLIC_URL=https://meet.${BASE_DOMAIN}
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - XMPP_SERVER=xmpp.meet.jitsi
+      - JVB_PORT=10000
+      - JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD}
+      - JVB_ADVERTISE_IPS=${JVB_ADVERTISE_IPS}
+      - TZ=UTC
+    networks:
+      meet.jitsi:
+
+networks:
+  meet.jitsi:

@@ -308,12 +308,6 @@ def stop_container(container_name: str, job_key: str) -> DockerJob:
     return _spawn(job_key, "stop", cmd)
 
 
-def exec_in_container(container_name: str, command: str, job_key: str) -> DockerJob:
-    """Run a command inside a container in the background."""
-    cmd = ["docker", "exec", container_name] + shlex.split(command)
-    return _spawn(job_key, "exec", cmd)
-
-
 def provision_from_plugin(
     job_key: str,
     project_dir: str,

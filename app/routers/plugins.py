@@ -1,4 +1,3 @@
-import asyncio
 import os
 import subprocess
 import threading
@@ -8,20 +7,21 @@ from starlette.concurrency import run_in_threadpool
 from typing import List, Optional, Tuple
 
 from app.models.database import get_db, SessionLocal
-from app.models.orm import Project, ComposeService, Token
+from app.models.orm import Project, ComposeService
 from app.models.schemas import (
     PluginResponse,
     PluginAddRequest,
     PluginAddResponse,
     DockerJobStatusResponse,
 )
-from app.auth import require_auth, hash_token
+from app.auth import require_auth
 from app.config import settings
 from app.services import (
     docker_service,
     plugin_service,
     compose_service,
     interactive_service,
+    ws_session,
     scan,
     nginx_service,
 )
@@ -54,10 +54,16 @@ def _plugin_slug(plugin: dict) -> str:
     return os.path.basename(plugin["dir"])
 
 
+def _install_ws_path(plugin: dict, project: Project) -> str:
+    """The WebSocket path clients connect to to watch (and, when interactive, drive) the
+    install — see install_session."""
+    return f"/plugins/{_plugin_slug(plugin)}/install/{project.name}"
+
+
 def _waiting_interactive_response(plugin: dict, project: Project) -> PluginAddResponse:
     """Response for an interactive plugin: provisioning stops here until the client
     connects to ws_path and drives install.sh (see install_session)."""
-    ws_path = f"/plugins/{_plugin_slug(plugin)}/install/{project.name}"
+    ws_path = _install_ws_path(plugin, project)
     return PluginAddResponse(
         status="ok",
         message=f"Project '{project.name}' created from plugin '{plugin['name']}' — "
@@ -129,6 +135,7 @@ def add_plugin(
         message=f"Project '{project.name}' created from plugin '{plugin['name']}'",
         project=project_response(project),
         job=job_resp,
+        ws_path=_install_ws_path(plugin, project),
     )
 
 
@@ -285,52 +292,42 @@ def _add_compose_plugin(plugin: dict, project_name: str, db: Session) -> PluginA
         message=f"Project '{project_name}' created from plugin '{plugin['name']}'",
         project=project_response(project),
         job=job_resp,
+        ws_path=_install_ws_path(plugin, project),
     )
 
 
-# ── Interactive install over WebSocket ─────────────────────────────────────────
+# ── Install over WebSocket ─────────────────────────────────────────────────────
 #
-# Two-step flow for plugins with "interactive": true — POST /plugins/{name}/add stages
-# everything but runs nothing, then the client connects here to drive install.sh:
+# POST /plugins/{name}/add returns a ws_path; the client connects here to watch the
+# install. The build always streams live over this socket (no status polling):
 #
 #   client -> server : {"type": "auth", "token": "..."}     first frame, always
-#                      {"type": "stdin", "data": "line\n"}  user input
+#                      {"type": "stdin", "data": "line\n"}  user input (interactive only)
+#                      {"type": "abort"}                     cancel the running build
 #   server -> client : {"type": "ready"}                    auth ok, session starting
-#                      {"type": "stdout", "data": "..."}    install.sh output
-#                      {"type": "exit", "code": N}          script finished
+#                      {"type": "stdout", "data": "..."}    install.sh + build output
+#                      {"type": "exit", "code": N}          build finished (N = build exit)
 #                      {"type": "error", "message": "..."}  protocol/validation failure
 #
 # Close codes: 4401 bad auth, 4404 unknown plugin/project, 4409 busy/already provisioned.
-# On exit 0 the server finishes provisioning (dockerfile: build+run job; compose:
-# nginx/SSL + compose up + post phase) BEFORE sending the exit frame, so clients can
-# fall back to the normal status-polling endpoints immediately after.
-# Disconnecting mid-script kills it and leaves the project pre-install; reconnecting
-# re-runs install.sh, and DELETE /projects/{name} remains the escape hatch.
+#
+# Two cases share this endpoint:
+#   - non-interactive: /add already launched the provision job; we just tail it (stream_job).
+#   - interactive: install.sh needs a user, so it runs here on a pty; on exit 0 the
+#     follow-up provision job is launched and then tailed over the same socket, so the
+#     exit frame reports the *build* result. install.sh failing (exit != 0) stops here.
+# A reconnect while a job is in flight re-attaches and re-streams; disconnecting mid
+# install.sh kills it and leaves the project pre-install. DELETE /projects/{name} resets.
 
 
-def _ws_token_valid(token: str) -> bool:
-    if settings.DEBUG:
-        return True
-    if not token:
-        return False
-    db = SessionLocal()
-    try:
-        return (
-            db.query(Token)
-            .filter(Token.token_hash == hash_token(token), Token.active == True)
-            .first()
-            is not None
-        )
-    finally:
-        db.close()
-
-
-async def _ws_reject(websocket: WebSocket, code: int, message: str) -> None:
-    try:
-        await websocket.send_json({"type": "error", "message": message})
-        await websocket.close(code=code)
-    except (WebSocketDisconnect, RuntimeError):
-        pass
+async def _stream_to_exit(websocket: WebSocket, job_key: str) -> None:
+    """Tail a background job to completion, then send its exit frame and close.
+    Stays silent if the client disconnected mid-stream (the job keeps running)."""
+    exit_code = await interactive_service.stream_job(websocket, job_key)
+    if exit_code is None:
+        return
+    await websocket.send_json({"type": "exit", "code": exit_code})
+    await websocket.close(code=1000)
 
 
 def _finish_compose_from_ws(plugin: dict, project_name: str) -> None:
@@ -352,20 +349,12 @@ async def install_session(websocket: WebSocket, plugin_name: str, project_name: 
     await websocket.accept()
 
     # First frame must be auth (browsers can't set an Authorization header on a WebSocket).
-    try:
-        msg = await asyncio.wait_for(websocket.receive_json(), timeout=10)
-    except WebSocketDisconnect:
-        return
-    except (asyncio.TimeoutError, ValueError):
-        await _ws_reject(websocket, 4401, "expected an auth frame within 10s")
-        return
-    if msg.get("type") != "auth" or not _ws_token_valid(str(msg.get("token") or "")):
-        await _ws_reject(websocket, 4401, "invalid or inactive token")
+    if not await ws_session.authenticate(websocket):
         return
 
     plugin = plugin_service.get_plugin(plugin_name)
-    if plugin is None or not plugin["interactive"]:
-        await _ws_reject(websocket, 4404, f"'{plugin_name}' is not an interactive plugin")
+    if plugin is None:
+        await ws_session.reject(websocket, 4404, f"plugin '{plugin_name}' not found")
         return
 
     # Validate project state and build the session command with a short-lived DB session.
@@ -373,18 +362,41 @@ async def install_session(websocket: WebSocket, plugin_name: str, project_name: 
     try:
         project = db.query(Project).filter(Project.name == project_name).first()
         if project is None:
-            await _ws_reject(
+            await ws_session.reject(
                 websocket, 4404,
                 f"project '{project_name}' not found — POST /plugins/{plugin_name}/add first",
             )
             return
 
         project_dir = os.path.abspath(compose_service.project_dir(project_name))
-        if plugin["deploy_mode"] == "compose":
-            job_key = f"compose:{project_name}"
+        is_compose = plugin["deploy_mode"] == "compose"
+        job_key = f"compose:{project_name}" if is_compose else project.container_name
+
+        # A provision/build already in flight (non-interactive add, or a reconnect during
+        # an interactive build) — just tail it. A finished job is replayed the same way.
+        existing = docker_service.get_job(job_key)
+        if existing is not None and existing.status == "running":
+            await websocket.send_json({"type": "ready"})
+            await _stream_to_exit(websocket, job_key)
+            return
+
+        if not plugin["interactive"]:
+            if existing is None:
+                await ws_session.reject(
+                    websocket, 4404,
+                    f"no install job for '{project_name}' — POST /plugins/{plugin_name}/add first",
+                )
+                return
+            # Replay a completed non-interactive build (its log + exit).
+            await websocket.send_json({"type": "ready"})
+            await _stream_to_exit(websocket, job_key)
+            return
+
+        # Interactive plugin, no job in flight → run install.sh on a pty here.
+        if is_compose:
             install_script = os.path.join(project_dir, "install.sh")
             if not os.path.exists(install_script):
-                await _ws_reject(
+                await ws_session.reject(
                     websocket, 4404,
                     f"no staged install.sh — POST /plugins/{plugin_name}/add first",
                 )
@@ -396,17 +408,12 @@ async def install_session(websocket: WebSocket, plugin_name: str, project_name: 
                 .count()
             )
             if already:
-                await _ws_reject(websocket, 4409, "project is already provisioned")
+                await ws_session.reject(websocket, 4409, "project is already provisioned")
                 return
             cmd = ["bash", install_script, "pre"]
             env = _build_install_env(plugin, project_name, project_dir)
             finish_args = None
         else:
-            job_key = project.container_name
-            running = docker_service.get_job(job_key)
-            if running and running.status == "running":
-                await _ws_reject(websocket, 4409, "a job is already running for this project")
-                return
             cmd = ["bash", plugin["install"]]
             # Mirrors the env provision_from_plugin gives install.sh.
             env = {**os.environ, "PLUGIN_DIR": plugin["dir"], "PROJECT_DIR": project_dir}
@@ -424,7 +431,7 @@ async def install_session(websocket: WebSocket, plugin_name: str, project_name: 
         db.close()
 
     if not interactive_service.try_acquire(job_key):
-        await _ws_reject(websocket, 4409, "an install session is already in progress")
+        await ws_session.reject(websocket, 4409, "an install session is already in progress")
         return
     try:
         await websocket.send_json({"type": "ready"})
@@ -434,20 +441,24 @@ async def install_session(websocket: WebSocket, plugin_name: str, project_name: 
         if exit_code is None:
             return  # client disconnected; install killed; project left pre-install
 
-        if exit_code == 0:
-            # Continue provisioning BEFORE the exit frame so the client's status
-            # polling finds the follow-up job instead of no_job.
-            if plugin["deploy_mode"] == "compose":
-                await websocket.send_json({
-                    "type": "stdout",
-                    "data": "\n── install.sh done — provisioning nginx/SSL and starting compose ──\n",
-                })
-                await run_in_threadpool(_finish_compose_from_ws, plugin, project_name)
-            else:
-                docker_service.provision_from_plugin(**finish_args)
+        if exit_code != 0:
+            # install.sh failed — nothing to build; report it and stop.
+            await websocket.send_json({"type": "exit", "code": exit_code})
+            await websocket.close(code=1000)
+            return
 
-        await websocket.send_json({"type": "exit", "code": exit_code})
-        await websocket.close(code=1000)
+        # install.sh succeeded → launch the follow-up provision job and stream the build
+        # over the same socket, so the exit frame reports the build result.
+        if is_compose:
+            await websocket.send_json({
+                "type": "stdout",
+                "data": "\n── install.sh done — provisioning nginx/SSL and starting compose ──\n",
+            })
+            await run_in_threadpool(_finish_compose_from_ws, plugin, project_name)
+        else:
+            docker_service.provision_from_plugin(**finish_args)
+
+        await _stream_to_exit(websocket, job_key)
     except WebSocketDisconnect:
         pass
     finally:

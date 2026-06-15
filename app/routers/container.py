@@ -7,20 +7,19 @@ Project row itself (no parts). Replaces the old per-part router.
 
 import os
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, WebSocket
 from sqlalchemy.orm import Session
 
-from app.models.database import get_db
+from app.models.database import get_db, SessionLocal
 from app.models.orm import Project
 from app.models.schemas import (
     DockerJobStatusResponse,
-    ExecRequest,
     SslResponse,
     SetDomainRequest,
     ProjectResponse,
 )
 from app.auth import require_auth
-from app.services import docker_service, nginx_service
+from app.services import docker_service, nginx_service, compose_service, interactive_service, ws_session
 
 router = APIRouter()
 
@@ -90,14 +89,6 @@ def stop_container(project_name: str, db: Session = Depends(get_db), _=Depends(r
     return _job_response(project.container_name, f"Stop issued for '{project.container_name}' — poll /status")
 
 
-@router.post("/{project_name}/exec", response_model=DockerJobStatusResponse,
-             summary="Execute a command inside the running container — poll /status")
-def exec_command(project_name: str, request: ExecRequest, db: Session = Depends(get_db), _=Depends(require_auth)):
-    project = _get_dockerfile_project(project_name, db)
-    docker_service.exec_in_container(project.container_name, request.command, project.container_name)
-    return _job_response(project.container_name, f"Command launched in '{project.container_name}' — poll /status")
-
-
 @router.get("/{project_name}/status", response_model=DockerJobStatusResponse,
             summary="Status + logs of the last docker operation for the project")
 def get_docker_status(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
@@ -128,6 +119,35 @@ def abort_docker_job(project_name: str, db: Session = Depends(get_db), _=Depends
         message=message,
         logs=docker_service.get_job_logs(project.container_name),
         exit_code=job.exit_code if job else None,
+    )
+
+
+# ── Interactive exec shell over WebSocket ────────────────────────────────────────
+#
+# Replaces the old POST /exec + /status polling: the client connects, sends an auth
+# frame, and gets a live pty bridged to `docker exec -it`. Frame protocol matches the
+# install session (auth → ready → stdin/stdout/resize → exit; see ws_session +
+# interactive_service). An optional ?cmd= query overrides the default shell (sh).
+
+@router.websocket("/{project_name}/exec")
+async def exec_session(websocket: WebSocket, project_name: str, cmd: str = ""):
+    await websocket.accept()
+    if not await ws_session.authenticate(websocket):
+        return
+
+    db = SessionLocal()
+    try:
+        project = db.query(Project).filter(Project.name == project_name).first()
+        if project is None or project.deploy_mode != "dockerfile":
+            await ws_session.reject(websocket, 4404, f"no dockerfile project '{project_name}'")
+            return
+        container_name = project.container_name
+        project_dir = os.path.abspath(compose_service.project_dir(project_name))
+    finally:
+        db.close()
+
+    await interactive_service.run_exec_session(
+        websocket, container_name, project_dir, f"exec:{project_name}", cmd,
     )
 
 

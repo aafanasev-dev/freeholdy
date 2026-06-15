@@ -1,4 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 
 const BASE = import.meta.env.VITE_API_URL || "https://api.your_domain.com";
 const POLL_MS = 1000;
@@ -210,17 +213,18 @@ const LogPane = ({ log, onClose, onAbort }) => {
   );
 };
 
-// ── Interactive install pane ──────────────────────────────────────────────────
-// Drives an interactive plugin's install.sh over a WebSocket
-// (server endpoint: /plugins/{plugin}/install/{project}). First frame is auth, then
-// stdout frames stream into a LogPane-style scroll area and the input row sends
-// stdin frames. The server-side pty has echo disabled, so sent lines are appended
-// locally. Closing/aborting kills the script server-side; reconnecting re-runs it.
-const InteractiveInstallPane = ({ token, wsPath, project, onExit, onClose }) => {
+// ── Install pane ──────────────────────────────────────────────────────────────
+// Watches a plugin install over a WebSocket (/plugins/{plugin}/install/{project}). The
+// build always streams live here (no status polling). For interactive plugins the input
+// row drives install.sh's prompts (echo is disabled server-side, so sent lines are echoed
+// locally); for non-interactive plugins it is read-only and just shows the build. The
+// exit frame reports the build result; reconnecting re-attaches (interactive re-runs
+// install.sh if the project isn't built yet, otherwise re-streams the running build).
+const InstallPane = ({ token, wsPath, project, interactive, onExit, onClose }) => {
   const [lines, setLines] = useState("");
   const [status, setStatus] = useState("connecting");
   const [input, setInput] = useState("");
-  const [attempt, setAttempt] = useState(0);   // bump to reconnect (re-runs install.sh)
+  const [attempt, setAttempt] = useState(0);   // bump to reconnect
   const wsRef = useRef(null);
   const scrollRef = useRef();
   const exitedRef = useRef(false);
@@ -244,8 +248,8 @@ const InteractiveInstallPane = ({ token, wsPath, project, onExit, onClose }) => 
       else if (msg.type === "exit") {
         exitedRef.current = true;
         setStatus(msg.code === 0 ? "done" : "error");
-        if (msg.code === 0) onExitRef.current(0);
-        else setLines(l => l + `\n✗ install.sh exited with code ${msg.code} — reconnect to run it again\n`);
+        if (msg.code !== 0) setLines(l => l + `\n✗ install exited with code ${msg.code} — reconnect to retry\n`);
+        onExitRef.current(msg.code);
       }
     };
     ws.onclose = (ev) => {
@@ -258,7 +262,7 @@ const InteractiveInstallPane = ({ token, wsPath, project, onExit, onClose }) => 
         return;
       }
       setStatus("aborted");
-      setLines(l => l + "\n⚠ session closed — reconnect to re-run install.sh\n");
+      setLines(l => l + "\n⚠ session closed — reconnect to resume\n");
     };
     return () => { ws.close(); };
   }, [wsPath, token, attempt]);
@@ -274,8 +278,8 @@ const InteractiveInstallPane = ({ token, wsPath, project, onExit, onClose }) => 
     <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", display: "flex", flexDirection: "column", height: "280px", marginTop: "10px", boxShadow: C.shadow }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 12px", borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-          <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.12em" }}>INTERACTIVE INSTALL</span>
-          <span style={{ color: C.blue, fontFamily: C.ff, fontSize: "10px" }}>{project} → install.sh</span>
+          <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.12em" }}>INSTALL</span>
+          <span style={{ color: C.blue, fontFamily: C.ff, fontSize: "10px" }}>{project} → {interactive ? "install.sh" : "build"}</span>
           <Tag status={status} />
         </div>
         <div style={{ display: "flex", gap: "6px" }}>
@@ -288,20 +292,22 @@ const InteractiveInstallPane = ({ token, wsPath, project, onExit, onClose }) => 
       <div ref={scrollRef} style={{ flex: 1, overflow: "auto", padding: "10px 14px", fontFamily: C.mono, fontSize: "11px", color: C.txt, lineHeight: "1.65", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
         {lines || <span style={{ color: C.dim }}>connecting to install session…</span>}
       </div>
-      <div style={{ display: "flex", gap: "8px", padding: "8px 12px", borderTop: `1px solid ${C.bd}`, background: C.s2 }}>
-        <input
-          value={input} placeholder={status === "running" ? "type your answer, Enter to send" : "…"}
-          disabled={status !== "running"}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => { if (e.key === "Enter") send(); }}
-          style={{
-            flex: 1, background: C.s1, border: `1px solid ${C.bdB}`, color: C.txt,
-            fontFamily: C.mono, fontSize: "11px", padding: "6px 10px",
-            borderRadius: "8px", outline: "none",
-          }}
-        />
-        <Btn v="primary" sm onClick={send} disabled={status !== "running"}>send</Btn>
-      </div>
+      {interactive && (
+        <div style={{ display: "flex", gap: "8px", padding: "8px 12px", borderTop: `1px solid ${C.bd}`, background: C.s2 }}>
+          <input
+            value={input} placeholder={status === "running" ? "type your answer, Enter to send" : "…"}
+            disabled={status !== "running"}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") send(); }}
+            style={{
+              flex: 1, background: C.s1, border: `1px solid ${C.bdB}`, color: C.txt,
+              fontFamily: C.mono, fontSize: "11px", padding: "6px 10px",
+              borderRadius: "8px", outline: "none",
+            }}
+          />
+          <Btn v="primary" sm onClick={send} disabled={status !== "running"}>send</Btn>
+        </div>
+      )}
     </div>
   );
 };
@@ -322,18 +328,75 @@ const ModalHeader = ({ title, color = C.blue, onClose }) => (
   </div>
 );
 
-// ── Exec modal ────────────────────────────────────────────────────────────────
-const ExecModal = ({ project, onClose, onSubmit }) => {
-  const [cmd, setCmd] = useState("");
+// ── Exec terminal ─────────────────────────────────────────────────────────────
+// A full interactive shell over a WebSocket: an xterm.js terminal bridged to
+// `docker exec -it` on the server (/projects/{name}/exec, or .../services/{svc}/exec for
+// compose). auth frame first, then raw stdin/stdout frames + resize on fit. Closing the
+// modal closes the socket, which kills the exec server-side.
+const ExecTerminal = ({ token, project, service, label, onClose }) => {
+  const mountRef = useRef(null);
+  const [status, setStatus] = useState("connecting");
+  const [attempt, setAttempt] = useState(0);
+  const retriedBusyRef = useRef(false);
+
+  useEffect(() => {
+    const term = new Terminal({
+      fontFamily: C.mono, fontSize: 12, cursorBlink: true, convertEol: false,
+      theme: { background: "#1b1a3a", foreground: "#e8e7f3", cursor: "#b9aef3" },
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(mountRef.current);
+    fit.fit();
+
+    const wsPath = service
+      ? `/projects/${project}/services/${service}/exec`
+      : `/projects/${project}/exec`;
+    const ws = new WebSocket(BASE.replace(/^http/, "ws") + wsPath);
+    const sendResize = () => {
+      if (ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: "resize", rows: term.rows, cols: term.cols }));
+    };
+
+    ws.onopen = () => ws.send(JSON.stringify({ type: "auth", token }));
+    ws.onmessage = (ev) => {
+      let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === "ready") { setStatus("running"); fit.fit(); sendResize(); term.focus(); }
+      else if (msg.type === "stdout") term.write(msg.data);
+      else if (msg.type === "error") { term.write(`\r\n\x1b[31m${msg.message}\x1b[0m\r\n`); setStatus("error"); }
+      else if (msg.type === "exit") { setStatus(msg.code === 0 ? "done" : "error"); term.write(`\r\n\x1b[2m[exited ${msg.code}]\x1b[0m\r\n`); }
+    };
+    ws.onclose = (ev) => {
+      if (ev.code === 4409 && !retriedBusyRef.current) {
+        retriedBusyRef.current = true;
+        setTimeout(() => setAttempt(a => a + 1), 400);
+        return;
+      }
+      setStatus(s => (s === "running" || s === "connecting") ? "aborted" : s);
+    };
+
+    const dataSub = term.onData((d) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "stdin", data: d }));
+    });
+    const onWinResize = () => { fit.fit(); sendResize(); };
+    window.addEventListener("resize", onWinResize);
+
+    return () => {
+      window.removeEventListener("resize", onWinResize);
+      dataSub.dispose();
+      ws.close();
+      term.dispose();
+    };
+  }, [token, project, service, attempt]);
+
   return (
-    <Modal onClose={onClose}>
-      <ModalHeader title="EXEC IN CONTAINER" color={C.amber} onClose={onClose} />
-      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "10px" }}>{project}</div>
-      <TextIn value={cmd} onChange={setCmd} placeholder="ls /app" style={{ marginBottom: "12px" }} />
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
-        <Btn v="ghost" onClick={onClose}>cancel</Btn>
-        <Btn v="amber" onClick={() => { if (cmd.trim()) { onSubmit(cmd.trim()); onClose(); } }} disabled={!cmd.trim()}>run</Btn>
+    <Modal onClose={onClose} width={780}>
+      <ModalHeader title="EXEC SHELL" color={C.amber} onClose={onClose} />
+      <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "10px" }}>
+        <span style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px" }}>{label || project}</span>
+        <Tag status={status} />
       </div>
+      <div ref={mountRef} style={{ height: "420px", background: "#1b1a3a", borderRadius: "8px", padding: "8px 10px", overflow: "hidden" }} />
     </Modal>
   );
 };
@@ -643,7 +706,7 @@ const ContainerRow = ({ project, info, token, onOperation, onRefresh }) => {
         </td>
       </tr>
 
-      {modal?.type === "exec"       && <ExecModal project={project} onClose={() => setModal(null)} onSubmit={(cmd) => act("exec", { command: cmd })} />}
+      {modal?.type === "exec"       && <ExecTerminal token={token} project={project} label={project} onClose={() => setModal(null)} />}
       {modal?.type === "status"     && <StatusModal data={modal.data} project={project} onClose={() => setModal(null)} />}
       {modal?.type === "ssl"        && <SslModal data={modal.data} project={project} onClose={() => setModal(null)} />}
       {modal?.type === "domain"     && <DomainModal token={token} project={project} info={info} onClose={() => setModal(null)} onDone={onRefresh} />}
@@ -651,14 +714,20 @@ const ContainerRow = ({ project, info, token, onOperation, onRefresh }) => {
   );
 };
 
-// ── Service row (compose mode: display-only lifecycle, but custom domain is per-service) ──
-const ServiceRow = ({ project, info, token, onRefresh }) => {
+// ── Service row (compose mode: per-service exec + custom domain; stack lifecycle is on the card) ──
+const ServiceRow = ({ project, info, token, onOperation, onRefresh }) => {
   const [modal, setModal] = useState(null);
+  const isRunning = info.container_status === "running";
+
   return (
     <tr style={{ borderBottom: `1px solid ${C.bd}` }}>
       <Cells label={info.name} info={info} />
       <td style={{ padding: "6px 8px" }}>
-        <Btn sm v="blue" onClick={() => setModal("domain")} title="Set or clear a custom domain">domain</Btn>
+        <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+          <Btn sm v="amber" onClick={() => setModal("exec")} disabled={!isRunning} title="Exec command in this service's container">exec</Btn>
+          <Btn sm v="blue" onClick={() => setModal("domain")} title="Set or clear a custom domain">domain</Btn>
+        </div>
+        {modal === "exec"   && <ExecTerminal token={token} project={project} service={info.name} label={`${project} → ${info.name}`} onClose={() => setModal(null)} />}
         {modal === "domain" && <DomainModal token={token} project={project} service={info.name} info={info} onClose={() => setModal(null)} onDone={onRefresh} />}
       </td>
     </tr>
@@ -752,7 +821,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh }) => {
             </thead>
             <tbody>
               {isCompose
-                ? (project.services || []).map(s => <ServiceRow key={s.name} project={project.name} info={s} token={token} onRefresh={onRefresh} />)
+                ? (project.services || []).map(s => <ServiceRow key={s.name} project={project.name} info={s} token={token} onOperation={onOperation} onRefresh={onRefresh} />)
                 : (project.container
                     ? <ContainerRow project={project.name} info={project.container} token={token} onOperation={onOperation} onRefresh={onRefresh} />
                     : null)}
@@ -939,7 +1008,7 @@ const LoginScreen = ({ onAuth }) => {
     <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div style={{ width: 380, background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "36px", boxShadow: "0 12px 48px rgba(27,26,58,.12)" }}>
         <div style={{ marginBottom: "30px" }}>
-          <div style={{ color: C.purple, fontFamily: C.ff, fontSize: "22px", fontWeight: 700, marginBottom: "6px" }}>🐾 freeholdy</div>
+          <div style={{ color: C.purple, fontFamily: C.ff, fontSize: "22px", fontWeight: 700, marginBottom: "6px" }}>freeholdy</div>
           <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", letterSpacing: "0.12em" }}>CLOUDOPEN.SPACE CONTROL PANEL</div>
         </div>
 
@@ -968,6 +1037,7 @@ const LoginScreen = ({ onAuth }) => {
 const Dashboard = ({ token, onLogout }) => {
   const [projects, setProjects] = useState([]);
   const [health, setHealth] = useState(null);
+  const [version, setVersion] = useState(null);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
@@ -989,9 +1059,14 @@ const Dashboard = ({ token, onLogout }) => {
     catch { setHealth("unreachable"); }
   }, [client]);
 
-  useEffect(() => { checkHealth(); fetchProjects(); }, []);
+  const fetchVersion = useCallback(async () => {
+    try { setVersion(await client.get("/version")); } catch {}
+  }, [client]);
 
-  // Both modes poll a project-level status endpoint (compose has its own path).
+  useEffect(() => { checkHealth(); fetchProjects(); fetchVersion(); }, []);
+
+  // Build/start/stop/ssl poll the project-level status endpoint; compose lifecycle has
+  // its own path. (Exec and installs stream over WebSockets, not polled.)
   const statusPath = (log) => log.kind === "compose"
     ? `/projects/${log.project}/compose/status`
     : `/projects/${log.project}/status`;
@@ -1017,53 +1092,23 @@ const Dashboard = ({ token, onLogout }) => {
 
   const handleInstalled = useCallback((data) => {
     setProjects(p => [data.project, ...p.filter(x => x.name !== data.project.name)]);
-    if (data.job?.status === "waiting_interactive") {
-      // Interactive plugins: install.sh must run over a WebSocket session first; the
-      // normal provision/compose-up polling takes over once it exits 0 (handleInteractiveExit).
-      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-      setActiveLog(null);
-      setInteractiveLog({
-        project: data.project.name,
-        wsPath: data.ws_path,
-        kind: data.project.deploy_mode === "compose" ? "compose" : undefined,
-      });
-      setShowPlugins(false);
-      return;
-    }
-    if (data.project.deploy_mode === "compose") {
-      // Compose plugins stream `docker compose up` at the project level.
-      handleOperation({
-        project: data.project.name,
-        kind: "compose",
-        operation: data.job.operation || "compose_up",
-        status: data.job.status,
-        logs: data.job.logs || data.job.message || "",
-      });
-    } else {
-      // Dockerfile plugins stream the provision job at the project level.
-      handleOperation({
-        project: data.project.name,
-        operation: data.job.operation || "provision",
-        status: data.job.status,
-        logs: data.job.logs || data.job.message || "",
-      });
-    }
-    setShowPlugins(false);
-  }, [handleOperation]);
-
-  const handleInteractiveExit = useCallback((code) => {
-    if (code !== 0 || !interactiveLog) return;  // failure keeps the pane open for reconnect
-    setInteractiveLog(null);
-    // install.sh succeeded — the server has already spawned the follow-up job
-    // (provision / compose_up), so hand off to the normal polling LogPane.
-    handleOperation({
-      project: interactiveLog.project,
-      kind: interactiveLog.kind,
-      operation: interactiveLog.kind === "compose" ? "compose_up" : "provision",
-      status: "running",
-      logs: "",
+    // Every install streams over its WebSocket now (interactive drives install.sh first,
+    // non-interactive just watches the build). Hand off to the InstallPane.
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    setActiveLog(null);
+    setInteractiveLog({
+      project: data.project.name,
+      wsPath: data.ws_path,
+      interactive: data.job?.status === "waiting_interactive",
     });
-  }, [interactiveLog, handleOperation]);
+    setShowPlugins(false);
+  }, []);
+
+  // The build streamed to completion over the install WebSocket — refresh the project
+  // list so its status (running / failed) updates. The pane stays open showing the log.
+  const handleInstallExit = useCallback((code) => {
+    fetchProjects();
+  }, [fetchProjects]);
 
   const handleAbort = async () => {
     if (!activeLog) return;
@@ -1088,7 +1133,12 @@ const Dashboard = ({ token, onLogout }) => {
       {/* Header */}
       <div style={{ background: C.s1, borderBottom: `1px solid ${C.bd}`, padding: "0 22px", display: "flex", alignItems: "center", justifyContent: "space-between", height: "52px", position: "sticky", top: 0, zIndex: 50, boxShadow: "0 1px 3px rgba(27,26,58,.06)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
-          <span style={{ color: C.purple, fontSize: "15px", fontWeight: 700 }}>🐾 freeholdy</span>
+          <span style={{ color: C.purple, fontSize: "15px", fontWeight: 700 }}>freeholdy</span>
+          {version && (
+            <span style={{ color: C.purple, fontSize: "10px", fontWeight: 600, padding: "2px 7px", border: `1px solid ${C.bd}`, borderRadius: "5px" }}>
+              v{version.version} · {version.type}
+            </span>
+          )}
           <span style={{ width: 1, height: 16, background: C.bd, display: "inline-block" }} />
           <span style={{ color: C.dim, fontSize: "10px" }}>{BASE.replace(/^https?:\/\/api\./, "").replace(/^https?:\/\//, "")}</span>
         </div>
@@ -1144,11 +1194,12 @@ const Dashboard = ({ token, onLogout }) => {
         )}
 
         {interactiveLog ? (
-          <InteractiveInstallPane
+          <InstallPane
             token={token}
             wsPath={interactiveLog.wsPath}
             project={interactiveLog.project}
-            onExit={handleInteractiveExit}
+            interactive={interactiveLog.interactive}
+            onExit={handleInstallExit}
             onClose={() => setInteractiveLog(null)}
           />
         ) : (
