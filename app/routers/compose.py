@@ -91,6 +91,9 @@ def provision_compose(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Persist the deploy mode (mirrors provision_dockerfile). A rollback below reverts this.
+    project.deploy_mode = "compose"
+
     # Re-provision: capture any custom domains keyed by service name so they survive,
     # then drop existing service rows first so their ports are freed.
     prior_custom_domains = {s.name: s.custom_domain for s in project.services if s.custom_domain}

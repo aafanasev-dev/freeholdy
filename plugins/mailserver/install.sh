@@ -33,7 +33,7 @@ DATA_ROOT="${PROJECT_DIR}/docker-data/dms"
 CONFIG_DIR="${DATA_ROOT}/config"
 ACCOUNTS_FILE="${CONFIG_DIR}/postfix-accounts.cf"
 
-# 24 hex chars. (Not sftpgo's `tr </dev/urandom | head` — under pipefail that
+# 24 hex chars. (Not the `tr </dev/urandom | head` pattern — under pipefail that
 # dies with SIGPIPE and `set -e` silently kills the whole install.)
 _gen_pass() {
     openssl rand -hex 12

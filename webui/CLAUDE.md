@@ -6,9 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The React control panel for freeholdy (`webui/`). It is a pure browser-side client of the
 FastAPI server documented in `../CLAUDE.md` — it ships no backend of its own and talks to the
-live API over HTTPS. It covers every `fhcli` CLI command **except** raw SFTP transfer
-(`fhcli sftp-upload`), which is intentionally CLI-only (see the footer banner in `Dashboard`).
-Note the web UI *does* do file/folder upload over the API via the unified `UploadModal`.
+live API over HTTPS. The web UI does file/folder upload over the API via the unified
+`UploadModal`; the CLI's `fhcli upload` uploads over the same API.
 
 ## Commands
 
@@ -81,6 +80,18 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   connects to `WS /plugins/{plugin}/install/{project}` and `InstallPane` streams the build log live
   (interactive plugins also drive `install.sh` via an input row). The `exit` frame reports the build
   result — no `/status` polling during install.
+- **Git projects:** `POST /git/add` (body `{ name, git_url, branch? }`) clones a repo, auto-detects
+  a Dockerfile/compose, provisions nginx + SSL, then builds + runs it. Same response shape as
+  `/plugins/{name}/add` (`{ project, job, ws_path }`); the build streams over
+  `WS /git/deploy/{project}` (read-only — git deploys never prompt). `GitProjectForm` posts this and
+  hands the response to the same `handleInstalled` → `InstallPane` path as plugins (interactive is
+  always false). The "+ git project" toolbar button toggles the form alongside "new project"/"add plugin".
+- **Git SSH key:** `GET /git/key` returns the server's GitHub SSH public key (`{ public_key, created,
+  key_path, instructions }`), creating an ed25519 keypair server-side on first use. The header's
+  "git key" button opens `GitKeyModal`, which fetches it and shows the key (with a copy button) plus
+  GitHub instructions — so a user can add the key to GitHub and clone private repos over
+  `git@github.com:…`. A `POST /git/add` clone that fails SSH auth returns a 400 whose detail points
+  the user here, surfaced in `GitProjectForm`'s `<Err>`.
 
 There are **no `/parts/{type}/...`, `/dockerfile`, `/compose`, or `/context` upload endpoints** — a
 project starts as `deploy_mode: "pending"` and the first `upload` makes it either one container

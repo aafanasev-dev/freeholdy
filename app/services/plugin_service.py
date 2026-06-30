@@ -15,15 +15,31 @@ and instantiates what ships with freeholdy.
 """
 
 import json
+import logging
 import os
+import re
 import shutil
 from typing import Optional
 
 from app.config import settings
 
+logger = logging.getLogger(__name__)
+
 _VALID_PROJECT_TYPES = {"user", "plugin", "system"}
 _VALID_DEPLOY_MODES = {"dockerfile", "compose"}
 _DEFAULT_PROJECT_TYPE = "plugin"
+
+# A domain_prefix becomes the subdomain label(s) in the project's hostname
+# ({domain_prefix}.{BASE_DOMAIN}), an nginx server_name, and a certbot -d argument, so
+# it must be DNS-safe. Each dot-separated segment is a DNS label: 1-63 chars, lowercase
+# alphanumeric or hyphen, no leading/trailing hyphen. "" is allowed and pins to the apex.
+_DOMAIN_LABEL = r'(?!-)[a-z0-9-]{1,63}(?<!-)'
+_DOMAIN_PREFIX_RE = re.compile(rf'^{_DOMAIN_LABEL}(\.{_DOMAIN_LABEL})*$')
+
+
+def _valid_domain_prefix(dp: str) -> bool:
+    """True if `dp` is a valid subdomain prefix: empty (apex) or DNS-safe label(s)."""
+    return dp == "" or bool(_DOMAIN_PREFIX_RE.match(dp))
 
 
 def _plugins_root() -> str:
@@ -83,6 +99,14 @@ def _load_manifest(plugin_dir: str, name: str) -> Optional[dict]:
     if "domain_prefix" in data:
         dp = data["domain_prefix"]
         domain_prefix = "" if dp is None else str(dp)
+        if not _valid_domain_prefix(domain_prefix):
+            logger.warning(
+                "Plugin %r has an invalid domain_prefix %r — it must be a DNS-safe "
+                "subdomain label (lowercase letters, digits and hyphens; no "
+                "leading/trailing hyphen). Skipping plugin.",
+                name, domain_prefix,
+            )
+            return None
     else:
         domain_prefix = None
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # install.sh
-# One-command installer for freeholdy (API only — no web UI, no SFTPGo).
+# One-command installer for freeholdy (API only — no web UI).
 #
 # Runs in TWO auto-detected modes:
 #
@@ -859,6 +859,9 @@ server {
     listen 80;
     server_name ${API_DOMAIN};
 
+    # Chunked uploads send ~1 MiB pieces; this gives headroom over nginx's 1m default.
+    client_max_body_size 8m;
+
     location / {
         proxy_pass         http://127.0.0.1:${APP_PORT};
         proxy_set_header   Host              \$host;
@@ -891,6 +894,9 @@ server {
     ssl_certificate     /etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${API_DOMAIN}/privkey.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
+
+    # Chunked uploads send ~1 MiB pieces; this gives headroom over nginx's 1m default.
+    client_max_body_size 8m;
 
     location / {
         proxy_pass         http://127.0.0.1:${APP_PORT};

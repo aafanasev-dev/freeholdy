@@ -10,8 +10,9 @@ Usage examples:
   fhcli plugins
   fhcli plugin-add hello-world mysite
   fhcli create myapp                    # then upload the project files (see below)
-  fhcli upload myapp ./myapp            # uploads a file or folder; auto-detects
-                                      # Dockerfile / docker-compose.yml and provisions
+  fhcli upload myapp ./myapp            # uploads a file or folder over the HTTP API;
+                                      # auto-detects Dockerfile / docker-compose.yml
+                                      # and provisions.
   fhcli build myapp
   fhcli build myapp --no-follow
   fhcli start myapp
@@ -26,20 +27,29 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
+import uuid
+import zipfile
 from pathlib import Path
 
 import click
-import paramiko
 import requests
 from dotenv import load_dotenv
 from rich import box
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
-from rich.progress import BarColumn, FileSizeColumn, Progress, TextColumn, TransferSpeedColumn
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 from rich.table import Table
 from rich.text import Text
 
@@ -51,15 +61,66 @@ TOKEN       = os.getenv("TOKEN", "")
 BASE_DOMAIN = os.getenv("BASE_DOMAIN", "").strip()
 BASE_URL    = f"https://api.{BASE_DOMAIN}".rstrip("/") if BASE_DOMAIN else ""
 
-SFTP_HOST     = os.getenv("SFTP_HOST", BASE_DOMAIN)
-SFTP_PORT     = int(os.getenv("SFTP_PORT", "2022"))
-SFTP_USER     = os.getenv("SFTP_USER", "")
-SFTP_PASSWORD = os.getenv("SFTP_PASSWORD", "")
-SFTP_KEY_PATH = os.getenv("SFTP_KEY_PATH", "")
-
 console = Console()
 
 _POLL_INTERVAL = 0.75   # seconds between status polls
+CHUNK_SIZE = 1024 * 1024   # 1 MiB pieces — stays under nginx's 1 MB default body limit
+
+
+# ── Project-name validation ─────────────────────────────────────────────────────
+# Mirrors the server's slug rule (schemas.py::validate_project_slug): a project name
+# becomes a DNS subdomain (name.your-domain.com) and a Docker container name, so it
+# must be a DNS-safe slug. We check it here too, to fail fast with an explanation and
+# a suggested fix before the clone/upload work — instead of an opaque HTTP 422.
+import re as _re
+
+_SLUG_RE = _re.compile(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$')
+
+
+def _suggest_slug(name: str) -> str:
+    """Best-effort conversion of an arbitrary name into a valid slug."""
+    s = name.strip().lower()
+    s = _re.sub(r'[^a-z0-9]+', '-', s)   # underscores, spaces, dots, … → hyphen
+    s = _re.sub(r'-{2,}', '-', s)        # collapse runs of hyphens
+    return s.strip('-')
+
+
+def _validate_project_name(name: str) -> None:
+    """Validate a new project name; on failure print an explicit reason + a suggestion
+    and exit. A single lowercase-alphanumeric char is allowed (matches the server)."""
+    if len(name) == 1 and _re.match(r'^[a-z0-9]$', name):
+        return
+    if _SLUG_RE.match(name):
+        return
+
+    # Figure out the most useful concrete reason to show the user.
+    reasons = []
+    if name != name.lower():
+        reasons.append("contains uppercase letters")
+    if "_" in name:
+        reasons.append("contains underscores ('_')")
+    if " " in name:
+        reasons.append("contains spaces")
+    bad = set(_re.findall(r'[^a-z0-9-]', name.lower())) - {" ", "_"}
+    if bad:
+        reasons.append("contains disallowed characters: " + " ".join(sorted(bad)))
+    if name[:1] == "-" or name[-1:] == "-":
+        reasons.append("has a leading or trailing hyphen")
+    if not name:
+        reasons.append("is empty")
+    if not reasons:
+        reasons.append("is not a valid DNS-safe slug")
+
+    console.print(f"[bold red]Invalid project name:[/] '{name}'")
+    console.print("  Project names become a subdomain ([dim]name.your-domain.com[/]) and a "
+                  "Docker container name, so they must be DNS-safe:")
+    console.print("  [dim]lowercase letters, digits and hyphens only — no leading/trailing hyphen.[/]")
+    for r in reasons:
+        console.print(f"    [red]•[/] {r}")
+    suggestion = _suggest_slug(name)
+    if suggestion and _SLUG_RE.match(suggestion):
+        console.print(f"\n  Try: [bold green]{suggestion}[/]")
+    sys.exit(1)
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
@@ -99,6 +160,26 @@ def _post(path: str, json: dict | None = None, files: dict | list | None = None)
         else:
             kwargs["json"] = json or {}
         r = requests.post(_url(path), **kwargs)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.ConnectionError:
+        console.print(f"[bold red]Connection error:[/] cannot reach {BASE_URL}")
+        sys.exit(1)
+    except requests.exceptions.HTTPError as e:
+        _print_http_error(e.response)
+        sys.exit(1)
+
+
+def _post_raw(path: str, data: bytes, params: dict) -> dict:
+    """POST a raw octet-stream body (one upload chunk) with query params."""
+    try:
+        r = requests.post(
+            _url(path),
+            headers={**_headers(), "Content-Type": "application/octet-stream"},
+            params=params,
+            data=data,
+            timeout=120,
+        )
         r.raise_for_status()
         return r.json()
     except requests.exceptions.ConnectionError:
@@ -468,6 +549,7 @@ def create_project(name: str):
     Example:
       fhcli create myapp                    # then: fhcli upload myapp ./myapp
     """
+    _validate_project_name(name)
     console.print(f"Creating project [bold cyan]{name}[/]…")
     data = _post("/projects", json={"name": name})
 
@@ -538,6 +620,7 @@ def plugin_add(plugin: str, project: str, follow: bool):
       fhcli plugin-add hello-world mysite
       fhcli plugin-add hello-world mysite --no-follow
     """
+    _validate_project_name(project)
     console.print(f"Installing plugin [cyan]{plugin}[/] as project [bold cyan]{project}[/]…")
     with console.status("Creating project (certbot runs during creation)…"):
         data = _post_or_409(f"/plugins/{plugin}/add", json={"project_name": project})
@@ -608,6 +691,99 @@ def plugin_add(plugin: str, project: str, follow: bool):
         )
         sys.exit(1)
     console.print("\n[green]✓[/] Plugin installed and running")
+
+
+# ── git-add ──────────────────────────────────────────────────────────────────────
+
+@cli.command("git-add")
+@click.argument("name")
+@click.argument("git_url")
+@click.option("--branch", "-b", default=None, help="Branch/ref to clone (default: the repo's default branch).")
+@click.option(
+    "--follow/--no-follow",
+    default=True,
+    help="Stream provision logs live (default: on). Use --no-follow to fire-and-forget.",
+)
+def git_add(name: str, git_url: str, branch: str | None, follow: bool):
+    """Create a new project from a git repository, then build + run it.
+
+    Clones GIT_URL into the project, auto-detects a Dockerfile or docker-compose.yml
+    (compose wins), wires up nginx + SSL, then builds and starts the container/stack —
+    streaming the build log live.
+
+    \b
+    Examples:
+      fhcli git-add mysite https://github.com/owner/repo.git
+      fhcli git-add mysite git@github.com:owner/repo.git --branch dev
+      fhcli git-add mysite https://github.com/owner/repo.git --no-follow
+    """
+    _validate_project_name(name)
+    console.print(f"Cloning [cyan]{git_url}[/] as project [bold cyan]{name}[/]…")
+    with console.status("Cloning + provisioning (certbot runs during creation)…"):
+        data = _post("/git/add", json={"name": name, "git_url": git_url, "branch": branch})
+
+    proj = data["project"]
+    console.print(f"\n[bold green]✓ {data.get('message', 'Project created')}[/]\n")
+
+    table = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold")
+    table.add_column("Part")
+    table.add_column("Subdomain", style="blue")
+    table.add_column("Local port", justify="right")
+    table.add_column("SSL")
+    is_compose = proj.get("deploy_mode") == "compose"
+    if is_compose:
+        entries = proj.get("services", [])
+    else:
+        c = proj.get("container") or {}
+        entries = [c] if c else []
+    for part in entries:
+        ssl_icon = "[green]✓[/]" if part.get("ssl_enabled") else "[yellow]pending[/]"
+        table.add_row(
+            part.get("name", "container"),
+            part.get("subdomain", ""),
+            str(part.get("local_port", "")),
+            ssl_icon,
+        )
+    console.print(table)
+
+    ws_path = data.get("ws_path") or f"/git/deploy/{name}"
+
+    if not follow:
+        hint = f"fhcli compose-status {name}" if is_compose else f"fhcli status {name}"
+        console.print(f"\n[green]✓[/] Provisioning started. Check progress with: [bold]{hint}[/]")
+        return
+
+    console.print("\n[dim]─── provision output (build → run) ───[/]")
+    code = asyncio.run(_install_ws(ws_path))
+    if code != 0:
+        console.print(
+            f"\n[red]✗ build failed (exit {code})[/] — re-run after fixing, "
+            f"or [bold]fhcli delete {name}[/] to start over"
+        )
+        sys.exit(1)
+    console.print("\n[green]✓[/] Project deployed and running")
+
+
+@cli.command("get-git-key")
+def get_git_key():
+    """Fetch the server's GitHub SSH public key (creates it on first use).
+
+    Add the printed key to GitHub so the server can clone your private repositories
+    over SSH (git@github.com:owner/repo.git). Needed only for private repos.
+    """
+    data = _get("/git/key")
+    pubkey = data.get("public_key", "")
+    if data.get("created"):
+        console.print("[green]✓[/] Generated a new GitHub SSH key on the server.\n")
+    else:
+        console.print("[green]✓[/] Server already has a GitHub SSH key.\n")
+
+    console.print("[bold]Public key[/] (copy the whole line):")
+    console.print(f"[cyan]{pubkey}[/]\n")
+
+    instructions = data.get("instructions", "")
+    if instructions:
+        console.print(instructions)
 
 
 # ── compose lifecycle ─────────────────────────────────────────────────────────────
@@ -701,6 +877,83 @@ def _print_provisioned(data: dict):
     console.print(f"\n  Next: [bold]{nxt}[/]")
 
 
+def _collect_files(path: str, dest: str) -> list[tuple[str, str]]:
+    """Expand a file/dir into (local_path, rel_path) pairs; rel_path includes the dest prefix."""
+    if os.path.isdir(path):
+        paths = [os.path.join(root, n) for root, _dirs, names in os.walk(path) for n in names]
+        base = path
+    else:
+        paths = [path]
+        base = os.path.dirname(path) or "."
+
+    prefix = dest.strip("/")
+    pairs: list[tuple[str, str]] = []
+    for p in paths:
+        rel = os.path.relpath(p, base).replace(os.sep, "/")
+        if prefix:
+            rel = f"{prefix}/{rel}"
+        pairs.append((p, rel))
+    return pairs
+
+
+def _chunked_upload(project: str, file_pairs: list[tuple[str, str]]) -> dict:
+    """Zip the files, send the archive in CHUNK_SIZE pieces with a progress bar, and ask
+    the server to reassemble + unzip + provision. Returns the completion response dict.
+
+    Each (local_path, rel_path) pair's rel_path becomes the zip entry name, so the server
+    rebuilds the same tree (the dest prefix from `_collect_files` is already baked in)."""
+    upload_id = uuid.uuid4().hex
+    tmp = tempfile.NamedTemporaryFile(prefix="fhcli-upload-", suffix=".zip", delete=False)
+    tmp.close()
+    try:
+        with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
+            for local, rel in file_pairs:
+                zf.write(local, arcname=rel)
+
+        total = os.path.getsize(tmp.name)
+        with Progress(
+            TextColumn("[cyan]{task.description}[/]"),
+            BarColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("sending", total=total)
+            with open(tmp.name, "rb") as fh:
+                offset = 0
+                while True:
+                    chunk = fh.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    _post_raw(
+                        f"/projects/{project}/upload/chunk",
+                        data=chunk,
+                        params={"upload_id": upload_id, "offset": offset},
+                    )
+                    offset += len(chunk)
+                    progress.update(task, advance=len(chunk))
+
+        with console.status("Reassembling + provisioning (certbot may run if a manifest is detected)…"):
+            return _post(
+                f"/projects/{project}/upload/complete",
+                json={"upload_id": upload_id, "total_size": total},
+            )
+    finally:
+        os.unlink(tmp.name)
+
+
+def _report_upload(data: dict) -> None:
+    """Print an upload response: message, file list, and the provision summary if any."""
+    console.print(f"[green]✓[/] {data.get('message', 'uploaded')}")
+    for rel in data.get("files", [])[:50]:
+        console.print(f"  [dim]{rel}[/]")
+    if data.get("count", 0) > 50:
+        console.print(f"  [dim]… and {data['count'] - 50} more[/]")
+    if data.get("provisioned"):
+        _print_provisioned(data)
+
+
 @cli.command("upload")
 @click.argument("project")
 @click.argument("path", metavar="LOCAL_PATH", type=click.Path(exists=True))
@@ -710,6 +963,10 @@ def upload(project: str, path: str, dest: str):
     """Upload a file or a folder into a project, then auto-detect + provision.
 
     LOCAL_PATH may be a single file or a directory (sent recursively, tree preserved).
+    The selection is zipped and streamed to the server in 1 MiB pieces (with a progress
+    bar), so files and folders of any size go through; the server reassembles and unzips
+    the archive, preserving the tree.
+
     After the files land, the server scans the project root for a manifest: a
     docker-compose.yml selects compose mode (it wins over a Dockerfile), a bare Dockerfile
     selects dockerfile mode (its EXPOSE'd port becomes the container port), and nginx + SSL
@@ -721,43 +978,14 @@ def upload(project: str, path: str, dest: str):
       fhcli upload myapp ./Dockerfile       # a single file
       fhcli upload myapp ./assets --dest static
     """
-    if os.path.isdir(path):
-        paths = [os.path.join(root, n) for root, _dirs, names in os.walk(path) for n in names]
-        base = path
-    else:
-        paths = [path]
-        base = os.path.dirname(path) or "."
-    if not paths:
+    file_pairs = _collect_files(path, dest)
+    if not file_pairs:
         console.print(f"[yellow]⚠[/] No files found under [cyan]{path}[/]")
         return
 
-    prefix = dest.strip("/")
-    handles = []
-    try:
-        files = []
-        for p in paths:
-            rel = os.path.relpath(p, base).replace(os.sep, "/")
-            if prefix:
-                rel = f"{prefix}/{rel}"
-            fh = open(p, "rb")
-            handles.append(fh)
-            files.append(("files", (rel, fh, "application/octet-stream")))
-
-        console.print(f"Uploading [bold]{len(files)}[/] file(s) → [cyan]{project}[/]…")
-        with console.status("Contacting API (certbot may run if a manifest is detected)…"):
-            data = _post(f"/projects/{project}/upload", files=files)
-    finally:
-        for fh in handles:
-            fh.close()
-
-    console.print(f"[green]✓[/] {data.get('message', 'uploaded')}")
-    for rel in data.get("files", [])[:50]:
-        console.print(f"  [dim]{rel}[/]")
-    if data.get("count", 0) > 50:
-        console.print(f"  [dim]… and {data['count'] - 50} more[/]")
-
-    if data.get("provisioned"):
-        _print_provisioned(data)
+    console.print(f"Uploading [bold]{len(file_pairs)}[/] file(s) → [cyan]{project}[/]…")
+    data = _chunked_upload(project, file_pairs)
+    _report_upload(data)
 
 
 # ── build ──────────────────────────────────────────────────────────────────────
@@ -1096,122 +1324,6 @@ def set_domain(project: str, domain: str | None, service: str | None, clear: boo
         console.print(f"[bold green]✓[/] Now serving [blue]{info.get('subdomain')}[/]  ·  SSL: {ssl_status}")
     else:
         console.print("[bold green]✓ Done[/]")
-
-
-# ── SFTP helpers ───────────────────────────────────────────────────────────────
-
-def _sftp_connect() -> tuple[paramiko.SSHClient, paramiko.SFTPClient]:
-    """Open an SSH+SFTP connection using password or key from .env."""
-    if not SFTP_USER:
-        console.print("[bold red]Error:[/] SFTP_USER is not set in cli/.env")
-        sys.exit(1)
-    if not SFTP_PASSWORD and not SFTP_KEY_PATH:
-        console.print("[bold red]Error:[/] set SFTP_PASSWORD or SFTP_KEY_PATH in cli/.env")
-        sys.exit(1)
-
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-    connect_kwargs: dict = dict(
-        hostname=SFTP_HOST,
-        port=SFTP_PORT,
-        username=SFTP_USER,
-        timeout=15,
-    )
-    if SFTP_KEY_PATH:
-        connect_kwargs["key_filename"] = str(Path(SFTP_KEY_PATH).expanduser())
-    else:
-        connect_kwargs["password"] = SFTP_PASSWORD
-
-    try:
-        ssh.connect(**connect_kwargs)
-    except paramiko.AuthenticationException:
-        console.print("[bold red]SFTP auth failed.[/] Check SFTP_USER / SFTP_PASSWORD in cli/.env")
-        sys.exit(1)
-    except Exception as exc:
-        console.print(f"[bold red]SFTP connection error:[/] {exc}")
-        sys.exit(1)
-
-    return ssh, ssh.open_sftp()
-
-
-def _sftp_makedirs(sftp: paramiko.SFTPClient, remote_path: str) -> None:
-    """Create remote directory tree (like mkdir -p)."""
-    parts = Path(remote_path).parts
-    current = ""
-    for part in parts:
-        current = str(Path(current) / part)
-        try:
-            sftp.stat(current)
-        except FileNotFoundError:
-            sftp.mkdir(current)
-
-
-# ── sftp-upload ──────────────────────────────────────────────────────────────────
-
-@cli.command("sftp-upload")
-@click.argument("project")
-@click.argument("files", metavar="FILE...", nargs=-1, required=True,
-                type=click.Path(exists=True, dir_okay=False))
-@click.option("--dest", "-d", default="", metavar="REMOTE_DIR",
-              help="Sub-directory inside the project folder (default: project root).")
-def sftp_upload_files(project: str, files: tuple, dest: str):
-    """Upload files to a project's folder over SFTP (raw transfer, no provisioning).
-
-    For getting files into a project and auto-provisioning, prefer [bold]fhcli upload[/];
-    this SFTP path is for large archives / direct transfers to /srv/projects/PROJECT/.
-
-    \b
-    Examples:
-      fhcli sftp-upload myapp ./app.tar.gz
-      fhcli sftp-upload myapp ./dist.zip ./assets.tar.gz
-      fhcli sftp-upload myapp ./data/seed.sql --dest db
-    """
-    ssh, sftp = _sftp_connect()
-
-    remote_base = f"/{project}"
-    if dest:
-        remote_base = f"{remote_base}/{dest.strip('/')}"
-
-    try:
-        _sftp_makedirs(sftp, remote_base)
-    except Exception as exc:
-        console.print(f"[bold red]Cannot create remote directory {remote_base}:[/] {exc}")
-        ssh.close()
-        sys.exit(1)
-
-    with Progress(
-        TextColumn("[cyan]{task.fields[filename]}[/]"),
-        BarColumn(),
-        FileSizeColumn(),
-        TransferSpeedColumn(),
-        console=console,
-    ) as progress:
-        for local_path in files:
-            filename  = os.path.basename(local_path)
-            file_size = os.path.getsize(local_path)
-            remote    = f"{remote_base}/{filename}"
-            task      = progress.add_task("", filename=filename, total=file_size)
-
-            def _callback(sent: int, _total: int, t=task) -> None:
-                progress.update(t, completed=sent)
-
-            try:
-                sftp.put(local_path, remote, callback=_callback)
-                progress.update(task, completed=file_size)
-            except Exception as exc:
-                console.print(f"\n[bold red]✗ Failed to upload {filename}:[/] {exc}")
-                ssh.close()
-                sys.exit(1)
-
-    sftp.close()
-    ssh.close()
-
-    remote_display = remote_base.lstrip("/")
-    console.print(
-        f"[green]✓[/] {len(files)} file(s) uploaded to "
-        f"[dim]{SFTP_HOST}:{SFTP_PORT}[/] → [cyan]{remote_display}[/]"
-    )
 
 
 # ── entry point ────────────────────────────────────────────────────────────────

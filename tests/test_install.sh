@@ -26,7 +26,7 @@
 #   compose plugins (deploy_mode=compose)
 #     1. seed .env (PROJECTS_DIR / DOCKERFILES_DIR)              (plugins.py::_add_compose_plugin)
 #     2. stage the whole plugin tree into the project dir        (plugin_service.stage_compose)
-#     3. run install.sh "pre" so it can append secrets to .env   (e.g. sftpgo admin creds)
+#     3. run install.sh "pre" so it can append secrets to .env   (e.g. admin creds)
 #     4. docker compose config -q  +  docker compose build
 #
 # Everything is staged under a temp dir and all built images / compose projects
@@ -109,7 +109,7 @@ check_compose() {
     hr "docker compose"
     if ! docker compose version &>/dev/null; then
         fail "'docker compose' unavailable — the Compose v2 plugin is missing"
-        warn "compose-mode plugins (ws-chat, sftpgo) cannot install without it"
+        warn "compose-mode plugins (ws-chat, nextcloud) cannot install without it"
         warn "fix: apt-get install -y docker-compose-v2   (install.sh now does this)"
         record_fail "docker compose: plugin missing"; return 1
     fi

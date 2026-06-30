@@ -18,14 +18,6 @@ nano .env   # set TOKEN and BASE_DOMAIN
 ```
 TOKEN=your_api_token_here
 BASE_DOMAIN=your_domain.com
-
-# SFTP — for fhcli sftp-upload (SFTPGo on port 2022)
-SFTP_USER=your_sftpgo_username
-SFTP_PASSWORD=your_sftpgo_password
-# Or use a key instead of password:
-# SFTP_KEY_PATH=~/.ssh/id_rsa
-# SFTP_HOST defaults to BASE_DOMAIN; override if different
-# SFTP_PORT defaults to 2022
 ```
 
 ## Make `fhcli` available system-wide (optional)
@@ -46,8 +38,9 @@ alias fhcli="$(pwd)/venv/bin/python $(pwd)/fhcli.py"
 | `fhcli projects` | List all projects (incl. `system`) with live container status + type |
 | `fhcli plugins` | List available plugins in the catalog (incl. system plugins) |
 | `fhcli plugin-add PLUGIN PROJECT` | Create a project from a plugin, then build + run it |
+| `fhcli git-add NAME GIT_URL [--branch B] [--no-follow]` | Clone a git repo into a new project, auto-detect Dockerfile/compose, then build + run it (build log streams live) |
 | `fhcli create NAME` | Create an empty project (deploy mode decided at upload time) |
-| `fhcli upload PROJECT PATH [--dest DIR]` | Upload a file or folder → auto-detect Dockerfile/compose + provision |
+| `fhcli upload PROJECT PATH [--dest DIR]` | Zip + stream a file or folder in 1 MiB chunks (progress bar) → server unzips, auto-detects Dockerfile/compose + provisions |
 | `fhcli build PROJECT [--no-follow]` | Build the Docker image (dockerfile mode) |
 | `fhcli start PROJECT` | Start the container |
 | `fhcli stop PROJECT` | Stop the container |
@@ -60,7 +53,6 @@ alias fhcli="$(pwd)/venv/bin/python $(pwd)/fhcli.py"
 | `fhcli status PROJECT [--follow]` | Status + logs of the last docker op |
 | `fhcli abort PROJECT` | Abort the running docker op |
 | `fhcli remove PROJECT [--yes]` | Delete the project (containers, images, nginx, DB row) |
-| `fhcli sftp-upload PROJECT FILE... [--dest DIR]` | Raw SFTP transfer with progress bar (no provisioning) |
 
 The deploy mode is **auto-detected** from your upload: a `docker-compose.yml` in the
 uploaded root makes it a compose project (it wins over a `Dockerfile`), a bare
@@ -127,5 +119,23 @@ fhcli plugin-add hello-world mysite
 
 # Don't wait for build/run to finish
 fhcli plugin-add hello-world mysite --no-follow
+fhcli status mysite          # check progress later
+```
+
+## Install from a git repository
+
+`git-add` clones a repo into a new project, auto-detects a `Dockerfile` or
+`docker-compose.yml` in the root (compose wins), wires up nginx + SSL, then builds and
+runs it — streaming the build log live, just like `plugin-add`:
+
+```bash
+# Deploy a public repo as project "mysite"
+fhcli git-add mysite https://github.com/owner/repo.git
+
+# A specific branch (SSH URLs are accepted; they use the server's own SSH keys)
+fhcli git-add mysite git@github.com:owner/repo.git --branch dev
+
+# Fire-and-forget
+fhcli git-add mysite https://github.com/owner/repo.git --no-follow
 fhcli status mysite          # check progress later
 ```

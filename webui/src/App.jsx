@@ -1,10 +1,15 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { zip as fflateZip } from "fflate";
 import "@xterm/xterm/css/xterm.css";
 
 const BASE = import.meta.env.VITE_API_URL || "https://api.your_domain.com";
+// The server's base domain, derived from the API URL (strip the scheme + the `api.`
+// host prefix): e.g. https://api.acme.com → acme.com. Projects are served under it.
+const DOMAIN = BASE.replace(/^https?:\/\/api\./, "").replace(/^https?:\/\//, "");
 const POLL_MS = 1000;
+const CHUNK_SIZE = 1024 * 1024;   // 1 MiB pieces — stays under nginx's 1 MB default body limit
 
 // ── API factory ───────────────────────────────────────────────────────────────
 const mkApi = (token) => {
@@ -17,10 +22,12 @@ const mkApi = (token) => {
     }
     return r.json();
   };
+  const hr = { Authorization: `Bearer ${token}`, "Content-Type": "application/octet-stream" };
   return {
     get:  (p)    => fetch(`${BASE}${p}`, { headers: h }).then(unwrap),
     post: (p, b) => fetch(`${BASE}${p}`, { method: "POST", headers: h, body: b != null ? JSON.stringify(b) : undefined }).then(unwrap),
     form: (p, fd) => fetch(`${BASE}${p}`, { method: "POST", headers: hf, body: fd }).then(unwrap),
+    raw:  (p, body) => fetch(`${BASE}${p}`, { method: "POST", headers: hr, body }).then(unwrap),
     del:  (p)    => fetch(`${BASE}${p}`, { method: "DELETE", headers: h }).then(unwrap),
   };
 };
@@ -328,6 +335,59 @@ const ModalHeader = ({ title, color = C.blue, onClose }) => (
   </div>
 );
 
+// ── Git SSH key modal ─────────────────────────────────────────────────────────
+// Fetches the server's GitHub public key (GET /git/key, creating it server-side on
+// first use) so the user can add it to GitHub and clone private repos over SSH.
+const GitKeyModal = ({ token, onClose }) => {
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    mkApi(token).get("/git/key")
+      .then(setData)
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  const copy = () => {
+    navigator.clipboard.writeText(data.public_key).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  return (
+    <Modal onClose={onClose} width={560}>
+      <ModalHeader title="GIT SSH KEY" color={C.blue} onClose={onClose} />
+      {loading ? (
+        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", padding: "20px", textAlign: "center" }}>loading…</div>
+      ) : error ? (
+        <Err msg={error} />
+      ) : (
+        <>
+          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", marginBottom: "10px" }}>
+            {data.created
+              ? "Generated a new GitHub SSH key on the server."
+              : "The server already has a GitHub SSH key."}
+          </div>
+          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", letterSpacing: "0.08em", marginBottom: "6px" }}>PUBLIC KEY</div>
+          <div style={{ background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "10px 12px", fontFamily: C.mono, fontSize: "11px", color: C.txt, lineHeight: "1.6", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: "120px", overflow: "auto", marginBottom: "10px" }}>
+            {data.public_key}
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "14px" }}>
+            <Btn v="blue" sm onClick={copy}>{copied ? "✓ copied" : "📋 copy"}</Btn>
+          </div>
+          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", lineHeight: "1.7", whiteSpace: "pre-wrap", background: C.s2, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "10px 12px" }}>
+            {data.instructions}
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+};
+
 // ── Exec terminal ─────────────────────────────────────────────────────────────
 // A full interactive shell over a WebSocket: an xterm.js terminal bridged to
 // `docker exec -it` on the server (/projects/{name}/exec, or .../services/{svc}/exec for
@@ -457,6 +517,7 @@ const UploadModal = ({ token, project, onClose, onUploaded }) => {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [progress, setProgress] = useState(null);   // { sent, total } in bytes
   const dirRef = useRef();
 
   // React drops the non-standard directory attributes, so set them on mount.
@@ -476,13 +537,29 @@ const UploadModal = ({ token, project, onClose, onUploaded }) => {
     setEntries([...fileList].map(f => ({ file: f, rel: stripRoot(f.webkitRelativePath || f.name) })));
   };
 
+  // Zip the selection, stream it to the server in 1 MiB chunks (with a progress bar),
+  // then ask the server to reassemble + unzip + provision. Mirrors `fhcli upload`.
   const upload = async () => {
     if (!entries.length) return setError("Select a file or folder first");
-    setError(""); setBusy(true);
+    setError(""); setResult(null); setBusy(true); setProgress(null);
     try {
-      const fd = new FormData();
-      for (const { file, rel } of entries) fd.append("files", file, rel);
-      const data = await mkApi(token).form(`/projects/${project}/upload`, fd);
+      const api = mkApi(token);
+      const fileMap = {};
+      for (const { file, rel } of entries) fileMap[rel] = new Uint8Array(await file.arrayBuffer());
+      const zipped = await new Promise((resolve, reject) =>
+        fflateZip(fileMap, (err, data) => (err ? reject(err) : resolve(data))));
+
+      const total = zipped.length;
+      const uploadId = crypto.randomUUID().replace(/-/g, "");
+      setProgress({ sent: 0, total });
+      for (let offset = 0; offset < total; offset += CHUNK_SIZE) {
+        const end = Math.min(offset + CHUNK_SIZE, total);
+        await api.raw(`/projects/${project}/upload/chunk?upload_id=${uploadId}&offset=${offset}`,
+                      zipped.subarray(offset, end));
+        setProgress({ sent: end, total });
+      }
+      const data = await api.post(`/projects/${project}/upload/complete`,
+                                  { upload_id: uploadId, total_size: total });
       setResult(data);
       onUploaded && onUploaded();
     } catch (e) { setError(e.message); }
@@ -510,9 +587,21 @@ const UploadModal = ({ token, project, onClose, onUploaded }) => {
         </label>
       </div>
 
-      {entries.length > 0 && (
+      {entries.length > 0 && !progress && (
         <div style={{ color: C.green, fontFamily: C.ff, fontSize: "11px", marginBottom: "12px" }}>
           ✓ {entries.length} file(s) selected
+        </div>
+      )}
+
+      {progress && (
+        <div style={{ marginBottom: "12px" }}>
+          <div style={{ height: "8px", background: C.s3, borderRadius: "4px", overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${progress.total ? Math.round(progress.sent / progress.total * 100) : 0}%`,
+                          background: C.green, transition: "width 0.15s ease" }} />
+          </div>
+          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginTop: "5px" }}>
+            sending {(progress.sent / 1048576).toFixed(1)} / {(progress.total / 1048576).toFixed(1)} MB
+          </div>
         </div>
       )}
 
@@ -867,7 +956,7 @@ const CreateForm = ({ token, onCreated, onCancel }) => {
         <Field label="PROJECT NAME (used as the subdomain)">
           <TextIn value={name} onChange={setName} placeholder="myapp" />
           <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", marginTop: "5px" }}>
-            → served at <span style={{ color: C.blue }}>https://{slug || "myapp"}.your_domain.com</span>
+            → served at <span style={{ color: C.blue }}>https://{slug || "myapp"}.{DOMAIN}</span>
             <span style={{ color: C.dim }}> · point a custom domain at it later from the project card</span>
           </div>
         </Field>
@@ -885,6 +974,75 @@ const CreateForm = ({ token, onCreated, onCancel }) => {
         <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
           <Btn v="ghost" onClick={onCancel} disabled={busy}>cancel</Btn>
           <Btn v="primary" onClick={submit} busy={busy}>create project</Btn>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── Git project form ──────────────────────────────────────────────────────────
+// Create a project straight from a git clone URL: the server clones the repo,
+// auto-detects a Dockerfile/docker-compose.yml, wires nginx + SSL, then builds and
+// runs it. On success the build streams over the install WebSocket (handleInstalled →
+// InstallPane), exactly like a non-interactive plugin install.
+const GitProjectForm = ({ token, onCreated, onCancel }) => {
+  const [name, setName] = useState("");
+  const [gitUrl, setGitUrl] = useState("");
+  const [branch, setBranch] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    if (!name.trim()) return setError("Project name is required");
+    if (!gitUrl.trim()) return setError("Git URL is required");
+    setError(""); setBusy(true);
+    try {
+      const data = await mkApi(token).post("/git/add", {
+        name: name.trim(),
+        git_url: gitUrl.trim(),
+        branch: branch.trim() || null,
+      });
+      onCreated(data);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const slug = name.trim().toLowerCase();
+
+  return (
+    <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "18px", marginBottom: "12px", boxShadow: C.shadow }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
+        <span style={{ color: C.purple, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>GIT PROJECT</span>
+        <Btn v="ghost" sm onClick={onCancel}>✕</Btn>
+      </div>
+
+      <div style={{ display: "grid", gap: "12px" }}>
+        <Field label="PROJECT NAME (used as the subdomain)">
+          <TextIn value={name} onChange={setName} placeholder="myapp" />
+          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", marginTop: "5px" }}>
+            → served at <span style={{ color: C.blue }}>https://{slug || "myapp"}.{DOMAIN}</span>
+          </div>
+        </Field>
+
+        <Field label="GIT URL">
+          <TextIn value={gitUrl} onChange={setGitUrl} placeholder="https://github.com/owner/repo.git" />
+        </Field>
+
+        <Field label="BRANCH (optional)">
+          <TextIn value={branch} onChange={setBranch} placeholder="default branch" />
+        </Field>
+
+        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "10px 12px" }}>
+          The server clones the repo, scans the root for a <span style={{ color: C.txt }}>Dockerfile</span> or
+          <span style={{ color: C.txt }}> docker-compose.yml</span> (compose wins), wires up nginx + SSL, then
+          builds and runs it — streaming the build log below. A Dockerfile must <span style={{ color: C.txt }}>EXPOSE</span> its port.
+        </div>
+
+        <Err msg={error} />
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+          <Btn v="ghost" onClick={onCancel} disabled={busy}>cancel</Btn>
+          <Btn v="primary" onClick={submit} busy={busy}>clone &amp; deploy</Btn>
         </div>
       </div>
     </div>
@@ -1041,6 +1199,8 @@ const Dashboard = ({ token, onLogout }) => {
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
+  const [showGit, setShowGit] = useState(false);
+  const [showGitKey, setShowGitKey] = useState(false);
   const [activeLog, setActiveLog] = useState(null);
   const [interactiveLog, setInteractiveLog] = useState(null);  // { project, wsPath, kind }
   const pollRef = useRef(null);
@@ -1140,13 +1300,14 @@ const Dashboard = ({ token, onLogout }) => {
             </span>
           )}
           <span style={{ width: 1, height: 16, background: C.bd, display: "inline-block" }} />
-          <span style={{ color: C.dim, fontSize: "10px" }}>{BASE.replace(/^https?:\/\/api\./, "").replace(/^https?:\/\//, "")}</span>
+          <span style={{ color: C.dim, fontSize: "10px" }}>{DOMAIN}</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
           <span style={{ color: healthColor, fontFamily: C.ff, fontSize: "10px", display: "flex", alignItems: "center", gap: "5px" }}>
             <span style={{ fontSize: "7px" }}>●</span>api {health ?? "checking…"}
           </span>
           <Btn v="ghost" sm onClick={() => { checkHealth(); fetchProjects(); }}>↻ refresh</Btn>
+          <Btn v="ghost" sm onClick={() => setShowGitKey(true)} title="Get the server's GitHub SSH public key to add to GitHub for cloning private repos">🔑 git key</Btn>
           <Btn v="ghost" sm onClick={onLogout}>logout</Btn>
         </div>
       </div>
@@ -1159,11 +1320,14 @@ const Dashboard = ({ token, onLogout }) => {
             PROJECTS ({projects.length})
           </span>
           <div style={{ display: "flex", gap: "8px" }}>
-            <Btn v="primary" onClick={() => { setShowPlugins(false); setShowCreate(s => !s); }}>
+            <Btn v="primary" onClick={() => { setShowPlugins(false); setShowGit(false); setShowCreate(s => !s); }}>
               {showCreate ? "✕ cancel" : "+ new project"}
             </Btn>
-            <Btn v="blue" onClick={() => { setShowCreate(false); setShowPlugins(s => !s); }}>
+            <Btn v="blue" onClick={() => { setShowCreate(false); setShowGit(false); setShowPlugins(s => !s); }}>
               {showPlugins ? "✕ cancel" : "+ add plugin"}
+            </Btn>
+            <Btn v="blue" onClick={() => { setShowCreate(false); setShowPlugins(false); setShowGit(s => !s); }}>
+              {showGit ? "✕ cancel" : "+ git project"}
             </Btn>
           </div>
         </div>
@@ -1172,6 +1336,12 @@ const Dashboard = ({ token, onLogout }) => {
           <CreateForm token={token}
             onCreated={(data) => { setProjects(p => [data, ...p.filter(x => x.name !== data.name)]); setShowCreate(false); }}
             onCancel={() => setShowCreate(false)} />
+        )}
+
+        {showGit && (
+          <GitProjectForm token={token}
+            onCreated={(data) => { setShowGit(false); handleInstalled(data); }}
+            onCancel={() => setShowGit(false)} />
         )}
 
         {showPlugins && (
@@ -1205,13 +1375,9 @@ const Dashboard = ({ token, onLogout }) => {
         ) : (
           <LogPane log={activeLog} onClose={() => { setActiveLog(null); if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } }} onAbort={handleAbort} />
         )}
-
-        <div style={{ marginTop: "20px", padding: "12px 14px", background: C.s2, border: `1px solid ${C.bd}`, borderRadius: "8px" }}>
-          <span style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px" }}>
-            ⚠ direct SFTP transfers (fhcli sftp-upload) are CLI-only — the web UI uploads files over the API via the upload button
-          </span>
-        </div>
       </div>
+
+      {showGitKey && <GitKeyModal token={token} onClose={() => setShowGitKey(false)} />}
     </div>
   );
 };

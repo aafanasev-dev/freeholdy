@@ -184,6 +184,9 @@ def _build_install_env(plugin: dict, project_name: str, project_dir: str) -> dic
         "PROJECTS_DIR": os.path.abspath(settings.PROJECTS_DIR),
         "DOCKERFILES_DIR": os.path.abspath(settings.DOCKERFILES_DIR),
         "BASE_DOMAIN": settings.BASE_DOMAIN,
+        # The freeholdy API port; plugins that need a deterministic host port can
+        # derive it from this (e.g. binding a service on FREEHOLDY_PORT+1).
+        "FREEHOLDY_PORT": str(settings.PORT),
     }
 
 
@@ -202,7 +205,7 @@ def _stage_compose_plugin(plugin: dict, project_name: str, db: Session) -> Tuple
     os.makedirs(project_dir, exist_ok=True)
 
     # Seed .env with paths docker compose needs for variable substitution.
-    # PROJECTS_DIR is the unified per-project files root (e.g. SFTPGo mounts it as /srv/projects);
+    # PROJECTS_DIR is the unified per-project files root (a plugin may bind-mount it);
     # DOCKERFILES_DIR is kept for backward compatibility with older plugin compose files.
     env_file = os.path.join(project_dir, ".env")
     with open(env_file, "w") as f:

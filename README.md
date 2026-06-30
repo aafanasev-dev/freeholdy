@@ -41,7 +41,7 @@ POST   /projects/{name}/services/{service}/domain     →  set/clear a service's
 A Dockerfile must declare its listening port with `EXPOSE` — that becomes the container port nginx
 proxies to (the upload is rejected if it's missing).
 
-Pre-packaged stacks (SFTPGo, the web UI, examples) ship as **plugins** — see `POST /plugins/{name}/add`
+Pre-packaged stacks (the web UI, Nextcloud, examples) ship as **plugins** — see `POST /plugins/{name}/add`
 and `fhcli plugin-add`.
 
 ---
@@ -352,48 +352,6 @@ sudo -u freeholdy sudo nginx -t
 
 ---
 
-## SFTPGo file server
-
-SFTPGo ships as a freeholdy **plugin** (`plugins/sftpgo/`, a compose plugin of `type: system`). It is a normal managed project — deployed, inspected, and removed through the standard API/CLI — but hidden from the web UI.
-
-**What it exposes:**
-- `https://files.your_domain.com` — browser-based WebClient UI + WebDAV (via nginx)
-- `sftp://your_domain.com:2022` — raw SFTP access (bypasses nginx, direct TCP)
-- `/srv/projects` inside the container is mounted from `projects/` on the host, giving full read-write access to all pet project files
-
-### Deployment
-
-Deploy it like any other plugin (run once after setup, with the API running):
-
-```bash
-fhcli plugin-add sftpgo sftpgo
-```
-
-This single command:
-1. Creates a compose project, allocates a loopback port, and wires up nginx + SSL for `files.your_domain.com`
-2. Runs the plugin's `install.sh` **pre** phase — generates the admin password into the project's `.env`
-3. Starts the stack (`docker compose up -d`) — image `drakkan/sftpgo:latest`, with `/var/lib/sftpgo` (persistent DB/config) and `projects/ → /srv/projects` mounted, and `restart: unless-stopped` so it survives reboots
-4. Runs the **post** phase (background) — waits for the REST API, creates the `freeholdy` SFTP user with `/srv/projects` as home, writes `/etc/sftpgo-credentials` (mode 600), and patches `cli/.env` with `SFTP_USER` / `SFTP_PASSWORD` so `fhcli sftp-upload` works immediately
-
-After it finishes, the admin panel is at `https://files.your_domain.com/web/admin`. The generated admin and SFTP credentials are in `/etc/sftpgo-credentials`.
-
-### Useful commands
-
-```bash
-# View logs
-docker logs freeholdy_sftpgo_sftpgo -f
-
-# Lifecycle (compose project named "sftpgo")
-fhcli compose-status sftpgo
-fhcli compose-down sftpgo
-fhcli compose-up sftpgo
-
-# Remove entirely (containers, image, nginx entry; /var/lib/sftpgo data persists)
-fhcli remove sftpgo
-```
-
----
-
 ## SSL certificate renewal (crontab)
 
 The script in `scripts/cert-manager.sh` handles renewal for `api.your_domain.com` and any other fixed domains (it uses `certbot certonly --nginx`).
@@ -466,7 +424,7 @@ The `fhcli` CLI wraps all of this (`fhcli create` → `fhcli upload` → `fhcli 
 
 - **dockerfile mode:** the project is served at `{name}.your_domain.com` (one container, one subdomain).
 - **compose mode:** each service that publishes a port gets `{service}.{name}.your_domain.com`.
-- Plugins may override the subdomain label via `domain_prefix` (e.g. SFTPGo → `files.`, web UI → `ui.`).
+- Plugins may override the subdomain label via `domain_prefix` (e.g. web UI → `ui.`).
 - **Custom domains:** point your own FQDN at a project — or at a single compose service — instead of the auto subdomain:
   ```bash
   curl -X POST "$BASE/projects/myapp/domain" \
@@ -507,7 +465,7 @@ freeholdy/
 │   └── templates/
 │       ├── nginx_http.conf.j2  # HTTP-only (for ACME challenge)
 │       └── nginx_ssl.conf.j2   # Full HTTPS config
-├── plugins/                  # Built-in plugins (sftpgo, webui, about, hello-world, ws-chat)
+├── plugins/                  # Built-in plugins (webui, about, hello-world, ws-chat)
 ├── cli/                      # Standalone `fhcli` CLI (own venv + .env)
 ├── webui/                    # React control panel (source for the webui plugin)
 ├── scripts/

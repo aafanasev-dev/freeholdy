@@ -1,8 +1,10 @@
 import os
+import re
 import shutil
 import subprocess
+import zipfile
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body, Request
 from sqlalchemy.orm import Session
 from typing import List
 
@@ -418,41 +420,186 @@ async def upload(
             out.write(await f.read())
         written.append(os.path.relpath(dest, os.path.abspath(base_dir)))
 
-    detected_mode, manifest_path = _detect_manifest(base_dir)
-
-    provisioned = False
-    if detected_mode:
-        if project.deploy_mode in ("dockerfile", "compose") and project.deploy_mode != detected_mode:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Project '{project_name}' is already a {project.deploy_mode} project — "
-                       f"remove and recreate it to change the deploy mode.",
-            )
-        if detected_mode == "compose":
-            # Lazy import avoids a circular import (compose router imports _next_port from here).
-            from app.routers.compose import provision_compose
-            with open(manifest_path, encoding="utf-8", errors="replace") as f:
-                provision_compose(db, project, f.read())
-        else:
-            _provision_from_dockerfile(db, project, manifest_path)
-        provisioned = True
-
-    if provisioned:
-        message = (f"Uploaded {len(written)} file(s); detected {detected_mode} project "
-                   f"and provisioned '{project_name}'")
-    elif project.deploy_mode in ("dockerfile", "compose"):
-        message = f"Uploaded {len(written)} file(s) to '{project_name}'"
-    else:
-        message = (f"Uploaded {len(written)} file(s); no Dockerfile or docker-compose.yml found "
-                   f"in the root yet — '{project_name}' is not deployed")
+    provisioned, detected_mode = _autoprovision(db, project, project_name, base_dir)
 
     db.refresh(project)
     return UploadResponse(
         status="ok",
-        message=message,
+        message=_upload_message(project, project_name, len(written), provisioned, detected_mode),
         count=len(written),
         files=sorted(written),
         deploy_mode=project.deploy_mode,
         provisioned=provisioned,
         project=project_response(project) if provisioned else None,
     )
+
+
+def _autoprovision(
+    db: Session, project: Project, project_name: str, base_dir: str
+) -> tuple[bool, str | None]:
+    """Scan base_dir's root for a manifest and provision the project if one is found.
+
+    Shared by the legacy multipart upload and the chunked-upload `complete` endpoint.
+    Returns `(provisioned, detected_mode)`. Raises 400 if the detected mode conflicts
+    with the project's already-fixed deploy mode."""
+    detected_mode, manifest_path = _detect_manifest(base_dir)
+    if not detected_mode:
+        return False, None
+
+    if project.deploy_mode in ("dockerfile", "compose") and project.deploy_mode != detected_mode:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Project '{project_name}' is already a {project.deploy_mode} project — "
+                   f"remove and recreate it to change the deploy mode.",
+        )
+    if detected_mode == "compose":
+        # Lazy import avoids a circular import (compose router imports _next_port from here).
+        from app.routers.compose import provision_compose
+        with open(manifest_path, encoding="utf-8", errors="replace") as f:
+            provision_compose(db, project, f.read())
+    else:
+        _provision_from_dockerfile(db, project, manifest_path)
+    return True, detected_mode
+
+
+def _upload_message(
+    project: Project, project_name: str, count: int, provisioned: bool, detected_mode: str | None
+) -> str:
+    """Human-readable result line shared by both upload endpoints."""
+    if provisioned:
+        return (f"Uploaded {count} file(s); detected {detected_mode} project "
+                f"and provisioned '{project_name}'")
+    if project.deploy_mode in ("dockerfile", "compose"):
+        return f"Uploaded {count} file(s) to '{project_name}'"
+    return (f"Uploaded {count} file(s); no Dockerfile or docker-compose.yml found "
+            f"in the root yet — '{project_name}' is not deployed")
+
+
+# ── Chunked upload (large files/folders) ─────────────────────────────────────────
+#
+# The client zips its selection, splits the zip into ~1 MiB pieces, and POSTs them one
+# by one (raw octet-stream bodies, so each request stays under nginx's 1 MB default and
+# never 413s). `complete` reassembles, safely unzips into the project dir, and provisions
+# — reusing `_safe_join` (zip-slip guard) and `_autoprovision` (the same flow the legacy
+# multipart upload runs).
+
+_UPLOAD_ID_RE = re.compile(r"^[0-9a-f]{8,}$")
+
+
+def _staging_zip_path(project_name: str, upload_id: str) -> str:
+    """Path of the reassembled zip for a chunked upload — outside the project dir so
+    partial data is never scanned or served. Rejects a non-hex upload_id (traversal)."""
+    if not _UPLOAD_ID_RE.match(upload_id):
+        raise HTTPException(status_code=400, detail=f"Invalid upload_id '{upload_id}'")
+    staging_dir = os.path.join(settings.DATA_DIR, "uploads", project_name)
+    os.makedirs(staging_dir, exist_ok=True)
+    return os.path.join(staging_dir, f"{upload_id}.zip")
+
+
+def _require_project(db: Session, project_name: str) -> Project:
+    project = db.query(Project).filter(Project.name == project_name).first()
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+    return project
+
+
+@router.post(
+    "/{project_name}/upload/chunk",
+    summary="Append one piece of a chunked upload at the given byte offset",
+)
+async def upload_chunk(
+    project_name: str,
+    request: Request,
+    upload_id: str,
+    offset: int,
+    db: Session = Depends(get_db),
+    _=Depends(require_auth),
+):
+    """Write one raw chunk (the request body) into the staged zip at `offset`. Offset
+    addressing makes this idempotent and order-independent."""
+    _require_project(db, project_name)
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    path = _staging_zip_path(project_name, upload_id)
+    chunk = await request.body()
+    # os.open + lseek so seeking past EOF (sparse) works on a freshly created file.
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.lseek(fd, offset, os.SEEK_SET)
+        os.write(fd, chunk)
+    finally:
+        os.close(fd)
+    return {"status": "ok", "received": len(chunk)}
+
+
+@router.post(
+    "/{project_name}/upload/complete",
+    response_model=UploadResponse,
+    summary="Reassemble + unzip a chunked upload, then auto-detect and provision",
+)
+async def upload_complete(
+    project_name: str,
+    upload_id: str = Body(..., embed=True),
+    total_size: int | None = Body(None, embed=True),
+    db: Session = Depends(get_db),
+    _=Depends(require_auth),
+):
+    """Finalize a chunked upload: validate the staged zip, extract every member under the
+    project dir (guarded against zip-slip by `_safe_join`), provision, and clean up."""
+    project = _require_project(db, project_name)
+    zip_path = _staging_zip_path(project_name, upload_id)
+    if not os.path.isfile(zip_path):
+        raise HTTPException(status_code=404, detail="No staged upload for this upload_id")
+    if total_size is not None and os.path.getsize(zip_path) != total_size:
+        os.remove(zip_path)
+        raise HTTPException(status_code=400, detail="Staged upload is incomplete (size mismatch)")
+
+    base_dir = _project_files_dir(project)
+    os.makedirs(base_dir, exist_ok=True)
+
+    written: list[str] = []
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            for member in zf.infolist():
+                if member.is_dir():
+                    continue
+                dest = _safe_join(base_dir, member.filename)  # zip-slip guard
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with zf.open(member) as src, open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out)
+                written.append(os.path.relpath(dest, os.path.abspath(base_dir)))
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="Uploaded data is not a valid zip archive")
+    finally:
+        if os.path.isfile(zip_path):
+            os.remove(zip_path)
+
+    provisioned, detected_mode = _autoprovision(db, project, project_name, base_dir)
+
+    db.refresh(project)
+    return UploadResponse(
+        status="ok",
+        message=_upload_message(project, project_name, len(written), provisioned, detected_mode),
+        count=len(written),
+        files=sorted(written),
+        deploy_mode=project.deploy_mode,
+        provisioned=provisioned,
+        project=project_response(project) if provisioned else None,
+    )
+
+
+@router.delete(
+    "/{project_name}/upload/{upload_id}",
+    summary="Abort a chunked upload and discard its staged data",
+)
+async def upload_abort(
+    project_name: str,
+    upload_id: str,
+    db: Session = Depends(get_db),
+    _=Depends(require_auth),
+):
+    _require_project(db, project_name)
+    zip_path = _staging_zip_path(project_name, upload_id)
+    if os.path.isfile(zip_path):
+        os.remove(zip_path)
+    return {"status": "ok"}
