@@ -29,41 +29,21 @@ fhcli health
 
 ---
 
-## Step 1 — Create the project
-
-```bash
-fhcli create hello-world
-```
-
-Expected output:
-```
-Creating project hello-world…
-
-✓ Project 'hello-world' created  (deploy mode: pending)
-
-  Next: fhcli upload hello-world ./path-to-your-project
-  The folder should contain a Dockerfile or a docker-compose.yml.
-```
-
-The project starts in `pending` mode — no port, subdomain, or nginx config yet.
-All of that is wired up on the **first upload**, once freeholdy can see what kind
-of project it is.
-
----
-
-## Step 2 — Upload the project (auto-detect)
+## Step 1 — Deploy the project (auto-create + auto-detect)
 
 Run this from the `examples/hello-world/` directory:
 
 ```bash
-fhcli upload hello-world ./
+fhcli deploy hello-world ./
 ```
 
-freeholdy writes the files into the project's directory, scans the root, finds the
+There is no separate create step — `deploy` creates the project automatically if it's
+new. freeholdy writes the files into the project's directory, scans the root, finds the
 `Dockerfile`, reads its `EXPOSE` (port 80) as the container port, wires up nginx
 + SSL, **then builds the image and starts the container** — streaming the deploy log
 live. A `docker-compose.yml`, if present, would win and select compose mode instead
-(the upload would `docker compose up -d` it the same way).
+(the deploy would `docker compose up -d` it the same way). You can also pass a git URL
+instead of a path (`fhcli deploy hello-world https://github.com/owner/repo.git`).
 
 Expected output:
 ```
@@ -91,12 +71,12 @@ by the CLI. Add `--no-follow` to return immediately and poll `fhcli status hello
 > resolves to your VPS. SSL issuance needs the DNS record to already point at the host.
 
 Image name: `freeholdy_hello-world:latest`; container name: `freeholdy_hello-world`,
-bound to `127.0.0.1:<local-port>`. **Re-run `fhcli upload` to redeploy** after changing
-any file.
+bound to `127.0.0.1:<local-port>`. **Re-run `fhcli deploy hello-world ./` to redeploy**
+after changing any file.
 
 ---
 
-## Step 3 — Verify it's running
+## Step 2 — Verify it's running
 
 **Check container status:**
 ```bash
@@ -126,7 +106,7 @@ You should see: **Hello, World! 👋**
 ## Troubleshooting
 
 **Container shows `no_image`**
-→ The deploy didn't build. Re-run `fhcli upload hello-world ./` and watch the deploy log.
+→ The deploy didn't build. Re-run `fhcli deploy hello-world ./` and watch the deploy log.
 
 **Container shows `exited`**
 → Check what happened inside:
@@ -138,7 +118,7 @@ fhcli exec hello-world "ls /www"
 → Container is not running. Check status and redeploy:
 ```bash
 fhcli projects
-fhcli upload hello-world ./
+fhcli deploy hello-world ./
 ```
 
 **SSL cert missing / browser shows security warning**
@@ -160,9 +140,9 @@ docker logs -f freeholdy_hello-world   # follow
 
 ```bash
 fhcli stop   hello-world   # stop the container
-fhcli upload hello-world ./   # redeploy (rebuild + restart) after changing any file
+fhcli deploy hello-world ./   # redeploy (rebuild + restart) after changing any file
 ```
 
-There is no separate build/start step — `fhcli upload` provisions, builds, and runs in
-one command, and re-running it is how you redeploy after a change to `HelloWorld.html`,
-the `Dockerfile`, or anything else in the build context.
+There is no separate create or build/start step — `fhcli deploy` creates (if new),
+provisions, builds, and runs in one command, and re-running it is how you redeploy after a
+change to `HelloWorld.html`, the `Dockerfile`, or anything else in the build context.

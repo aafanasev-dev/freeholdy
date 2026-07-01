@@ -21,12 +21,12 @@ from typing import List
 from app.models.database import get_db, SessionLocal
 from app.models.orm import Project, ComposeService, ProjectVersion
 from app.models.schemas import (
-    ProjectCreateRequest,
     ProjectResponse,
     ProjectDeleteResponse,
     UploadResponse,
     DockerJobStatusResponse,
     ProjectType,
+    validate_project_slug,
 )
 from app.auth import require_auth
 from app.config import settings
@@ -192,22 +192,31 @@ def provision_dockerfile(
     return project
 
 
-@router.post("/", response_model=ProjectResponse, status_code=201)
-def create_project(
-    request: ProjectCreateRequest,
-    db: Session = Depends(get_db),
-    _=Depends(require_auth),
-):
-    """Create an empty project. Its deploy mode stays "pending" until the first upload, where
-    a Dockerfile / docker-compose.yml in the uploaded root selects dockerfile vs compose and
-    triggers nginx/port provisioning."""
-    if db.query(Project).filter(Project.name == request.name).first():
-        raise HTTPException(status_code=409, detail=f"Project '{request.name}' already exists")
-    project = Project(name=request.name, type=ProjectType.user.value, deploy_mode="pending")
+def _validate_project_name(name: str) -> None:
+    """Slug-validate a project name (used before we create a row or stage a chunked upload
+    under a per-project dir), turning the schema's ValueError into an HTTP 422."""
+    try:
+        validate_project_slug(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+def _get_or_create_project(db: Session, name: str) -> Project:
+    """Return the project row named `name`, creating an empty ("pending") one if it does not
+    exist yet. This is what makes `deploy` auto-create: the first upload/complete for a new
+    name provisions from scratch, later ones redeploy. Flushes (caller commits)."""
+    project = db.query(Project).filter(Project.name == name).first()
+    if project:
+        return project
+    _validate_project_name(name)
+    project = Project(name=name, type=ProjectType.user.value, deploy_mode="pending")
     db.add(project)
+    # Commit immediately (like the former create endpoint did) so a manifest-less deploy — which
+    # never reaches a provision commit — still persists the empty "pending" row, and `get_db`
+    # (which does not commit) can't discard it on session close.
     db.commit()
     db.refresh(project)
-    return project_response(project)
+    return project
 
 
 def _teardown_compose(project: Project, details: list[str], errors: list[str]) -> None:
@@ -441,12 +450,11 @@ async def upload(
 
     A project's mode is fixed by its first provisioning upload; uploading the other manifest
     type later is rejected (remove + recreate to change mode). Uploads with no manifest are a
-    plain file sync (the mode stays as-is / "pending")."""
-    project = db.query(Project).filter(Project.name == project_name).first()
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+    plain file sync (the mode stays as-is / "pending"). The project is created on first
+    upload if it does not exist yet (deploy auto-creates)."""
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
+    project = _get_or_create_project(db, project_name)
 
     base_dir = _project_files_dir(project)
     os.makedirs(base_dir, exist_ok=True)
@@ -592,19 +600,16 @@ _UPLOAD_ID_RE = re.compile(r"^[0-9a-f]{8,}$")
 
 def _staging_zip_path(project_name: str, upload_id: str) -> str:
     """Path of the reassembled zip for a chunked upload — outside the project dir so
-    partial data is never scanned or served. Rejects a non-hex upload_id (traversal)."""
+    partial data is never scanned or served. Rejects a non-hex upload_id and a non-slug
+    project name (both would otherwise allow path traversal via the staging dir). The name
+    is slug-validated here rather than via a project-row lookup, because a chunked upload can
+    now stage bytes for a not-yet-created project (deploy auto-creates on `complete`)."""
     if not _UPLOAD_ID_RE.match(upload_id):
         raise HTTPException(status_code=400, detail=f"Invalid upload_id '{upload_id}'")
+    _validate_project_name(project_name)
     staging_dir = os.path.join(settings.DATA_DIR, "uploads", project_name)
     os.makedirs(staging_dir, exist_ok=True)
     return os.path.join(staging_dir, f"{upload_id}.zip")
-
-
-def _require_project(db: Session, project_name: str) -> Project:
-    project = db.query(Project).filter(Project.name == project_name).first()
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
-    return project
 
 
 @router.post(
@@ -620,8 +625,8 @@ async def upload_chunk(
     _=Depends(require_auth),
 ):
     """Write one raw chunk (the request body) into the staged zip at `offset`. Offset
-    addressing makes this idempotent and order-independent."""
-    _require_project(db, project_name)
+    addressing makes this idempotent and order-independent. The project need not exist yet —
+    `_staging_zip_path` slug-validates the name; the row is created on `complete`."""
     if offset < 0:
         raise HTTPException(status_code=400, detail="offset must be >= 0")
     path = _staging_zip_path(project_name, upload_id)
@@ -649,8 +654,8 @@ async def upload_complete(
     _=Depends(require_auth),
 ):
     """Finalize a chunked upload: validate the staged zip, extract every member under the
-    project dir (guarded against zip-slip by `_safe_join`), provision, and clean up."""
-    project = _require_project(db, project_name)
+    project dir (guarded against zip-slip by `_safe_join`), provision, and clean up. Creates
+    the project row if it does not exist yet (deploy auto-creates)."""
     zip_path = _staging_zip_path(project_name, upload_id)
     if not os.path.isfile(zip_path):
         raise HTTPException(status_code=404, detail="No staged upload for this upload_id")
@@ -658,6 +663,7 @@ async def upload_complete(
         os.remove(zip_path)
         raise HTTPException(status_code=400, detail="Staged upload is incomplete (size mismatch)")
 
+    project = _get_or_create_project(db, project_name)
     base_dir = _project_files_dir(project)
     os.makedirs(base_dir, exist_ok=True)
 
@@ -694,7 +700,8 @@ async def upload_abort(
     db: Session = Depends(get_db),
     _=Depends(require_auth),
 ):
-    _require_project(db, project_name)
+    # The project row may not exist yet (aborting before `complete`); `_staging_zip_path`
+    # slug-validates the name, which is all we need to safely locate the staged data.
     zip_path = _staging_zip_path(project_name, upload_id)
     if os.path.isfile(zip_path):
         os.remove(zip_path)

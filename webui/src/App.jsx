@@ -513,6 +513,29 @@ const ConfirmModal = ({ message, onConfirm, onCancel, loading }) => (
 // so files land at the project root, matching the CLI's relpath-from-LOCAL_DIR semantics.
 const stripRoot = (p) => p.split("/").slice(1).join("/") || p;
 
+// Zip `entries` ([{ file, rel }]), stream the archive to the server in 1 MiB chunks
+// (reporting progress via `onProgress({ sent, total })`), then ask it to reassemble +
+// unzip + provision. Returns the `/upload/complete` response. The project is created
+// server-side if it doesn't exist yet (deploy auto-creates). Shared by UploadModal (per-card
+// redeploy) and DeployForm (new project). Mirrors `fhcli deploy` with a local path.
+const chunkedDeploy = async (api, project, entries, onProgress) => {
+  const fileMap = {};
+  for (const { file, rel } of entries) fileMap[rel] = new Uint8Array(await file.arrayBuffer());
+  const zipped = await new Promise((resolve, reject) =>
+    fflateZip(fileMap, (err, data) => (err ? reject(err) : resolve(data))));
+
+  const total = zipped.length;
+  const uploadId = crypto.randomUUID().replace(/-/g, "");
+  onProgress && onProgress({ sent: 0, total });
+  for (let offset = 0; offset < total; offset += CHUNK_SIZE) {
+    const end = Math.min(offset + CHUNK_SIZE, total);
+    await api.raw(`/projects/${project}/upload/chunk?upload_id=${uploadId}&offset=${offset}`,
+                  zipped.subarray(offset, end));
+    onProgress && onProgress({ sent: end, total });
+  }
+  return api.post(`/projects/${project}/upload/complete`, { upload_id: uploadId, total_size: total });
+};
+
 const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
   const [entries, setEntries] = useState([]);   // [{ file, rel }]
   const [busy, setBusy] = useState(false);
@@ -539,28 +562,12 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
   };
 
   // Zip the selection, stream it to the server in 1 MiB chunks (with a progress bar),
-  // then ask the server to reassemble + unzip + provision. Mirrors `fhcli upload`.
+  // then ask the server to reassemble + unzip + provision. Mirrors `fhcli deploy` (local path).
   const upload = async () => {
     if (!entries.length) return setError("Select a file or folder first");
     setError(""); setResult(null); setBusy(true); setProgress(null);
     try {
-      const api = mkApi(token);
-      const fileMap = {};
-      for (const { file, rel } of entries) fileMap[rel] = new Uint8Array(await file.arrayBuffer());
-      const zipped = await new Promise((resolve, reject) =>
-        fflateZip(fileMap, (err, data) => (err ? reject(err) : resolve(data))));
-
-      const total = zipped.length;
-      const uploadId = crypto.randomUUID().replace(/-/g, "");
-      setProgress({ sent: 0, total });
-      for (let offset = 0; offset < total; offset += CHUNK_SIZE) {
-        const end = Math.min(offset + CHUNK_SIZE, total);
-        await api.raw(`/projects/${project}/upload/chunk?upload_id=${uploadId}&offset=${offset}`,
-                      zipped.subarray(offset, end));
-        setProgress({ sent: end, total });
-      }
-      const data = await api.post(`/projects/${project}/upload/complete`,
-                                  { upload_id: uploadId, total_size: total });
+      const data = await chunkedDeploy(mkApi(token), project, entries, setProgress);
       // When a manifest is provisioned the server auto-launches build + run and returns a
       // ws_path; hand off to the InstallPane to stream the deploy live (same as git/plugin
       // installs). A plain file sync (no manifest) just shows its result here.
@@ -1046,93 +1053,68 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
   );
 };
 
-// ── Create project form ───────────────────────────────────────────────────────
-const CreateForm = ({ token, onCreated, onCancel }) => {
+// ── Deploy project form (files/folder or git URL) ─────────────────────────────
+// One entry point to create + deploy a project. "Files" mode chunk-uploads the selection
+// (chunkedDeploy); "Git" mode POSTs /git/add. Either way the server auto-creates the
+// project (no separate create step), auto-detects a Dockerfile/docker-compose.yml (compose
+// wins), wires nginx + SSL, and builds + runs it — the provisioned response streams over
+// the InstallPane (onDeployed → handleInstalled). Mirrors `fhcli deploy NAME PATH-OR-URL`.
+const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
   const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  const submit = async () => {
-    if (!name.trim()) return setError("Project name is required");
-    setError(""); setBusy(true);
-    try {
-      const data = await mkApi(token).post("/projects", { name: name.trim() });
-      onCreated(data);
-    } catch (e) { setError(e.message); }
-    finally { setBusy(false); }
-  };
-
-  // The project name is the subdomain label, so it must be a DNS-safe slug.
-  const slug = name.trim().toLowerCase();
-
-  return (
-    <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "18px", marginBottom: "12px", boxShadow: C.shadow }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
-        <span style={{ color: C.purple, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>NEW PROJECT</span>
-        <Btn v="ghost" sm onClick={onCancel}>✕</Btn>
-      </div>
-
-      <div style={{ display: "grid", gap: "12px" }}>
-        <Field label="PROJECT NAME (used as the subdomain)">
-          <TextIn value={name} onChange={setName} placeholder="myapp" />
-          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", marginTop: "5px" }}>
-            → served at <span style={{ color: C.blue }}>https://{slug || "myapp"}.{DOMAIN}</span>
-            <span style={{ color: C.dim }}> · point a custom domain at it later from the project card</span>
-          </div>
-        </Field>
-
-        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "10px 12px" }}>
-          Creates an empty project. After creating it, use <span style={{ color: C.purple }}>upload</span> on the project card to
-          send your files (a single file or a whole folder). The server scans the uploaded root for a
-          <span style={{ color: C.txt }}> Dockerfile</span> or <span style={{ color: C.txt }}>docker-compose.yml</span>, picks the
-          deploy mode automatically (compose wins), and wires up nginx + SSL. A Dockerfile must
-          <span style={{ color: C.txt }}> EXPOSE</span> its port.
-        </div>
-
-        <Err msg={error} />
-
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
-          <Btn v="ghost" onClick={onCancel} disabled={busy}>cancel</Btn>
-          <Btn v="primary" onClick={submit} busy={busy}>create project</Btn>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ── Git project form ──────────────────────────────────────────────────────────
-// Create a project straight from a git clone URL: the server clones the repo,
-// auto-detects a Dockerfile/docker-compose.yml, wires nginx + SSL, then builds and
-// runs it. On success the build streams over the install WebSocket (handleInstalled →
-// InstallPane), exactly like a non-interactive plugin install.
-const GitProjectForm = ({ token, onCreated, onCancel }) => {
-  const [name, setName] = useState("");
+  const [mode, setMode] = useState("files");   // "files" | "git"
+  const [entries, setEntries] = useState([]);   // [{ file, rel }]
   const [gitUrl, setGitUrl] = useState("");
   const [branch, setBranch] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [progress, setProgress] = useState(null);
+  const [result, setResult] = useState(null);
+  const dirRef = useRef();
+
+  // React drops the non-standard directory attributes, so set them on mount / mode switch.
+  useEffect(() => {
+    if (dirRef.current) {
+      dirRef.current.setAttribute("webkitdirectory", "");
+      dirRef.current.setAttribute("directory", "");
+    }
+  }, [mode]);
+
+  const pickFiles = (fileList) => { setError(""); setResult(null); setEntries([...fileList].map(f => ({ file: f, rel: f.name }))); };
+  const pickFolder = (fileList) => { setError(""); setResult(null); setEntries([...fileList].map(f => ({ file: f, rel: stripRoot(f.webkitRelativePath || f.name) }))); };
 
   const submit = async () => {
     if (!name.trim()) return setError("Project name is required");
-    if (!gitUrl.trim()) return setError("Git URL is required");
-    setError(""); setBusy(true);
+    setError(""); setResult(null); setProgress(null); setBusy(true);
     try {
-      const data = await mkApi(token).post("/git/add", {
-        name: name.trim(),
-        git_url: gitUrl.trim(),
-        branch: branch.trim() || null,
-      });
-      onCreated(data);
+      const api = mkApi(token);
+      if (mode === "git") {
+        if (!gitUrl.trim()) { setBusy(false); return setError("Git URL is required"); }
+        const data = await api.post("/git/add", { name: name.trim(), git_url: gitUrl.trim(), branch: branch.trim() || null });
+        onDeployed(data);   // git always provisions (or 400s) → stream the build
+      } else {
+        if (!entries.length) { setBusy(false); return setError("Select a file or folder first"); }
+        const data = await chunkedDeploy(api, name.trim(), entries, setProgress);
+        if (data.provisioned && data.ws_path) { onDeployed(data); return; }
+        setResult(data); onSynced && onSynced();   // no manifest — plain file sync, nothing built
+      }
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
   };
 
   const slug = name.trim().toLowerCase();
+  const dropStyle = { flex: 1, display: "block", border: `2px dashed ${C.bdB}`, borderRadius: "8px", padding: "14px", textAlign: "center", background: C.s1, cursor: "pointer" };
+  const tab = (m, label) => (
+    <button onClick={() => { setMode(m); setError(""); setResult(null); }} style={{
+      flex: 1, padding: "8px", cursor: "pointer", fontFamily: C.ff, fontSize: "11px", fontWeight: 600,
+      background: mode === m ? "#f0ecfe" : C.s3, color: mode === m ? C.purple : C.muted,
+      border: `1px solid ${mode === m ? "#dccffb" : C.bd}`, borderRadius: "8px",
+    }}>{label}</button>
+  );
 
   return (
     <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "18px", marginBottom: "12px", boxShadow: C.shadow }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
-        <span style={{ color: C.purple, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>GIT PROJECT</span>
+        <span style={{ color: C.purple, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>DEPLOY PROJECT</span>
         <Btn v="ghost" sm onClick={onCancel}>✕</Btn>
       </div>
 
@@ -1141,28 +1123,67 @@ const GitProjectForm = ({ token, onCreated, onCancel }) => {
           <TextIn value={name} onChange={setName} placeholder="myapp" />
           <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", marginTop: "5px" }}>
             → served at <span style={{ color: C.blue }}>https://{slug || "myapp"}.{DOMAIN}</span>
+            <span style={{ color: C.dim }}> · created automatically if new</span>
           </div>
         </Field>
 
-        <Field label="GIT URL">
-          <TextIn value={gitUrl} onChange={setGitUrl} placeholder="https://github.com/owner/repo.git" />
-        </Field>
-
-        <Field label="BRANCH (optional)">
-          <TextIn value={branch} onChange={setBranch} placeholder="default branch" />
-        </Field>
-
-        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "10px 12px" }}>
-          The server clones the repo, scans the root for a <span style={{ color: C.txt }}>Dockerfile</span> or
-          <span style={{ color: C.txt }}> docker-compose.yml</span> (compose wins), wires up nginx + SSL, then
-          builds and runs it — streaming the build log below. A Dockerfile must <span style={{ color: C.txt }}>EXPOSE</span> its port.
+        <div style={{ display: "flex", gap: "8px" }}>
+          {tab("files", "files / folder")}
+          {tab("git", "git URL")}
         </div>
 
+        {mode === "files" ? (
+          <>
+            <div style={{ display: "flex", gap: "8px" }}>
+              <label htmlFor="dep-file" style={dropStyle}>
+                <input id="dep-file" type="file" multiple onChange={e => pickFiles(e.target.files)} style={{ display: "none" }} />
+                <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px" }}>select file(s)</div>
+              </label>
+              <label htmlFor="dep-folder" style={dropStyle}>
+                <input id="dep-folder" ref={dirRef} type="file" multiple onChange={e => pickFolder(e.target.files)} style={{ display: "none" }} />
+                <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px" }}>select a folder</div>
+              </label>
+            </div>
+            {entries.length > 0 && !progress && (
+              <div style={{ color: C.green, fontFamily: C.ff, fontSize: "11px" }}>✓ {entries.length} file(s) selected</div>
+            )}
+          </>
+        ) : (
+          <>
+            <Field label="GIT URL">
+              <TextIn value={gitUrl} onChange={setGitUrl} placeholder="https://github.com/owner/repo.git" />
+            </Field>
+            <Field label="BRANCH (optional)">
+              <TextIn value={branch} onChange={setBranch} placeholder="default branch" />
+            </Field>
+          </>
+        )}
+
+        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "10px 12px" }}>
+          The server scans the {mode === "git" ? "cloned repo" : "uploaded"} root for a
+          <span style={{ color: C.txt }}> Dockerfile</span> or <span style={{ color: C.txt }}>docker-compose.yml</span> (compose
+          wins), wires up nginx + SSL, then builds and runs it — streaming the build log below. A
+          Dockerfile must <span style={{ color: C.txt }}>EXPOSE</span> its port.
+          {mode === "files" && " Files with no manifest are just synced (nothing is built)."}
+        </div>
+
+        {progress && (
+          <div>
+            <div style={{ height: "8px", background: C.s3, borderRadius: "4px", overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${progress.total ? Math.round(progress.sent / progress.total * 100) : 0}%`, background: C.green, transition: "width 0.15s ease" }} />
+            </div>
+            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginTop: "5px" }}>
+              sending {(progress.sent / 1048576).toFixed(1)} / {(progress.total / 1048576).toFixed(1)} MB
+            </div>
+          </div>
+        )}
+
+        {result && <Ok msg={result.message} />}
         <Err msg={error} />
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
           <Btn v="ghost" onClick={onCancel} disabled={busy}>cancel</Btn>
-          <Btn v="primary" onClick={submit} busy={busy}>clone &amp; deploy</Btn>
+          <Btn v="primary" onClick={submit} busy={busy} disabled={mode === "files" && !entries.length}>deploy</Btn>
         </div>
       </div>
     </div>
@@ -1317,9 +1338,8 @@ const Dashboard = ({ token, onLogout }) => {
   const [health, setHealth] = useState(null);
   const [version, setVersion] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [showCreate, setShowCreate] = useState(false);
+  const [showDeploy, setShowDeploy] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
-  const [showGit, setShowGit] = useState(false);
   const [showGitKey, setShowGitKey] = useState(false);
   const [activeLog, setActiveLog] = useState(null);
   const [interactiveLog, setInteractiveLog] = useState(null);  // { project, wsPath, kind }
@@ -1448,28 +1468,20 @@ const Dashboard = ({ token, onLogout }) => {
             PROJECTS ({projects.length})
           </span>
           <div style={{ display: "flex", gap: "8px" }}>
-            <Btn v="primary" onClick={() => { setShowPlugins(false); setShowGit(false); setShowCreate(s => !s); }}>
-              {showCreate ? "✕ cancel" : "+ new project"}
+            <Btn v="primary" onClick={() => { setShowPlugins(false); setShowDeploy(s => !s); }}>
+              {showDeploy ? "✕ cancel" : "+ deploy project"}
             </Btn>
-            <Btn v="blue" onClick={() => { setShowCreate(false); setShowGit(false); setShowPlugins(s => !s); }}>
+            <Btn v="blue" onClick={() => { setShowDeploy(false); setShowPlugins(s => !s); }}>
               {showPlugins ? "✕ cancel" : "+ add plugin"}
-            </Btn>
-            <Btn v="blue" onClick={() => { setShowCreate(false); setShowPlugins(false); setShowGit(s => !s); }}>
-              {showGit ? "✕ cancel" : "+ git project"}
             </Btn>
           </div>
         </div>
 
-        {showCreate && (
-          <CreateForm token={token}
-            onCreated={(data) => { setProjects(p => [data, ...p.filter(x => x.name !== data.name)]); setShowCreate(false); }}
-            onCancel={() => setShowCreate(false)} />
-        )}
-
-        {showGit && (
-          <GitProjectForm token={token}
-            onCreated={(data) => { setShowGit(false); handleInstalled(data); }}
-            onCancel={() => setShowGit(false)} />
+        {showDeploy && (
+          <DeployForm token={token}
+            onDeployed={(data) => { setShowDeploy(false); handleInstalled(data); }}
+            onSynced={fetchProjects}
+            onCancel={() => setShowDeploy(false)} />
         )}
 
         {showPlugins && (
@@ -1480,7 +1492,7 @@ const Dashboard = ({ token, onLogout }) => {
           <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", padding: "24px 0" }}>loading projects…</div>
         ) : projects.length === 0 ? (
           <div style={{ border: `1px dashed ${C.bd}`, borderRadius: "8px", padding: "40px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
-            no projects yet — create one above
+            no projects yet — deploy one above
           </div>
         ) : (
           projects.map(p => (

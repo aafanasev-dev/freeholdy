@@ -54,17 +54,6 @@ class DeployMode(str, Enum):
     compose = "compose"         # multi-container, one docker-compose.yml
 
 
-class ProjectCreateRequest(BaseModel):
-    name: str
-    # No deploy_mode here: a project is created empty ("pending") and its mode is
-    # auto-detected from the first upload (Dockerfile vs docker-compose.yml in the root).
-
-    @field_validator("name")
-    @classmethod
-    def name_must_be_slug(cls, v: str) -> str:
-        return validate_project_slug(v)
-
-
 class SetDomainRequest(BaseModel):
     """Set or clear a component's custom domain. None/empty clears it (reverts to the
     auto-generated subdomain)."""
