@@ -64,13 +64,16 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   is a master-detail view: a ~25% name list on the left, a ~75% detail pane on the right that renders
   `about` (falling back to `description`) via the tiny inline `Markdown` component, with a solid-green
   **install** button (`Btn v="green"`) in the pane's top-right. `system`-type plugins are filtered out.
-- One upload endpoint: `POST /projects/{name}/upload` (multipart `files[]`; each file's multipart
-  filename carries its relative path). Writes the tree under the project dir, then the server
-  auto-detects a `Dockerfile`/`docker-compose.yml` in the root and provisions (compose wins).
-  Returns `{ status, message, count, files, deploy_mode, provisioned, project }`.
+- Upload (chunked): `POST /projects/{name}/upload/chunk` then `.../upload/complete`. Reassembles +
+  unzips the tree under the project dir, auto-detects a `Dockerfile`/`docker-compose.yml` in the root
+  and provisions (compose wins), then **auto-launches build + run and returns a `ws_path`** — the
+  same unified deploy path git/plugins use. Returns `{ status, message, count, files, deploy_mode,
+  provisioned, project, ws_path, job }`. `UploadModal` hands a provisioned response to
+  `handleInstalled` → `InstallPane` to stream the deploy log live (a no-manifest sync has no
+  `ws_path` and just shows its result). Re-upload to redeploy.
 - Dockerfile (single-container) actions, all project-level:
-  `POST /projects/{name}/{build|start|stop|ssl|abort}` and `GET /projects/{name}/status`
-- Compose lifecycle: `.../compose/{build|up|down|abort}`, `GET .../compose/status`
+  `POST /projects/{name}/{stop|ssl|abort}` and `GET /projects/{name}/status` (no `/build` or `/start`)
+- Compose lifecycle: `.../compose/{down|abort}`, `GET .../compose/status` (no `/build` or `/up`)
 - **Exec is a WebSocket, not REST:** `WS /projects/{name}/exec` (dockerfile) and
   `WS /projects/{name}/services/{service}/exec` (compose) bridge an interactive `docker exec -it`
   shell. `ExecTerminal` renders an xterm.js terminal (`@xterm/xterm` + `@xterm/addon-fit`): auth
@@ -99,26 +102,31 @@ project starts as `deploy_mode: "pending"` and the first `upload` makes it eithe
 (`project.services[]`).
 
 `UploadModal` (opened from the **upload** button on every `ProjectCard` header, both modes and
-pending) posts to `/projects/{name}/upload`. It offers a file picker and a folder picker; the folder
-input is a `<input webkitdirectory>` whose non-standard attributes are set via a ref on mount (React
-won't pass them through). Each `File.webkitRelativePath` has its leading folder segment stripped
-(`stripRoot`) and is sent as the multipart filename via `fd.append("files", file, relPath)`.
+pending) chunk-uploads to `/projects/{name}/upload/chunk` + `.../upload/complete`. It offers a file
+picker and a folder picker; the folder input is a `<input webkitdirectory>` whose non-standard
+attributes are set via a ref on mount (React won't pass them through). Each `File.webkitRelativePath`
+has its leading folder segment stripped (`stripRoot`) and becomes its zip entry name. A provisioned
+response (carrying `ws_path`) is handed to `onDeploy` (= `handleInstalled`) so the deploy streams in
+the `InstallPane`; the modal closes. The card's primary button reads **deploy** for a provisioned
+project (re-uploading redeploys) and **upload** while pending.
 
 Two row components render the project table; a `pending` project (created, not yet uploaded) renders
 neither — `ProjectCard` shows an "awaiting upload" placeholder and a `pending` chip in the header:
-- `ContainerRow` — dockerfile mode, one row, drives the project-level lifecycle endpoints above.
+- `ContainerRow` — dockerfile mode, one row, drives the remaining project-level control endpoints
+  (`stop`, `ssl`, `domain`, `status`, `exec`). Build + run happen via the deploy/upload flow, not a button.
 - `ServiceRow` — compose mode (name/subdomain/port/ssl/status) plus a per-service **exec** button
-  (and the custom-domain button); the stack's build/up/down live on the `ProjectCard` header and
-  stream at the compose level. The exec button opens an `ExecTerminal` for that service's container.
+  (and the custom-domain button); the stack's **down** lives on the `ProjectCard` header (build + up
+  happen via the deploy/upload flow). The exec button opens an `ExecTerminal` for that service's container.
 
 Operation flow (`Dashboard` + `ContainerRow`):
-- Action buttons call the endpoint, then push an `activeLog` into the bottom `LogPane`.
+- Control buttons (`stop`, compose `down`) call the endpoint, then push an `activeLog` into the
+  bottom `LogPane`.
 - If the action returns `status === "running"`, `Dashboard` **polls status every `POLL_MS`
   (1000ms)** via a single shared `pollRef` interval (`/projects/{name}/status`, or
   `/projects/{name}/compose/status` when `log.kind === "compose"`), streaming logs until status
   leaves `running`, then refetches the project list. Only one operation is polled at a time.
-  (Exec and plugin installs bypass this — they stream over their own WebSockets: `ExecTerminal` and
-  `InstallPane` respectively.)
+  (Deploys/installs and exec bypass this — they stream over their own WebSockets: `InstallPane`
+  and `ExecTerminal` respectively.)
 - `abort` posts to the matching `.../abort` and stops the poll.
 
 ## Project = subdomain; mode + port auto-detected from the upload

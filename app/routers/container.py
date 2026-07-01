@@ -54,32 +54,11 @@ def _job_response(job_key: str, launched_message: str) -> DockerJobStatusRespons
 # and auto-detects the Dockerfile to set container_port + WebSocket headers.
 
 
-# ── Build / start / stop / exec ─────────────────────────────────────────────────
-
-@router.post("/{project_name}/build", response_model=DockerJobStatusResponse,
-             summary="Build (or rebuild) the project's docker image — poll /status")
-def build_image(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
-    project = _get_dockerfile_project(project_name, db)
-    if not project.dockerfile_path or not os.path.exists(project.dockerfile_path):
-        raise HTTPException(status_code=400, detail="No Dockerfile uploaded for this project yet")
-    docker_service.build_image(project.dockerfile_path, project.image_name, project.container_name)
-    return _job_response(project.container_name, f"Build started for image '{project.image_name}' — poll /status")
-
-
-@router.post("/{project_name}/start", response_model=DockerJobStatusResponse,
-             summary="Start the project's container — poll /status")
-def start_container(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
-    project = _get_dockerfile_project(project_name, db)
-    if not docker_service.image_exists(project.image_name):
-        raise HTTPException(status_code=400, detail="Docker image not built yet — run /build first")
-    if not project.container_port:
-        raise HTTPException(status_code=400, detail="No container port set — re-upload the Dockerfile (it must EXPOSE a port)")
-    docker_service.start_container(
-        project.container_name, project.image_name, project.local_port, project.container_port,
-        project.container_name,
-    )
-    return _job_response(project.container_name, f"Start issued for '{project.container_name}' — poll /status")
-
+# ── Stop / status / exec ────────────────────────────────────────────────────────
+#
+# Build + run is launched automatically by the upload deploy flow (POST
+# /projects/{name}/upload → WS /projects/{name}/deploy); re-upload to redeploy. The
+# former per-mode /build and /start endpoints are gone — these remain for control.
 
 @router.post("/{project_name}/stop", response_model=DockerJobStatusResponse,
              summary="Stop the project's container — poll /status")

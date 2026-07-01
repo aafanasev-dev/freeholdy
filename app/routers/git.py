@@ -1,10 +1,10 @@
 import os
 import shutil
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket
 from sqlalchemy.orm import Session
 
-from app.models.database import get_db, SessionLocal
+from app.models.database import get_db
 from app.models.orm import Project
 from app.models.schemas import (
     GitAddRequest,
@@ -14,8 +14,13 @@ from app.models.schemas import (
     ProjectType,
 )
 from app.auth import require_auth
-from app.services import docker_service, compose_service, git_service, interactive_service, ws_session
-from app.routers.projects import project_response, _autoprovision
+from app.services import docker_service, compose_service, git_service
+from app.routers.projects import (
+    project_response,
+    _autoprovision,
+    launch_deploy,
+    deploy_stream_session,
+)
 
 router = APIRouter()
 
@@ -85,30 +90,14 @@ def add_git_project(
         )
     db.refresh(project)
 
-    # 3. Launch the async build + run job (no install.sh).
-    if detected_mode == "compose":
-        job_key = f"compose:{name}"
-        docker_service.compose_up(name, project_dir, job_key)
-        poll_hint = f"/projects/{name}/compose/status"
-    else:
-        job_key = project.container_name
-        docker_service.provision_from_plugin(
-            job_key=job_key,
-            project_dir=project_dir,
-            plugin_dir=project_dir,        # unused without an install_script
-            install_script=None,           # build + run only
-            image_name=project.image_name,
-            container_name=project.container_name,
-            local_port=project.local_port,
-            container_port=project.container_port,
-        )
-        poll_hint = f"/projects/{name}/status"
+    # 3. Launch the async build + run job (no install.sh) — same dispatch the upload flow uses.
+    job_key = launch_deploy(project)
 
     job = docker_service.get_job(job_key)
     job_resp = DockerJobStatusResponse(
         status=job.status if job else "no_job",
         operation=job.operation if job else None,
-        message=f"Cloned and provisioning '{name}' ({detected_mode}) — poll {poll_hint}",
+        message=f"Cloned and provisioning '{name}' ({detected_mode}) — stream {_deploy_ws_path(name)}",
         logs=docker_service.get_job_logs(job_key),
         exit_code=job.exit_code if job else None,
     )
@@ -159,38 +148,5 @@ def get_git_key(_=Depends(require_auth)):
 
 @router.websocket("/deploy/{project_name}")
 async def deploy_session(websocket: WebSocket, project_name: str):
-    await websocket.accept()
-
-    # First frame must be auth (browsers can't set an Authorization header on a WebSocket).
-    if not await ws_session.authenticate(websocket):
-        return
-
-    db = SessionLocal()
-    try:
-        project = db.query(Project).filter(Project.name == project_name).first()
-        if project is None:
-            await ws_session.reject(
-                websocket, 4404,
-                f"project '{project_name}' not found — POST /git/add first",
-            )
-            return
-        job_key = f"compose:{project_name}" if project.deploy_mode == "compose" else project.container_name
-    finally:
-        db.close()
-
-    if docker_service.get_job(job_key) is None:
-        await ws_session.reject(
-            websocket, 4404,
-            f"no deploy job for '{project_name}' — POST /git/add first",
-        )
-        return
-
-    try:
-        await websocket.send_json({"type": "ready"})
-        exit_code = await interactive_service.stream_job(websocket, job_key)
-        if exit_code is None:
-            return  # client disconnected mid-stream; the job keeps running
-        await websocket.send_json({"type": "exit", "code": exit_code})
-        await websocket.close(code=1000)
-    except WebSocketDisconnect:
-        pass
+    # Same read-only build+run stream as the upload deploy route (routers/projects.py).
+    await deploy_stream_session(websocket, project_name)

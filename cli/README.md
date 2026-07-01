@@ -40,14 +40,10 @@ alias fhcli="$(pwd)/venv/bin/python $(pwd)/fhcli.py"
 | `fhcli plugin-add PLUGIN PROJECT` | Create a project from a plugin, then build + run it |
 | `fhcli git-add NAME GIT_URL [--branch B] [--no-follow]` | Clone a git repo into a new project, auto-detect Dockerfile/compose, then build + run it (build log streams live) |
 | `fhcli create NAME` | Create an empty project (deploy mode decided at upload time) |
-| `fhcli upload PROJECT PATH [--dest DIR]` | Zip + stream a file or folder in 1 MiB chunks (progress bar) → server unzips, auto-detects Dockerfile/compose + provisions |
-| `fhcli build PROJECT [--no-follow]` | Build the Docker image (dockerfile mode) |
-| `fhcli start PROJECT` | Start the container |
+| `fhcli upload PROJECT PATH [--dest DIR] [--no-follow]` | Zip + stream a file or folder in 1 MiB chunks → server unzips, auto-detects Dockerfile/compose, provisions, then builds + runs it (deploy log streams live). Re-run to redeploy. |
 | `fhcli stop PROJECT` | Stop the container |
 | `fhcli exec PROJECT "COMMAND"` | Run a command inside the container |
 | `fhcli ssl PROJECT` | Issue / retry the SSL certificate |
-| `fhcli compose-build PROJECT` | `docker compose build` (compose mode) |
-| `fhcli compose-up PROJECT` | `docker compose up -d` |
 | `fhcli compose-down PROJECT` | `docker compose down` |
 | `fhcli compose-status PROJECT` | Last compose operation's status + logs |
 | `fhcli status PROJECT [--follow]` | Status + logs of the last docker op |
@@ -66,11 +62,9 @@ fhcli health
 
 # Create an empty project, then upload its folder (must contain a Dockerfile that EXPOSEs a port)
 fhcli create myapp
-fhcli upload myapp ./myapp        # detects the Dockerfile, reads EXPOSE, wires nginx + SSL
-
-# Build + start
-fhcli build myapp
-fhcli start myapp
+fhcli upload myapp ./myapp        # detects the Dockerfile, reads EXPOSE, wires nginx + SSL,
+                                  # then builds + runs it — streaming the deploy log live.
+                                  # Re-run `fhcli upload` to redeploy.
 
 # Inspect / operate
 fhcli projects
@@ -90,11 +84,9 @@ services without `ports:` (databases, caches) stay internal.
 ```bash
 # Create an empty project, then upload a folder whose root has a docker-compose.yml
 fhcli create myapp
-fhcli upload myapp ./myapp        # detects compose, sets up nginx + SSL per exposed service
-
-# Build + start the whole stack
-fhcli compose-build myapp
-fhcli compose-up myapp
+fhcli upload myapp ./myapp        # detects compose, sets up nginx + SSL per exposed service,
+                                  # then `docker compose up -d` — streaming the deploy log live.
+                                  # Re-run `fhcli upload` to redeploy.
 
 # Inspect
 fhcli projects                 # myapp shows "· compose" + service endpoints

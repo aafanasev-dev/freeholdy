@@ -4,22 +4,40 @@ import shutil
 import subprocess
 import zipfile
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    UploadFile,
+    File,
+    Body,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from sqlalchemy.orm import Session
 from typing import List
 
-from app.models.database import get_db
+from app.models.database import get_db, SessionLocal
 from app.models.orm import Project, ComposeService
 from app.models.schemas import (
     ProjectCreateRequest,
     ProjectResponse,
     ProjectDeleteResponse,
     UploadResponse,
+    DockerJobStatusResponse,
     ProjectType,
 )
 from app.auth import require_auth
 from app.config import settings
-from app.services import docker_service, nginx_service, compose_service, scan
+from app.services import (
+    docker_service,
+    nginx_service,
+    compose_service,
+    scan,
+    interactive_service,
+    ws_session,
+)
 
 router = APIRouter()
 
@@ -423,15 +441,7 @@ async def upload(
     provisioned, detected_mode = _autoprovision(db, project, project_name, base_dir)
 
     db.refresh(project)
-    return UploadResponse(
-        status="ok",
-        message=_upload_message(project, project_name, len(written), provisioned, detected_mode),
-        count=len(written),
-        files=sorted(written),
-        deploy_mode=project.deploy_mode,
-        provisioned=provisioned,
-        project=project_response(project) if provisioned else None,
-    )
+    return _upload_response(project, project_name, written, provisioned, detected_mode)
 
 
 def _autoprovision(
@@ -462,6 +472,50 @@ def _autoprovision(
     return True, detected_mode
 
 
+def launch_deploy(project: Project) -> str:
+    """Launch the async build + run job for an already-provisioned project, dispatching on
+    its deploy mode, and return the job_key the client streams over a deploy WebSocket.
+
+    The single place that maps (deploy_mode → docker_service call); shared by the upload
+    flow (`WS /projects/{name}/deploy`), git deploy (`WS /git/deploy/{name}`), and the
+    non-interactive plugin install. Compose runs `docker compose up -d`; dockerfile runs a
+    plain build + run via `provision_from_plugin(install_script=None)`."""
+    project_dir = os.path.abspath(compose_service.project_dir(project.name))
+    if project.deploy_mode == "compose":
+        job_key = f"compose:{project.name}"
+        docker_service.compose_up(project.name, project_dir, job_key)
+    else:
+        job_key = project.container_name
+        docker_service.provision_from_plugin(
+            job_key=job_key,
+            project_dir=project_dir,
+            plugin_dir=project_dir,        # unused without an install_script
+            install_script=None,           # build + run only
+            image_name=project.image_name,
+            container_name=project.container_name,
+            local_port=project.local_port,
+            container_port=project.container_port,
+        )
+    return job_key
+
+
+def deploy_job_key(project: Project) -> str:
+    """The job_key a deploy WebSocket reconnects to — mirrors `launch_deploy` without
+    launching anything (compose → `compose:{name}`, dockerfile → container name)."""
+    return f"compose:{project.name}" if project.deploy_mode == "compose" else project.container_name
+
+
+def _deploy_job_response(job_key: str, message: str) -> DockerJobStatusResponse:
+    job = docker_service.get_job(job_key)
+    return DockerJobStatusResponse(
+        status=job.status if job else "no_job",
+        operation=job.operation if job else None,
+        message=message,
+        logs=docker_service.get_job_logs(job_key),
+        exit_code=job.exit_code if job else None,
+    )
+
+
 def _upload_message(
     project: Project, project_name: str, count: int, provisioned: bool, detected_mode: str | None
 ) -> str:
@@ -473,6 +527,43 @@ def _upload_message(
         return f"Uploaded {count} file(s) to '{project_name}'"
     return (f"Uploaded {count} file(s); no Dockerfile or docker-compose.yml found "
             f"in the root yet — '{project_name}' is not deployed")
+
+
+def _deploy_ws_path(project_name: str) -> str:
+    """The WebSocket path clients connect to to stream an upload's build + run."""
+    return f"/projects/{project_name}/deploy"
+
+
+def _upload_response(
+    project: Project,
+    project_name: str,
+    written: list[str],
+    provisioned: bool,
+    detected_mode: str | None,
+) -> UploadResponse:
+    """Build the shared upload response. When a manifest was provisioned, auto-launch the
+    build + run job (like git deploy) and hand back a `ws_path` the client streams; uploads
+    with no manifest stay a plain file sync (no job, no ws_path)."""
+    ws_path = None
+    job = None
+    if provisioned:
+        job_key = launch_deploy(project)
+        ws_path = _deploy_ws_path(project_name)
+        job = _deploy_job_response(
+            job_key, f"Provisioning '{project_name}' ({detected_mode}) — stream {ws_path}"
+        )
+
+    return UploadResponse(
+        status="ok",
+        message=_upload_message(project, project_name, len(written), provisioned, detected_mode),
+        count=len(written),
+        files=sorted(written),
+        deploy_mode=project.deploy_mode,
+        provisioned=provisioned,
+        project=project_response(project) if provisioned else None,
+        ws_path=ws_path,
+        job=job,
+    )
 
 
 # ── Chunked upload (large files/folders) ─────────────────────────────────────────
@@ -577,15 +668,7 @@ async def upload_complete(
     provisioned, detected_mode = _autoprovision(db, project, project_name, base_dir)
 
     db.refresh(project)
-    return UploadResponse(
-        status="ok",
-        message=_upload_message(project, project_name, len(written), provisioned, detected_mode),
-        count=len(written),
-        files=sorted(written),
-        deploy_mode=project.deploy_mode,
-        provisioned=provisioned,
-        project=project_response(project) if provisioned else None,
-    )
+    return _upload_response(project, project_name, written, provisioned, detected_mode)
 
 
 @router.delete(
@@ -603,3 +686,62 @@ async def upload_abort(
     if os.path.isfile(zip_path):
         os.remove(zip_path)
     return {"status": "ok"}
+
+
+# ── Deploy over WebSocket ───────────────────────────────────────────────────────
+#
+# An upload that provisions a manifest auto-launches the build+run job and returns a
+# `ws_path`; the client connects here to stream the build log live (no status polling).
+# Read-only — a basic deploy never prompts. Same frame protocol as the git deploy and
+# plugin install sockets:
+#   client -> server : {"type": "auth", "token": "..."}   first frame, always
+#                      {"type": "abort"}                    cancel the running build
+#   server -> client : {"type": "ready"}                   auth ok, streaming starts
+#                      {"type": "stdout", "data": "..."}   build + run output
+#                      {"type": "exit", "code": N}          job finished
+# A reconnect re-streams a running job and replays a finished one (stream_job).
+
+
+async def deploy_stream_session(websocket: WebSocket, project_name: str) -> None:
+    """Read-only WebSocket that tails a project's build+run job to exit. Shared by the
+    upload deploy route below and the git deploy route (`routers/git.py`)."""
+    await websocket.accept()
+
+    # First frame must be auth (browsers can't set an Authorization header on a WebSocket).
+    if not await ws_session.authenticate(websocket):
+        return
+
+    db = SessionLocal()
+    try:
+        project = db.query(Project).filter(Project.name == project_name).first()
+        if project is None:
+            await ws_session.reject(
+                websocket, 4404,
+                f"project '{project_name}' not found — upload it first",
+            )
+            return
+        job_key = deploy_job_key(project)
+    finally:
+        db.close()
+
+    if docker_service.get_job(job_key) is None:
+        await ws_session.reject(
+            websocket, 4404,
+            f"no deploy job for '{project_name}' — upload it first",
+        )
+        return
+
+    try:
+        await websocket.send_json({"type": "ready"})
+        exit_code = await interactive_service.stream_job(websocket, job_key)
+        if exit_code is None:
+            return  # client disconnected mid-stream; the job keeps running
+        await websocket.send_json({"type": "exit", "code": exit_code})
+        await websocket.close(code=1000)
+    except WebSocketDisconnect:
+        pass
+
+
+@router.websocket("/{project_name}/deploy")
+async def deploy_session(websocket: WebSocket, project_name: str):
+    await deploy_stream_session(websocket, project_name)

@@ -18,21 +18,23 @@ that project.
 POST   /projects                       →  create an empty project (deploy_mode: "pending")
 POST   /projects/{name}/upload         →  upload a file/folder; auto-detect Dockerfile or
                                           docker-compose.yml in the root → provision
-                                          ({name}.your_domain.com + nginx config + Let's Encrypt cert)
+                                          ({name}.your_domain.com + nginx config + Let's Encrypt
+                                          cert), then build + run it. Returns a ws_path.
+WS     /projects/{name}/deploy         →  stream the build + run log (read-only); re-upload to redeploy
 DELETE /projects/{name}                →  stop containers, remove images, delete nginx config, remove from DB
 
 # dockerfile mode (detected from a Dockerfile) — one container per project:
-POST   /projects/{name}/build       →  docker build  (async, poll /status)
-POST   /projects/{name}/start       →  docker run    (async, poll /status)
+# (build + run are launched automatically by the upload above — no /build or /start)
 POST   /projects/{name}/stop        →  docker stop   (async, poll /status)
-POST   /projects/{name}/exec        →  docker exec   (async, poll /status)
+WS     /projects/{name}/exec         →  interactive docker exec shell
 GET    /projects/{name}/status      →  logs + status of last docker op
 POST   /projects/{name}/abort       →  kill running docker subprocess
 POST   /projects/{name}/ssl         →  (re)issue the Let's Encrypt cert
 POST   /projects/{name}/domain      →  set/clear a custom domain (re-runs nginx + certbot)
 
 # compose mode (detected from a docker-compose.yml) — multi-container stack:
-POST   /projects/{name}/compose/{build|up|down}       →  run the stack (async, poll /compose/status)
+# (build + up are launched automatically by the upload above — no /compose/build or /compose/up)
+POST   /projects/{name}/compose/down                  →  tear the stack down (async, poll /compose/status)
 GET    /projects/{name}/compose/status                →  logs + status of last compose op
 POST   /projects/{name}/compose/abort                 →  kill running compose subprocess
 POST   /projects/{name}/services/{service}/domain     →  set/clear a service's custom domain
@@ -389,34 +391,27 @@ curl -X POST "$BASE/projects" \
   -d '{"name": "myapp"}'
 
 # 2. Upload the project folder (must contain a Dockerfile that EXPOSEs a port).
-#    The server detects the Dockerfile, sets the container port from EXPOSE, and
-#    provisions nginx + SSL for myapp.your_domain.com.
+#    The server detects the Dockerfile, sets the container port from EXPOSE, provisions
+#    nginx + SSL for myapp.your_domain.com, then builds + runs the container. The response
+#    carries a ws_path; the build streams over WS /projects/myapp/deploy.
 curl -X POST "$BASE/projects/myapp/upload" \
   -H "Authorization: Bearer $TOKEN" \
   -F "files=@./Dockerfile;filename=Dockerfile" \
   -F "files=@./app.py;filename=app.py"
 
-# 3. Build the image (async — poll status)
-curl -X POST "$BASE/projects/myapp/build" -H "Authorization: Bearer $TOKEN"
+# 3. Watch the deploy (or just poll status)
 curl    "$BASE/projects/myapp/status"     -H "Authorization: Bearer $TOKEN"
 
-# 4. Start the container
-curl -X POST "$BASE/projects/myapp/start" -H "Authorization: Bearer $TOKEN"
-
-# 5. Run a command inside it
-curl -X POST "$BASE/projects/myapp/exec" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"command": "ls /app"}'
-
-# 6. Stop
+# 4. Stop
 curl -X POST "$BASE/projects/myapp/stop" -H "Authorization: Bearer $TOKEN"
+
+# Re-upload to redeploy after changing the code.
 ```
 
 For a multi-container stack, upload a folder whose root contains a `docker-compose.yml` (it wins over
-a Dockerfile); the project becomes compose-mode and you drive it with `.../compose/{build,up,down}`.
-The `fhcli` CLI wraps all of this (`fhcli create` → `fhcli upload` → `fhcli build`/`fhcli compose-up`) — see
-`cli/README.md`.
+a Dockerfile); the project becomes compose-mode and the upload runs `docker compose up -d` for you
+(tear it down with `.../compose/down`). The `fhcli` CLI wraps all of this (`fhcli create` →
+`fhcli upload`, which provisions and deploys in one step) — see `cli/README.md`.
 
 ---
 
@@ -465,7 +460,7 @@ freeholdy/
 │   └── templates/
 │       ├── nginx_http.conf.j2  # HTTP-only (for ACME challenge)
 │       └── nginx_ssl.conf.j2   # Full HTTPS config
-├── plugins/                  # Built-in plugins (webui, about, hello-world, ws-chat)
+├── plugins/                  # Built-in plugins (webui, hello-world, ws-chat)
 ├── cli/                      # Standalone `fhcli` CLI (own venv + .env)
 ├── webui/                    # React control panel (source for the webui plugin)
 ├── scripts/

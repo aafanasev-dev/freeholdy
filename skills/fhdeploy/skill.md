@@ -94,29 +94,28 @@ If `upload_data["provisioned"] == False` (no `Dockerfile` / `docker-compose.yml`
 - Print: "Files uploaded (no manifest detected — nothing to build)."
 - Stop here. Success.
 
-### 4 — Build and run
+### 4 — Stream the deploy
 
-Check `upload_data["deploy_mode"]`:
+A provisioned upload **already launched build + run** (dockerfile: build + `docker run`;
+compose: `docker compose up -d`). There is nothing extra to POST — just stream the running
+job's log. The status endpoint depends on `upload_data["deploy_mode"]`:
 
----
+- `"dockerfile"` → `GET /projects/{PROJECT}/status`
+- `"compose"`    → `GET /projects/{PROJECT}/compose/status`
 
-#### `"dockerfile"` — single-container project
-
-**a. Start build:**
-```bash
-curl -sf -X POST "${BASE_URL}/projects/${PROJECT}/build" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json"
-```
-
-**b. Stream build logs** — poll `GET /projects/{PROJECT}/status` every second:
+Poll it every second until the job leaves `running`:
 ```python
 import time, requests, sys
 
+deploy_mode = upload_data["deploy_mode"]
+status_path = (f"{BASE_URL}/projects/{PROJECT}/compose/status"
+               if deploy_mode == "compose"
+               else f"{BASE_URL}/projects/{PROJECT}/status")
+
 printed = 0
-print("─── build output ────────────────────────────────")
+print("─── deploy output (build → run) ─────────────────")
 while True:
-    data = requests.get(f"{BASE_URL}/projects/{PROJECT}/status",
+    data = requests.get(status_path,
                         headers={"Authorization": f"Bearer {TOKEN}"}, timeout=10).json()
     status = data.get("status", "no_job")
     logs   = data.get("logs", "")
@@ -126,52 +125,13 @@ while True:
         printed = len(logs)
     if status != "running":
         if status != "done":
-            sys.exit(f"\nBuild failed — status={status}, exit_code={data.get('exit_code')}")
+            sys.exit(f"\nDeploy failed — status={status}, exit_code={data.get('exit_code')}")
         break
     time.sleep(1)
-print("\n✓ Build succeeded")
+print("\n✓ Deploy succeeded")
 ```
 
-**c. Start container:**
-```bash
-curl -sf -X POST "${BASE_URL}/projects/${PROJECT}/start" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json"
-```
-
----
-
-#### `"compose"` — multi-container stack
-
-**a. Compose up:**
-```bash
-curl -sf -X POST "${BASE_URL}/projects/${PROJECT}/compose/up" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json"
-```
-
-**b. Stream compose logs** — poll `GET /projects/{PROJECT}/compose/status` every second:
-```python
-import time, requests, sys
-
-printed = 0
-print("─── compose up output ───────────────────────────")
-while True:
-    data = requests.get(f"{BASE_URL}/projects/{PROJECT}/compose/status",
-                        headers={"Authorization": f"Bearer {TOKEN}"}, timeout=10).json()
-    status = data.get("status", "no_job")
-    logs   = data.get("logs", "")
-    new    = logs[printed:]
-    if new:
-        print(new, end="", flush=True)
-        printed = len(logs)
-    if status != "running":
-        if status != "done":
-            sys.exit(f"\nCompose up failed — status={status}")
-        break
-    time.sleep(1)
-print("\n✓ Compose up succeeded")
-```
+(To redeploy after a code change, re-run the upload — it rebuilds and restarts.)
 
 ### 5 — Show summary
 

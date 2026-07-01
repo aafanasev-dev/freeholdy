@@ -512,7 +512,7 @@ const ConfirmModal = ({ message, onConfirm, onCancel, loading }) => (
 // so files land at the project root, matching the CLI's relpath-from-LOCAL_DIR semantics.
 const stripRoot = (p) => p.split("/").slice(1).join("/") || p;
 
-const UploadModal = ({ token, project, onClose, onUploaded }) => {
+const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
   const [entries, setEntries] = useState([]);   // [{ file, rel }]
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
@@ -560,6 +560,14 @@ const UploadModal = ({ token, project, onClose, onUploaded }) => {
       }
       const data = await api.post(`/projects/${project}/upload/complete`,
                                   { upload_id: uploadId, total_size: total });
+      // When a manifest is provisioned the server auto-launches build + run and returns a
+      // ws_path; hand off to the InstallPane to stream the deploy live (same as git/plugin
+      // installs). A plain file sync (no manifest) just shows its result here.
+      if (data.provisioned && data.ws_path && onDeploy) {
+        onDeploy(data);
+        onClose();
+        return;
+      }
       setResult(data);
       onUploaded && onUploaded();
     } catch (e) { setError(e.message); }
@@ -784,8 +792,6 @@ const ContainerRow = ({ project, info, token, onOperation, onRefresh }) => {
         <Cells label={project} info={info} />
         <td style={{ padding: "6px 8px" }}>
           <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-            <Btn sm v="primary" onClick={() => act("build")} busy={busy.build} title="Build Docker image">build</Btn>
-            <Btn sm v="primary" onClick={() => act("start")} busy={busy.start} disabled={isRunning} title="Start container">start</Btn>
             <Btn sm v="danger" onClick={() => act("stop")} busy={busy.stop} disabled={!isRunning} title="Stop container">stop</Btn>
             <Btn sm v="amber" onClick={() => setModal({ type: "exec" })} disabled={!isRunning} title="Exec command in container">exec</Btn>
             <Btn sm onClick={() => act("ssl")} busy={busy.ssl} title="Issue/renew SSL cert">ssl</Btn>
@@ -824,7 +830,7 @@ const ServiceRow = ({ project, info, token, onOperation, onRefresh }) => {
 };
 
 // ── Project card ──────────────────────────────────────────────────────────────
-const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh }) => {
+const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDeploy }) => {
   const [confirm, setConfirm] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState({});
@@ -841,7 +847,8 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh }) => {
     finally { setRemoving(false); setConfirm(false); }
   };
 
-  // Project-level docker compose build/up/down — streamed via the bottom LogPane.
+  // Project-level docker compose down — streamed via the bottom LogPane. (build + up are
+  // launched automatically by the upload/deploy flow.)
   const composeAct = async (action) => {
     setBusy(b => ({ ...b, [action]: true }));
     try {
@@ -880,13 +887,9 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh }) => {
             )}
           </div>
           <div style={{ display: "flex", gap: "6px" }}>
-            <Btn sm onClick={() => setUploadModal(true)} title="Upload files or a folder — auto-detects Dockerfile / docker-compose.yml and provisions">upload</Btn>
+            <Btn sm v="primary" onClick={() => setUploadModal(true)} title="Upload files or a folder — auto-detects Dockerfile / docker-compose.yml, provisions, and deploys">{isPending ? "upload" : "deploy"}</Btn>
             {isCompose && (
-              <>
-                <Btn sm v="primary" onClick={() => composeAct("build")} busy={busy.build} title="docker compose build">build</Btn>
-                <Btn sm v="primary" onClick={() => composeAct("up")} busy={busy.up} title="docker compose up -d">up</Btn>
-                <Btn sm v="danger" onClick={() => composeAct("down")} busy={busy.down} title="docker compose down">down</Btn>
-              </>
+              <Btn sm v="danger" onClick={() => composeAct("down")} busy={busy.down} title="docker compose down">down</Btn>
             )}
             <Btn v="danger" sm onClick={() => setConfirm(true)} busy={removing}>remove</Btn>
           </div>
@@ -920,7 +923,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh }) => {
         )}
       </div>
 
-      {uploadModal && <UploadModal token={token} project={project.name} onClose={() => setUploadModal(false)} onUploaded={() => onRefresh && onRefresh()} />}
+      {uploadModal && <UploadModal token={token} project={project.name} onClose={() => setUploadModal(false)} onUploaded={() => onRefresh && onRefresh()} onDeploy={onDeploy} />}
       {confirm && <ConfirmModal message={`Delete "${project.name}"? This stops containers, removes images and nginx config.`} onConfirm={remove} onCancel={() => setConfirm(false)} loading={removing} />}
     </>
   );
@@ -1225,8 +1228,8 @@ const Dashboard = ({ token, onLogout }) => {
 
   useEffect(() => { checkHealth(); fetchProjects(); fetchVersion(); }, []);
 
-  // Build/start/stop/ssl poll the project-level status endpoint; compose lifecycle has
-  // its own path. (Exec and installs stream over WebSockets, not polled.)
+  // Stop/ssl poll the project-level status endpoint; compose down has its own path.
+  // (Deploys, exec, and installs stream over WebSockets, not polled.)
   const statusPath = (log) => log.kind === "compose"
     ? `/projects/${log.project}/compose/status`
     : `/projects/${log.project}/status`;
@@ -1359,6 +1362,7 @@ const Dashboard = ({ token, onLogout }) => {
             <ProjectCard key={p.name} project={p} token={token}
               onOperation={handleOperation}
               onRefresh={fetchProjects}
+              onDeploy={handleInstalled}
               onRemoved={(name) => { setProjects(ps => ps.filter(x => x.name !== name)); if (activeLog?.project === name) setActiveLog(null); if (interactiveLog?.project === name) setInteractiveLog(null); }} />
           ))
         )}

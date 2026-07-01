@@ -133,9 +133,9 @@ main() {
 
     hr "provision echo project"
     fhcli create "$PROJECT"
-    fhcli upload "$PROJECT" "$ROOT/tests/fixtures/echo"   # auto nginx + certbot for BASE_HOST
-    fhcli build "$PROJECT"
-    fhcli start "$PROJECT"
+    # upload auto-detects the Dockerfile, wires nginx + certbot for BASE_HOST, then builds +
+    # runs the container — streaming the deploy log and blocking until it finishes.
+    fhcli upload "$PROJECT" "$ROOT/tests/fixtures/echo"
 
     hr "echo on auto subdomain"
     assert_echo "auto subdomain" "https://$BASE_HOST"

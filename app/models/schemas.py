@@ -165,6 +165,15 @@ class ProjectResponse(BaseModel):
     services: List[ServiceInfo] = []            # compose mode
 
 
+class DockerJobStatusResponse(BaseModel):
+    """Returned by every async docker endpoint and by GET /status."""
+    status: str                     # running | done | error | aborted | no_job | waiting_interactive
+    operation: Optional[str] = None # build | start | stop | exec | provision | install
+    message: str
+    logs: str = ""
+    exit_code: Optional[int] = None
+
+
 class UploadResponse(BaseModel):
     status: str                    # ok | error
     message: str
@@ -173,15 +182,11 @@ class UploadResponse(BaseModel):
     deploy_mode: str               # pending | dockerfile | compose (after autodetect)
     provisioned: bool = False      # whether a manifest was found and the project wired up
     project: Optional[ProjectResponse] = None  # refreshed project view when provisioned
-
-
-class DockerJobStatusResponse(BaseModel):
-    """Returned by every async docker endpoint and by GET /status."""
-    status: str                     # running | done | error | aborted | no_job | waiting_interactive
-    operation: Optional[str] = None # build | start | stop | exec | provision | install
-    message: str
-    logs: str = ""
-    exit_code: Optional[int] = None
+    # Set when a manifest was provisioned: the build+run job was auto-launched (like git
+    # deploy); connect to `ws_path` (WS /projects/{name}/deploy) to stream it. Absent for a
+    # plain file sync (no manifest).
+    ws_path: Optional[str] = None
+    job: Optional[DockerJobStatusResponse] = None
 
 
 class PluginResponse(BaseModel):

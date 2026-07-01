@@ -25,7 +25,7 @@ from app.services import (
     scan,
     nginx_service,
 )
-from app.routers.projects import provision_dockerfile, project_response
+from app.routers.projects import provision_dockerfile, project_response, launch_deploy
 from app.routers.compose import provision_compose
 
 router = APIRouter()
@@ -243,9 +243,8 @@ def _finish_compose_plugin(
             key = f"SERVICE_{svc['name'].upper()}_LOCAL_PORT"
             install_env[key] = str(svc["local_port"])
 
-    # Launch the stack.
-    job_key = f"compose:{project.name}"
-    docker_service.compose_up(project.name, project_dir, job_key)
+    # Launch the stack (same compose dispatch the upload/git deploy flows use).
+    job_key = launch_deploy(project)
 
     # Post phase: runs in the background; polls until the container API is ready.
     if install_script and os.path.exists(install_script):

@@ -261,28 +261,9 @@ def _require_compose_files(project_name: str):
         raise HTTPException(status_code=400, detail="No docker-compose.yml uploaded yet")
 
 
-@router.post(
-    "/{project_name}/compose/build",
-    response_model=DockerJobStatusResponse,
-    summary="docker compose build — returns immediately, poll /compose/status",
-)
-def compose_build(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
-    _get_compose_project(project_name, db)
-    _require_compose_files(project_name)
-    docker_service.compose_build(project_name, _abs_project_dir(project_name), _job_key(project_name))
-    return _job_response(project_name, "compose build started — poll /compose/status")
-
-
-@router.post(
-    "/{project_name}/compose/up",
-    response_model=DockerJobStatusResponse,
-    summary="docker compose up -d — returns immediately, poll /compose/status",
-)
-def compose_up(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
-    _get_compose_project(project_name, db)
-    _require_compose_files(project_name)
-    docker_service.compose_up(project_name, _abs_project_dir(project_name), _job_key(project_name))
-    return _job_response(project_name, "compose up started — poll /compose/status")
+# Build + run is launched automatically by the upload deploy flow (POST
+# /projects/{name}/upload → WS /projects/{name}/deploy); re-upload to redeploy. The
+# former /compose/build and /compose/up endpoints are gone — these remain for control.
 
 
 @router.post(

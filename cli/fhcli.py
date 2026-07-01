@@ -11,11 +11,10 @@ Usage examples:
   fhcli plugin-add hello-world mysite
   fhcli create myapp                    # then upload the project files (see below)
   fhcli upload myapp ./myapp            # uploads a file or folder over the HTTP API;
-                                      # auto-detects Dockerfile / docker-compose.yml
-                                      # and provisions.
-  fhcli build myapp
-  fhcli build myapp --no-follow
-  fhcli start myapp
+                                      # auto-detects Dockerfile / docker-compose.yml,
+                                      # provisions, then builds + runs it (streams the
+                                      # deploy log). Re-run to redeploy.
+  fhcli upload myapp ./myapp --no-follow
   fhcli stop  myapp
   fhcli exec  myapp "ls /app"
   fhcli ssl   myapp
@@ -811,22 +810,6 @@ def _compose_lifecycle(project: str, action: str, follow: bool, verb: str):
         sys.exit(1)
 
 
-@cli.command("compose-build")
-@click.argument("project")
-@click.option("--follow/--no-follow", default=True, help="Stream logs live (default: on).")
-def compose_build(project: str, follow: bool):
-    """Build images for a compose project (docker compose build)."""
-    _compose_lifecycle(project, "build", follow, "build")
-
-
-@cli.command("compose-up")
-@click.argument("project")
-@click.option("--follow/--no-follow", default=True, help="Stream logs live (default: on).")
-def compose_up(project: str, follow: bool):
-    """Start a compose project (docker compose up -d)."""
-    _compose_lifecycle(project, "up", follow, "up")
-
-
 @cli.command("compose-down")
 @click.argument("project")
 @click.option("--follow/--no-follow", default=True, help="Stream logs live (default: on).")
@@ -872,9 +855,6 @@ def _print_provisioned(data: dict):
         table.add_row(label, info.get("subdomain") or "—",
                       str(info.get("local_port") or "—"), ssl_icon)
     console.print(table)
-
-    nxt = f"fhcli compose-up {name}" if mode == "compose" else f"fhcli build {name}"
-    console.print(f"\n  Next: [bold]{nxt}[/]")
 
 
 def _collect_files(path: str, dest: str) -> list[tuple[str, str]]:
@@ -959,8 +939,13 @@ def _report_upload(data: dict) -> None:
 @click.argument("path", metavar="LOCAL_PATH", type=click.Path(exists=True))
 @click.option("--dest", "-d", default="", metavar="REMOTE_DIR",
               help="Sub-directory inside the project to upload into (default: project root).")
-def upload(project: str, path: str, dest: str):
-    """Upload a file or a folder into a project, then auto-detect + provision.
+@click.option(
+    "--follow/--no-follow",
+    default=True,
+    help="Stream the build + run log live when a manifest is provisioned (default: on).",
+)
+def upload(project: str, path: str, dest: str, follow: bool):
+    """Upload a file or a folder into a project, then auto-detect, provision, and deploy.
 
     LOCAL_PATH may be a single file or a directory (sent recursively, tree preserved).
     The selection is zipped and streamed to the server in 1 MiB pieces (with a progress
@@ -970,7 +955,10 @@ def upload(project: str, path: str, dest: str):
     After the files land, the server scans the project root for a manifest: a
     docker-compose.yml selects compose mode (it wins over a Dockerfile), a bare Dockerfile
     selects dockerfile mode (its EXPOSE'd port becomes the container port), and nginx + SSL
-    are wired up. Uploads with no manifest are a plain file sync.
+    are wired up. When a manifest is found the server then builds and starts the
+    container/stack automatically — exactly like `fhcli git-add` — and the CLI streams the
+    build log live. Re-run `fhcli upload` to redeploy. Uploads with no manifest are a plain
+    file sync (nothing is built).
 
     \b
     Examples:
@@ -987,84 +975,30 @@ def upload(project: str, path: str, dest: str):
     data = _chunked_upload(project, file_pairs)
     _report_upload(data)
 
-
-# ── build ──────────────────────────────────────────────────────────────────────
-
-@cli.command("build")
-@click.argument("project")
-@click.option(
-    "--follow/--no-follow",
-    default=True,
-    help="Stream build logs live (default: on). Use --no-follow to fire-and-forget.",
-)
-def build_image(project: str, follow: bool):
-    """Build (or rebuild) the project's Docker image.
-
-    The build runs in a background subprocess on the server.
-    By default the CLI streams logs live until the build finishes.
-
-    \b
-    Examples:
-      fhcli build myapp
-      fhcli build myapp --no-follow
-    """
-    console.print(f"Starting build for [cyan]{project}[/]…")
-    data = _post(f"/projects/{project}/build")
-
-    if data.get("status") == "no_job":
-        console.print(f"[red]✗[/] {data.get('message', 'Unknown error')}")
-        sys.exit(1)
+    ws_path = data.get("ws_path")
+    if not data.get("provisioned") or not ws_path:
+        return  # plain file sync — nothing built
 
     if not follow:
-        console.print(
-            f"[green]✓[/] Build started. "
-            f"Check progress with: [bold]fhcli status {project}[/]"
-        )
+        is_compose = data.get("deploy_mode") == "compose"
+        hint = f"fhcli compose-status {project}" if is_compose else f"fhcli status {project}"
+        console.print(f"\n[green]✓[/] Deploy started. Check progress with: [bold]{hint}[/]")
         return
 
-    console.print("[dim]─── build output ───────────────────────────────[/]")
-    result = _poll_job(project, show_logs=True)
-    _print_job_result(result, success_msg="Image built successfully", fail_msg="Build failed")
-
-    if result["status"] != "done":
-        sys.exit(1)
-
-
-# ── start ──────────────────────────────────────────────────────────────────────
-
-@cli.command("start")
-@click.argument("project")
-@click.option(
-    "--follow/--no-follow",
-    default=True,
-    help="Wait for the operation to complete (default: on).",
-)
-def start_container(project: str, follow: bool):
-    """Start the project's container.
-
-    \b
-    Example:
-      fhcli start myapp
-    """
-    console.print(f"Starting container for [cyan]{project}[/]…")
-    data = _post(f"/projects/{project}/start")
-
-    if data.get("status") == "no_job":
-        console.print(f"[red]✗[/] {data.get('message', 'Unknown error')}")
-        sys.exit(1)
-
-    if not follow:
+    console.print("\n[dim]─── deploy output (build → run) ───[/]")
+    code = asyncio.run(_install_ws(ws_path))
+    if code != 0:
         console.print(
-            f"[green]✓[/] Start issued. "
-            f"Check with: [bold]fhcli status {project}[/]"
+            f"\n[red]✗ deploy failed (exit {code})[/] — fix and re-run "
+            f"[bold]fhcli upload {project} …[/], or [bold]fhcli delete {project}[/] to start over"
         )
-        return
-
-    result = _poll_job(project, show_logs=False)
-    _print_job_result(result, success_msg=f"Container started", fail_msg="Start failed")
-
-    if result["status"] != "done":
         sys.exit(1)
+    console.print("\n[green]✓[/] Project deployed and running")
+
+
+# Build + run is launched automatically by `fhcli upload` (the server streams it back over
+# the deploy WebSocket); re-run `fhcli upload` to redeploy. The former `build` / `start`
+# (and `compose-build` / `compose-up`) commands are gone.
 
 
 # ── stop ───────────────────────────────────────────────────────────────────────
