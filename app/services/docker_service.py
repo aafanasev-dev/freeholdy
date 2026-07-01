@@ -378,6 +378,22 @@ def compose_down(project: str, project_dir: str, job_key: str) -> DockerJob:
     return _spawn(job_key, "compose_down", cmd)
 
 
+def stop_container_sync(container_name: str) -> tuple:
+    """Synchronously stop a running container (blue/green demotion keeps the stopped
+    container on disk for fast rollback). Returns (success, message)."""
+    result = subprocess.run(
+        ["docker", "stop", "--time", "10", container_name],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return True, f"Container '{container_name}' stopped"
+    stderr = result.stderr.strip()
+    if "no such container" in stderr.lower():
+        return True, f"Container '{container_name}' did not exist — skipped"
+    return False, f"Failed to stop container '{container_name}': {stderr}"
+
+
 def remove_container(container_name: str) -> tuple:
     """Stop (if running) and remove a container. Returns (success, message)."""
     result = subprocess.run(

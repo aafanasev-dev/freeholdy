@@ -26,6 +26,7 @@ const mkApi = (token) => {
   return {
     get:  (p)    => fetch(`${BASE}${p}`, { headers: h }).then(unwrap),
     post: (p, b) => fetch(`${BASE}${p}`, { method: "POST", headers: h, body: b != null ? JSON.stringify(b) : undefined }).then(unwrap),
+    put:  (p, b) => fetch(`${BASE}${p}`, { method: "PUT", headers: h, body: b != null ? JSON.stringify(b) : undefined }).then(unwrap),
     form: (p, fd) => fetch(`${BASE}${p}`, { method: "POST", headers: hf, body: fd }).then(unwrap),
     raw:  (p, body) => fetch(`${BASE}${p}`, { method: "POST", headers: hr, body }).then(unwrap),
     del:  (p)    => fetch(`${BASE}${p}`, { method: "DELETE", headers: h }).then(unwrap),
@@ -743,6 +744,120 @@ const DomainModal = ({ token, project, service = null, info, onClose, onDone }) 
   );
 };
 
+// ── Versions modal (blue/green backups) ─────────────────────────────────────────
+// Lists a dockerfile project's deployed versions (active / inactive / archived), lets the
+// user set the backup limit (how many archived versions to keep), and roll back to an
+// earlier one. A rollback streams over WS /projects/{name}/deploy via the shared InstallPane
+// (handed up through onStream), exactly like a deploy.
+const VC = { active: C.green, inactive: C.amber, archived: C.muted };
+const VI = { active: "▶", inactive: "■", archived: "○" };
+const VersionBadge = ({ status }) => (
+  <span style={{ display: "inline-flex", alignItems: "center", gap: "5px", fontFamily: C.ff, fontSize: "11px", color: VC[status] || C.muted }}>
+    <span style={{ fontSize: "7px" }}>●</span>{VI[status] || "•"} {status}
+  </span>
+);
+
+const VersionsModal = ({ token, project, onClose, onStream, onRefresh }) => {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+  const [limit, setLimit] = useState("");
+  const [busy, setBusy] = useState({});   // { limit, "rollback:N" }
+  const client = mkApi(token);
+
+  const load = async () => {
+    try { const d = await client.get(`/projects/${project}/versions`); setData(d); setLimit(String(d.backup_limit)); }
+    catch (e) { setError(e.message); }
+  };
+  useEffect(() => { load(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saveLimit = async () => {
+    const n = parseInt(limit, 10);
+    if (!Number.isInteger(n) || n < 1) return setError("limit must be a whole number ≥ 1");
+    setError(""); setBusy(b => ({ ...b, limit: true }));
+    try {
+      const d = await client.put(`/projects/${project}/backup-limit`, { limit: n });
+      setData(d); setLimit(String(d.backup_limit)); onRefresh && onRefresh();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(b => ({ ...b, limit: false })); }
+  };
+
+  const rollback = async (version) => {
+    setError(""); setBusy(b => ({ ...b, [`rollback:${version}`]: true }));
+    try {
+      const d = await client.post(`/projects/${project}/rollback`, { version });
+      onStream({ project, wsPath: d.ws_path });   // stream the rollback log in the InstallPane
+      onClose();
+    } catch (e) { setError(e.message); setBusy(b => ({ ...b, [`rollback:${version}`]: false })); }
+  };
+
+  const counts = data?.counts || {};
+  const TH = ({ children, right, center }) => (
+    <th style={{ padding: "4px 10px", textAlign: right ? "right" : center ? "center" : "left", color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.1em", fontWeight: 400, whiteSpace: "nowrap" }}>{children}</th>
+  );
+  const td = { padding: "7px 10px", fontFamily: C.ff, fontSize: "11px", color: C.txt };
+
+  return (
+    <Modal onClose={onClose} width={660}>
+      <ModalHeader title={`VERSIONS — ${project}`} color={C.purple} onClose={onClose} />
+
+      {/* Backup limit control + counts */}
+      <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "12px", marginBottom: "14px", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "flex-end", gap: "8px" }}>
+          <Field label="BACKUP LIMIT (ARCHIVED KEPT)">
+            <TextIn value={limit} onChange={setLimit} type="number" style={{ width: "90px" }} />
+          </Field>
+          <Btn v="primary" onClick={saveLimit} busy={busy.limit}>save</Btn>
+        </div>
+        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.7" }}>
+          <span style={{ color: C.green }}>{counts.active || 0} active</span>
+          {" · "}<span style={{ color: C.amber }}>{counts.inactive || 0} inactive</span>
+          {" · "}<span style={{ color: C.muted }}>{counts.archived || 0} archived</span>
+        </div>
+      </div>
+
+      {error && <div style={{ marginBottom: "10px" }}><Err msg={error} /></div>}
+
+      {!data ? (
+        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", padding: "16px 0" }}>loading versions…</div>
+      ) : (data.versions || []).length === 0 ? (
+        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", padding: "16px 0" }}>
+          no versions yet — deploy this project first.
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto", border: `1px solid ${C.bd}`, borderRadius: "8px" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
+                <TH right>VER</TH><TH>STATE</TH><TH right>PORT</TH><TH>RUNTIME</TH><TH>CREATED</TH><TH right>ACTION</TH>
+              </tr>
+            </thead>
+            <tbody>
+              {data.versions.map(v => (
+                <tr key={v.version} style={{ borderBottom: `1px solid ${C.bd}` }}>
+                  <td style={{ ...td, textAlign: "right", color: C.purple, fontWeight: 600 }}>v{v.version}</td>
+                  <td style={td}><VersionBadge status={v.status} /></td>
+                  <td style={{ ...td, textAlign: "right" }}>{v.local_port ?? "—"}</td>
+                  <td style={td}><Tag status={v.container_status} /></td>
+                  <td style={{ ...td, color: C.dim }}>{v.created_at ? new Date(v.created_at).toLocaleString() : "—"}</td>
+                  <td style={{ ...td, textAlign: "right" }}>
+                    {v.status === "active"
+                      ? <span style={{ color: C.dim, fontSize: "10px" }}>current</span>
+                      : <Btn sm v="blue" onClick={() => rollback(v.version)} busy={busy[`rollback:${v.version}`]} title={`Roll back to v${v.version}`}>rollback</Btn>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "14px" }}>
+        <Btn v="ghost" onClick={onClose}>close</Btn>
+      </div>
+    </Modal>
+  );
+};
+
 // ── Row cells (shared layout) ───────────────────────────────────────────────────
 const Cells = ({ label, info }) => (
   <>
@@ -764,7 +879,7 @@ const Cells = ({ label, info }) => (
 );
 
 // ── Container row (dockerfile mode: one container per project, project-level ops) ──
-const ContainerRow = ({ project, info, token, onOperation, onRefresh }) => {
+const ContainerRow = ({ project, info, token, onOperation, onRefresh, onStream }) => {
   const [busy, setBusy] = useState({});
   const [modal, setModal] = useState(null); // null | {type, data?}
 
@@ -796,6 +911,7 @@ const ContainerRow = ({ project, info, token, onOperation, onRefresh }) => {
             <Btn sm v="amber" onClick={() => setModal({ type: "exec" })} disabled={!isRunning} title="Exec command in container">exec</Btn>
             <Btn sm onClick={() => act("ssl")} busy={busy.ssl} title="Issue/renew SSL cert">ssl</Btn>
             <Btn sm v="blue" onClick={() => setModal({ type: "domain" })} title="Set or clear a custom domain">domain</Btn>
+            <Btn sm v="primary" onClick={() => setModal({ type: "versions" })} title="View versions, roll back, set backup limit">versions</Btn>
             <Btn sm v="ghost" onClick={() => act("status")} busy={busy.status} title="View job status & logs">status</Btn>
           </div>
         </td>
@@ -805,6 +921,7 @@ const ContainerRow = ({ project, info, token, onOperation, onRefresh }) => {
       {modal?.type === "status"     && <StatusModal data={modal.data} project={project} onClose={() => setModal(null)} />}
       {modal?.type === "ssl"        && <SslModal data={modal.data} project={project} onClose={() => setModal(null)} />}
       {modal?.type === "domain"     && <DomainModal token={token} project={project} info={info} onClose={() => setModal(null)} onDone={onRefresh} />}
+      {modal?.type === "versions"   && <VersionsModal token={token} project={project} onClose={() => setModal(null)} onStream={onStream} onRefresh={onRefresh} />}
     </>
   );
 };
@@ -830,7 +947,7 @@ const ServiceRow = ({ project, info, token, onOperation, onRefresh }) => {
 };
 
 // ── Project card ──────────────────────────────────────────────────────────────
-const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDeploy }) => {
+const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDeploy, onStream }) => {
   const [confirm, setConfirm] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState({});
@@ -915,7 +1032,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
               {isCompose
                 ? (project.services || []).map(s => <ServiceRow key={s.name} project={project.name} info={s} token={token} onOperation={onOperation} onRefresh={onRefresh} />)
                 : (project.container
-                    ? <ContainerRow project={project.name} info={project.container} token={token} onOperation={onOperation} onRefresh={onRefresh} />
+                    ? <ContainerRow project={project.name} info={project.container} token={token} onOperation={onOperation} onRefresh={onRefresh} onStream={onStream} />
                     : null)}
             </tbody>
           </table>
@@ -1267,6 +1384,14 @@ const Dashboard = ({ token, onLogout }) => {
     setShowPlugins(false);
   }, []);
 
+  // Stream an already-launched deploy/rollback job (WS /projects/{name}/deploy) in the
+  // InstallPane — used by a rollback from the VersionsModal (no new project object).
+  const handleDeployStream = useCallback(({ project, wsPath }) => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    setActiveLog(null);
+    setInteractiveLog({ project, wsPath, interactive: false });
+  }, []);
+
   // The build streamed to completion over the install WebSocket — refresh the project
   // list so its status (running / failed) updates. The pane stays open showing the log.
   const handleInstallExit = useCallback((code) => {
@@ -1363,6 +1488,7 @@ const Dashboard = ({ token, onLogout }) => {
               onOperation={handleOperation}
               onRefresh={fetchProjects}
               onDeploy={handleInstalled}
+              onStream={handleDeployStream}
               onRemoved={(name) => { setProjects(ps => ps.filter(x => x.name !== name)); if (activeLog?.project === name) setActiveLog(null); if (interactiveLog?.project === name) setInteractiveLog(null); }} />
           ))
         )}

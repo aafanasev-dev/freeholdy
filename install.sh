@@ -436,7 +436,7 @@ step_mark_started system_packages
 
 export DEBIAN_FRONTEND=noninteractive
 # Supporting packages installed in BOTH modes.
-APT_PACKAGES=( git certbot python3-certbot-nginx python3 python3-venv python3-pip curl )
+APT_PACKAGES=( git certbot python3-certbot-nginx python3 python3-venv python3-pip curl sqlite3 )
 # Only a FRESH box provisions the system services themselves.
 if [[ "$MODE" == "fresh" ]]; then
     APT_PACKAGES+=( nginx docker.io )
@@ -460,7 +460,7 @@ fi
 # Skip anything already installed (by dpkg, or by an equivalent binary on PATH —
 # e.g. docker provided by docker-ce, not docker.io; installing docker.io on top
 # would break apt with a pkgProblemResolver conflict).
-declare -A PKG_BIN=( [git]=git [nginx]=nginx [certbot]=certbot [python3]=python3 [curl]=curl [docker.io]=docker )
+declare -A PKG_BIN=( [git]=git [nginx]=nginx [certbot]=certbot [python3]=python3 [curl]=curl [docker.io]=docker [sqlite3]=sqlite3 )
 TO_INSTALL=()
 for pkg in "${APT_PACKAGES[@]}"; do
     if dpkg -s "$pkg" &>/dev/null; then
@@ -848,6 +848,18 @@ as_user "${VENV_DIR}/bin/pip" install --quiet -r "${APP_DIR}/requirements.txt"
 ok "Dependencies installed"
 
 step_mark_done python_venv
+fi
+
+# ── 9b. Database migration (upgrades only) ──────────────────────────────────────
+# No migrations framework: init_db() builds the full schema for a fresh DB, but an
+# existing DB predating the blue/green versioning feature needs new columns + the
+# project_versions table. migrate_db.sh self-checks and is a no-op on a fresh install.
+section "Database migration"
+if [[ -x "${APP_DIR}/migrate_db.sh" ]]; then
+    as_user bash "${APP_DIR}/migrate_db.sh" "${APP_DIR}/data/freeholdy.db" \
+        || warn "migrate_db.sh reported a problem — check the schema before starting freeholdy."
+else
+    warn "migrate_db.sh not found in ${APP_DIR} — skipping schema migration."
 fi
 
 # ── 10. nginx reverse proxy for api.<domain> (graceful, revert-on-failure) ──────

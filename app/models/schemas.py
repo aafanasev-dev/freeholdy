@@ -231,3 +231,46 @@ class ProjectDeleteResponse(BaseModel):
     status: str           # ok | partial
     message: str
     details: List[str]    # per-step log of what was done / skipped
+
+
+# ── Versions / blue-green backups (dockerfile mode) ─────────────────────────────
+
+class VersionInfo(BaseModel):
+    """One deployed version of a dockerfile project."""
+    version: int
+    status: str                          # active | inactive | archived
+    image_name: str
+    container_name: str
+    local_port: Optional[int] = None     # None once archived (port freed)
+    container_status: str = "not_found"  # running | exited | not_found | error
+    created_at: datetime
+
+
+class VersionsResponse(BaseModel):
+    project: str
+    backup_limit: int
+    version_counter: int                 # last version number assigned
+    counts: dict                         # {"active": int, "inactive": int, "archived": int}
+    versions: List[VersionInfo] = []     # newest first
+
+
+class SetBackupLimitRequest(BaseModel):
+    limit: int
+
+    @field_validator("limit")
+    @classmethod
+    def limit_must_be_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("limit must be >= 1")
+        return v
+
+
+class RollbackRequest(BaseModel):
+    version: int
+
+
+class RollbackResponse(BaseModel):
+    status: str          # ok | error
+    message: str
+    job: DockerJobStatusResponse
+    ws_path: Optional[str] = None   # WS /projects/{name}/deploy — stream the rollback job

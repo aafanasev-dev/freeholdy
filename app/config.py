@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     PLUGINS_DIR: str = "plugins"
     PORT_RANGE_START: int = 8100
     PORT_RANGE_END: int = 9000
+    # Default number of archived versions kept per dockerfile project (blue/green backups).
+    # Overridable per-project via PUT /projects/{name}/backup-limit.
+    DEFAULT_BACKUP_LIMIT: int = 5
     CERTBOT_EMAIL: str = "admin@your_domain.com"
     # ACME HTTP-01 webroot. Certs are issued with `certbot certonly --webroot -w
     # CERTBOT_WEBROOT`, so certbot never rewrites nginx config (freeholdy owns those

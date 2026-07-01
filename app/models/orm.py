@@ -27,7 +27,12 @@ class Project(Base):
     # ── compose mode ──
     compose_path = Column(String, nullable=True)      # path to the uploaded docker-compose.yml
 
+    # ── blue/green versioning (dockerfile mode only) ──
+    backup_limit = Column(Integer, nullable=False, default=5)      # max archived versions kept
+    version_counter = Column(Integer, nullable=False, default=0)   # last version number assigned
+
     services = relationship("ComposeService", back_populates="project", cascade="all, delete-orphan")
+    versions = relationship("ProjectVersion", back_populates="project", cascade="all, delete-orphan")
 
     @property
     def effective_domain(self) -> str | None:
@@ -57,6 +62,26 @@ class ComposeService(Base):
     def effective_domain(self) -> str:
         """The hostname actually served: the custom domain when set, else the auto subdomain."""
         return self.custom_domain or self.subdomain
+
+
+class ProjectVersion(Base):
+    """One deployed version (image + container) of a dockerfile-mode project, for
+    blue/green deploys with archived backups. At any time a project has at most one
+    `active` (running, nginx points at it), at most one `inactive` (previous version,
+    container stopped but kept for fast rollback), and zero-or-more `archived` (image
+    kept, container removed, port freed) versions capped by Project.backup_limit."""
+    __tablename__ = "project_versions"
+
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    version = Column(Integer, nullable=False)          # the Project.version_counter value at deploy
+    image_name = Column(String, nullable=False)        # freeholdy_{name}:v{N}
+    container_name = Column(String, nullable=False)    # freeholdy_{name}_v{N}
+    local_port = Column(Integer, nullable=True)        # loopback port; NULL once archived (freed)
+    status = Column(String, nullable=False)            # active | inactive | archived
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    project = relationship("Project", back_populates="versions")
 
 
 class Token(Base):

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from app.models.database import get_db, SessionLocal
-from app.models.orm import Project, ComposeService
+from app.models.orm import Project, ComposeService, ProjectVersion
 from app.models.schemas import (
     ProjectCreateRequest,
     ProjectResponse,
@@ -46,6 +46,7 @@ def _next_port(db: Session, reserved: set[int]) -> int:
     """First free loopback port, considering both dockerfile projects and compose services."""
     used = {row[0] for row in db.query(Project.local_port).filter(Project.local_port.isnot(None)).all()}
     used |= {row[0] for row in db.query(ComposeService.local_port).all()}
+    used |= {row[0] for row in db.query(ProjectVersion.local_port).filter(ProjectVersion.local_port.isnot(None)).all()}
     used |= reserved
     for port in range(settings.PORT_RANGE_START, settings.PORT_RANGE_END):
         if port not in used:
@@ -242,14 +243,34 @@ def _teardown_compose(project: Project, details: list[str], errors: list[str]) -
 def _teardown_dockerfile(project: Project, details: list[str], errors: list[str]) -> None:
     """Stop+remove a single-container project's container/image and drop its files dir.
 
-    Also handles `pending` projects (no container/image yet): only the files dir is removed."""
-    if project.container_name:
-        docker_service.abort_job(project.container_name)
+    Also handles `pending` projects (no container/image yet): only the files dir is removed.
+    Removes every blue/green version's container + image (active, inactive, and archived),
+    not just the currently-active one."""
+    docker_service.abort_job(deploy_job_key(project))
+
+    # Every version's container + image (superset of the active container/image below).
+    seen_containers: set[str] = set()
+    seen_images: set[str] = set()
+    for v in project.versions:
+        if v.container_name and v.container_name not in seen_containers:
+            seen_containers.add(v.container_name)
+            ok, msg = docker_service.remove_container(v.container_name)
+            details.append(msg)
+            if not ok:
+                errors.append(msg)
+        if v.image_name and v.image_name not in seen_images:
+            seen_images.add(v.image_name)
+            ok, msg = docker_service.remove_image(v.image_name)
+            details.append(msg)
+            if not ok:
+                errors.append(msg)
+
+    if project.container_name and project.container_name not in seen_containers:
         ok, msg = docker_service.remove_container(project.container_name)
         details.append(msg)
         if not ok:
             errors.append(msg)
-    if project.image_name:
+    if project.image_name and project.image_name not in seen_images:
         ok, msg = docker_service.remove_image(project.image_name)
         details.append(msg)
         if not ok:
@@ -479,30 +500,22 @@ def launch_deploy(project: Project) -> str:
     The single place that maps (deploy_mode → docker_service call); shared by the upload
     flow (`WS /projects/{name}/deploy`), git deploy (`WS /git/deploy/{name}`), and the
     non-interactive plugin install. Compose runs `docker compose up -d`; dockerfile runs a
-    plain build + run via `provision_from_plugin(install_script=None)`."""
-    project_dir = os.path.abspath(compose_service.project_dir(project.name))
+    blue/green build + run + nginx switch via `deploy_service.bluegreen_deploy`."""
+    from app.services import deploy_service  # lazy: deploy_service imports _next_port from here
+
     if project.deploy_mode == "compose":
+        project_dir = os.path.abspath(compose_service.project_dir(project.name))
         job_key = f"compose:{project.name}"
         docker_service.compose_up(project.name, project_dir, job_key)
-    else:
-        job_key = project.container_name
-        docker_service.provision_from_plugin(
-            job_key=job_key,
-            project_dir=project_dir,
-            plugin_dir=project_dir,        # unused without an install_script
-            install_script=None,           # build + run only
-            image_name=project.image_name,
-            container_name=project.container_name,
-            local_port=project.local_port,
-            container_port=project.container_port,
-        )
-    return job_key
+        return job_key
+    return deploy_service.bluegreen_deploy(project.id)
 
 
 def deploy_job_key(project: Project) -> str:
     """The job_key a deploy WebSocket reconnects to — mirrors `launch_deploy` without
-    launching anything (compose → `compose:{name}`, dockerfile → container name)."""
-    return f"compose:{project.name}" if project.deploy_mode == "compose" else project.container_name
+    launching anything (compose → `compose:{name}`, dockerfile → the stable base key)."""
+    from app.services import deploy_service  # lazy
+    return f"compose:{project.name}" if project.deploy_mode == "compose" else deploy_service.deploy_job_key(project.name)
 
 
 def _deploy_job_response(job_key: str, message: str) -> DockerJobStatusResponse:

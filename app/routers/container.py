@@ -19,7 +19,7 @@ from app.models.schemas import (
     ProjectResponse,
 )
 from app.auth import require_auth
-from app.services import docker_service, nginx_service, compose_service, interactive_service, ws_session
+from app.services import docker_service, nginx_service, compose_service, interactive_service, ws_session, deploy_service
 
 router = APIRouter()
 
@@ -64,22 +64,26 @@ def _job_response(job_key: str, launched_message: str) -> DockerJobStatusRespons
              summary="Stop the project's container — poll /status")
 def stop_container(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
     project = _get_dockerfile_project(project_name, db)
-    docker_service.stop_container(project.container_name, project.container_name)
-    return _job_response(project.container_name, f"Stop issued for '{project.container_name}' — poll /status")
+    # Stop the active version's container, but track the job under the stable deploy key
+    # (project.container_name is version-scoped and changes on every blue/green deploy).
+    job_key = deploy_service.deploy_job_key(project_name)
+    docker_service.stop_container(project.container_name, job_key)
+    return _job_response(job_key, f"Stop issued for '{project.container_name}' — poll /status")
 
 
 @router.get("/{project_name}/status", response_model=DockerJobStatusResponse,
             summary="Status + logs of the last docker operation for the project")
 def get_docker_status(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
     project = _get_dockerfile_project(project_name, db)
-    job = docker_service.get_job(project.container_name)
+    job_key = deploy_service.deploy_job_key(project_name)
+    job = docker_service.get_job(job_key)
     if job is None:
         return DockerJobStatusResponse(status="no_job", message="No docker operation has been run for this project yet")
     return DockerJobStatusResponse(
         status=job.status,
         operation=job.operation,
         message=f"Last operation: {job.operation}",
-        logs=docker_service.get_job_logs(project.container_name),
+        logs=docker_service.get_job_logs(job_key),
         exit_code=job.exit_code,
     )
 
@@ -88,15 +92,16 @@ def get_docker_status(project_name: str, db: Session = Depends(get_db), _=Depend
              summary="Abort the currently running docker operation for the project")
 def abort_docker_job(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
     project = _get_dockerfile_project(project_name, db)
-    success, message = docker_service.abort_job(project.container_name)
+    job_key = deploy_service.deploy_job_key(project_name)
+    success, message = docker_service.abort_job(job_key)
     if not success:
         raise HTTPException(status_code=400, detail=message)
-    job = docker_service.get_job(project.container_name)
+    job = docker_service.get_job(job_key)
     return DockerJobStatusResponse(
         status="aborted",
         operation=job.operation if job else None,
         message=message,
-        logs=docker_service.get_job_logs(project.container_name),
+        logs=docker_service.get_job_logs(job_key),
         exit_code=job.exit_code if job else None,
     )
 

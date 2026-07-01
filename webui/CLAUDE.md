@@ -73,6 +73,13 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   `ws_path` and just shows its result). Re-upload to redeploy.
 - Dockerfile (single-container) actions, all project-level:
   `POST /projects/{name}/{stop|ssl|abort}` and `GET /projects/{name}/status` (no `/build` or `/start`)
+- **Blue/green versions** (dockerfile only): `GET /projects/{name}/versions` (active/inactive/archived
+  list + counts + backup limit), `PUT /projects/{name}/backup-limit` (`{limit}`), and
+  `POST /projects/{name}/rollback` (`{version}`, returns `{job, ws_path}`). The **versions** button on
+  `ContainerRow` opens `VersionsModal` (backup-limit control + versions table). A **rollback** streams
+  over `WS /projects/{name}/deploy` — the modal hands the returned `ws_path` up via `onStream`
+  (`Dashboard.handleDeployStream`) to the shared `InstallPane`, exactly like a deploy. `mkApi` now also
+  has a `put`.
 - Compose lifecycle: `.../compose/{down|abort}`, `GET .../compose/status` (no `/build` or `/up`)
 - **Exec is a WebSocket, not REST:** `WS /projects/{name}/exec` (dockerfile) and
   `WS /projects/{name}/services/{service}/exec` (compose) bridge an interactive `docker exec -it`

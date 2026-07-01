@@ -24,6 +24,7 @@ from app.services import (
     ws_session,
     scan,
     nginx_service,
+    deploy_service,
 )
 from app.routers.projects import provision_dockerfile, project_response, launch_deploy
 from app.routers.compose import provision_compose
@@ -107,26 +108,19 @@ def add_plugin(
     if plugin["interactive"]:
         return _waiting_interactive_response(plugin, project)
 
-    # 3. Launch the async provision job: install.sh → build → run.
-    project_dir = compose_service.project_dir(project.name)
-    docker_service.provision_from_plugin(
-        job_key=project.container_name,
-        project_dir=os.path.abspath(project_dir),
-        plugin_dir=plugin["dir"],
-        install_script=plugin["install"],
-        image_name=project.image_name,
-        container_name=project.container_name,
-        local_port=project.local_port,
-        container_port=project.container_port,
+    # 3. Launch the async blue/green provision job: install.sh → build → run → nginx switch.
+    # This creates version 1 through the same path re-deploys use (keeps versioning consistent).
+    job_key = deploy_service.bluegreen_deploy(
+        project.id, install_script=plugin["install"], plugin_dir=plugin["dir"],
     )
 
-    job = docker_service.get_job(project.container_name)
+    job = docker_service.get_job(job_key)
     job_resp = DockerJobStatusResponse(
         status=job.status if job else "no_job",
         operation=job.operation if job else None,
         message=f"Provisioning '{project.name}' from plugin '{plugin['name']}' — "
                 f"poll /projects/{project.name}/status",
-        logs=docker_service.get_job_logs(project.container_name),
+        logs=docker_service.get_job_logs(job_key),
         exit_code=job.exit_code if job else None,
     )
 
@@ -372,7 +366,7 @@ async def install_session(websocket: WebSocket, plugin_name: str, project_name: 
 
         project_dir = os.path.abspath(compose_service.project_dir(project_name))
         is_compose = plugin["deploy_mode"] == "compose"
-        job_key = f"compose:{project_name}" if is_compose else project.container_name
+        job_key = f"compose:{project_name}" if is_compose else deploy_service.deploy_job_key(project_name)
 
         # A provision/build already in flight (non-interactive add, or a reconnect during
         # an interactive build) — just tail it. A finished job is replayed the same way.
@@ -419,16 +413,9 @@ async def install_session(websocket: WebSocket, plugin_name: str, project_name: 
             cmd = ["bash", plugin["install"]]
             # Mirrors the env provision_from_plugin gives install.sh.
             env = {**os.environ, "PLUGIN_DIR": plugin["dir"], "PROJECT_DIR": project_dir}
-            finish_args = dict(
-                job_key=job_key,
-                project_dir=project_dir,
-                plugin_dir=plugin["dir"],
-                install_script=None,  # already ran interactively — build + run only
-                image_name=project.image_name,
-                container_name=project.container_name,
-                local_port=project.local_port,
-                container_port=project.container_port,
-            )
+            # install.sh already ran interactively above → the follow-up is build + run only
+            # (blue/green, creating version 1).
+            finish_args = dict(project_id=project.id, plugin_dir=plugin["dir"])
     finally:
         db.close()
 
@@ -458,7 +445,10 @@ async def install_session(websocket: WebSocket, plugin_name: str, project_name: 
             })
             await run_in_threadpool(_finish_compose_from_ws, plugin, project_name)
         else:
-            docker_service.provision_from_plugin(**finish_args)
+            deploy_service.bluegreen_deploy(
+                finish_args["project_id"], install_script=None,
+                plugin_dir=finish_args["plugin_dir"],
+            )
 
         await _stream_to_exit(websocket, job_key)
     except WebSocketDisconnect:

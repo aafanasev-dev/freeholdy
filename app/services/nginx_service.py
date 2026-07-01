@@ -183,3 +183,16 @@ def write_ssl_config(project_name: str, endpoints: list[dict]) -> bool:
     if ok:
         reload()
     return ok
+
+
+def write_http_config(project_name: str, endpoints: list[dict]) -> bool:
+    """Rewrite a project's HTTP-only config from its current endpoints and reload nginx.
+    The SSL counterpart of write_ssl_config for projects with no cert yet — used by the
+    blue/green switch to re-point nginx at a new loopback port when ssl is not enabled.
+    Returns whether nginx reloaded."""
+    cfg = generate_http_config(project_name, endpoints)
+    _write_config(project_name, cfg)
+    ok, _ = test_config()
+    if ok:
+        reload()
+    return ok

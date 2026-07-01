@@ -189,6 +189,19 @@ def _post_raw(path: str, data: bytes, params: dict) -> dict:
         sys.exit(1)
 
 
+def _put(path: str, json: dict | None = None) -> dict:
+    try:
+        r = requests.put(_url(path), headers=_headers(), json=json or {}, timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.ConnectionError:
+        console.print(f"[bold red]Connection error:[/] cannot reach {BASE_URL}")
+        sys.exit(1)
+    except requests.exceptions.HTTPError as e:
+        _print_http_error(e.response)
+        sys.exit(1)
+
+
 def _delete(path: str) -> dict:
     try:
         r = requests.delete(_url(path), headers=_headers(), timeout=60)
@@ -1036,6 +1049,111 @@ def stop_container(project: str, follow: bool):
 
     if result["status"] != "done":
         sys.exit(1)
+
+
+# ── versions (blue/green backups) ────────────────────────────────────────────────
+
+_VERSION_STYLE = {"active": "bold green", "inactive": "yellow", "archived": "dim"}
+_VERSION_ICON = {"active": "▶ ", "inactive": "■ ", "archived": "○ "}
+
+
+def _version_status_text(status: str) -> Text:
+    return Text(_VERSION_ICON.get(status, "") + status, style=_VERSION_STYLE.get(status, "white"))
+
+
+@cli.command("versions")
+@click.argument("project")
+def list_versions(project: str):
+    """List a dockerfile project's blue/green versions (active / inactive / archived).
+
+    \b
+    Example:
+      fhcli versions myapp
+    """
+    data = _get(f"/projects/{project}/versions")
+    counts = data.get("counts", {})
+    table = Table(
+        box=box.ROUNDED,
+        title=f"[bold cyan]{data['project']}[/]  [dim]· backup limit {data['backup_limit']} · "
+              f"{counts.get('active', 0)} active / {counts.get('inactive', 0)} inactive / "
+              f"{counts.get('archived', 0)} archived[/]",
+        title_justify="left",
+        show_header=True,
+        header_style="bold",
+    )
+    table.add_column("Version",   justify="right", min_width=7)
+    table.add_column("State",     min_width=12)
+    table.add_column("Port",      justify="right", min_width=6)
+    table.add_column("Container", min_width=16)
+    table.add_column("Runtime",   min_width=12)
+    table.add_column("Created",   style="dim", min_width=19)
+
+    versions = data.get("versions", [])
+    if not versions:
+        console.print(f"[dim]No versions yet for '{project}'. Deploy it first with "
+                      f"[bold]fhcli upload[/].[/]")
+        return
+    for v in versions:
+        table.add_row(
+            f"v{v['version']}",
+            _version_status_text(v.get("status", "?")),
+            str(v.get("local_port") or "—"),
+            v.get("container_name") or "[dim]—[/]",
+            _status_text(v.get("container_status", "not_found")),
+            (v.get("created_at") or "")[:19].replace("T", " "),
+        )
+    console.print(table)
+
+
+@cli.command("rollback")
+@click.argument("project")
+@click.argument("version", type=int)
+@click.option("--follow/--no-follow", default=True,
+              help="Stream the rollback log until it completes (default: on).")
+def rollback(project: str, version: int, follow: bool):
+    """Roll back PROJECT to an earlier VERSION (an inactive or archived one).
+
+    \b
+    Example:
+      fhcli rollback myapp 2
+    """
+    console.print(f"Rolling back [cyan]{project}[/] to [bold]v{version}[/]…")
+    data = _post(f"/projects/{project}/rollback", json={"version": version})
+
+    ws_path = data.get("ws_path")
+    if not follow or not ws_path:
+        console.print(f"[green]✓[/] {data.get('message', 'Rollback launched')}")
+        console.print(f"  Watch with: [bold]fhcli status {project}[/]")
+        return
+
+    code = asyncio.run(_install_ws(ws_path))
+    if code == 0:
+        console.print(f"\n[green]✓[/] Rolled back '{project}' to v{version}")
+    else:
+        console.print(f"\n[red]✗[/] Rollback failed (exit {code})")
+        sys.exit(1)
+
+
+@cli.command("set-backup-limit")
+@click.argument("project")
+@click.argument("limit", type=int)
+def set_backup_limit(project: str, limit: int):
+    """Set how many archived versions to keep for PROJECT (oldest pruned immediately).
+
+    \b
+    Example:
+      fhcli set-backup-limit myapp 3
+    """
+    if limit < 1:
+        console.print("[bold red]Error:[/] limit must be >= 1")
+        sys.exit(1)
+    data = _put(f"/projects/{project}/backup-limit", json={"limit": limit})
+    counts = data.get("counts", {})
+    console.print(
+        f"[green]✓[/] Backup limit for [cyan]{project}[/] set to [bold]{data['backup_limit']}[/]  "
+        f"[dim]({counts.get('active', 0)} active / {counts.get('inactive', 0)} inactive / "
+        f"{counts.get('archived', 0)} archived)[/]"
+    )
 
 
 # ── exec ───────────────────────────────────────────────────────────────────────
