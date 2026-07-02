@@ -11,6 +11,46 @@ const DOMAIN = BASE.replace(/^https?:\/\/api\./, "").replace(/^https?:\/\//, "")
 const POLL_MS = 1000;
 const CHUNK_SIZE = 1024 * 1024;   // 1 MiB pieces — stays under nginx's 1 MB default body limit
 
+// ── Deploy history (localStorage) ─────────────────────────────────────────────
+// Remember each project's last deploy source so redeploys pre-fill. Git URLs are fully
+// reusable (URL + branch); local files/folder can only be remembered as a hint (browsers
+// never expose a file path and can't re-read files without a fresh user pick).
+// Shape: { projects: { [name]: { srcKind, gitUrl, branch, label, ts } },
+//          recentGitUrls: [ { gitUrl, branch, name, ts }, … ] }   // srcKind ∈ git|files|folder
+const DEPLOY_HISTORY_KEY = "freeholdy_deploy_history";
+const RECENT_GIT_CAP = 8;
+
+const loadDeployHistory = () => {
+  try {
+    const h = JSON.parse(localStorage.getItem(DEPLOY_HISTORY_KEY) || "{}");
+    return { projects: h.projects || {}, recentGitUrls: h.recentGitUrls || [] };
+  } catch { return { projects: {}, recentGitUrls: [] }; }
+};
+
+const getProjectDeploy = (name) => loadDeployHistory().projects[name] || null;
+const getRecentGitUrls = () => loadDeployHistory().recentGitUrls;
+
+const saveProjectDeploy = (name, entry) => {
+  try {
+    const h = loadDeployHistory();
+    const full = { ...entry, ts: Date.now() };
+    h.projects[name] = full;
+    if (entry.srcKind === "git" && entry.gitUrl) {
+      h.recentGitUrls = [
+        { gitUrl: entry.gitUrl, branch: entry.branch || "", name, ts: full.ts },
+        ...h.recentGitUrls.filter(r => r.gitUrl !== entry.gitUrl),
+      ].slice(0, RECENT_GIT_CAP);
+    }
+    localStorage.setItem(DEPLOY_HISTORY_KEY, JSON.stringify(h));
+  } catch { /* localStorage full / disabled — remembering is best-effort */ }
+};
+
+// Human-readable label for a files/folder selection, e.g. "folder 'myapp' · 42 files".
+const describeSelection = (srcKind, entries, rootName) =>
+  srcKind === "folder" && rootName
+    ? `folder '${rootName}' · ${entries.length} file${entries.length !== 1 ? "s" : ""}`
+    : `${entries.length} file${entries.length !== 1 ? "s" : ""}`;
+
 // ── API factory ───────────────────────────────────────────────────────────────
 const mkApi = (token) => {
   const h = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
@@ -537,37 +577,54 @@ const chunkedDeploy = async (api, project, entries, onProgress) => {
 };
 
 const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
+  const prev = useMemo(() => getProjectDeploy(project), [project]);
+  const [mode, setMode] = useState(prev?.srcKind === "git" ? "git" : "files");   // "files" | "git"
   const [entries, setEntries] = useState([]);   // [{ file, rel }]
+  const [srcKind, setSrcKind] = useState("files");   // "files" | "folder" — which picker fired
+  const [rootName, setRootName] = useState("");      // top folder name of a folder pick
+  const [gitUrl, setGitUrl] = useState(prev?.srcKind === "git" ? (prev.gitUrl || "") : "");
+  const [branch, setBranch] = useState(prev?.srcKind === "git" ? (prev.branch || "") : "");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState(null);   // { sent, total } in bytes
   const dirRef = useRef();
 
-  // React drops the non-standard directory attributes, so set them on mount.
+  // React drops the non-standard directory attributes, so set them on mount / mode switch.
   useEffect(() => {
     if (dirRef.current) {
       dirRef.current.setAttribute("webkitdirectory", "");
       dirRef.current.setAttribute("directory", "");
     }
-  }, []);
+  }, [mode]);
 
   const pickFiles = (fileList) => {
-    setError(""); setResult(null);
+    setError(""); setResult(null); setSrcKind("files"); setRootName("");
     setEntries([...fileList].map(f => ({ file: f, rel: f.name })));
   };
   const pickFolder = (fileList) => {
-    setError(""); setResult(null);
+    setError(""); setResult(null); setSrcKind("folder");
+    setRootName((fileList[0]?.webkitRelativePath || "").split("/")[0] || "");
     setEntries([...fileList].map(f => ({ file: f, rel: stripRoot(f.webkitRelativePath || f.name) })));
   };
 
-  // Zip the selection, stream it to the server in 1 MiB chunks (with a progress bar),
-  // then ask the server to reassemble + unzip + provision. Mirrors `fhcli deploy` (local path).
-  const upload = async () => {
-    if (!entries.length) return setError("Select a file or folder first");
+  const submit = async () => {
     setError(""); setResult(null); setBusy(true); setProgress(null);
     try {
+      if (mode === "git") {
+        if (!gitUrl.trim()) { setBusy(false); return setError("Git URL is required"); }
+        // Same idempotent get-or-create-then-redeploy path as DeployForm's git tab.
+        const data = await mkApi(token).post("/git/add", { name: project, git_url: gitUrl.trim(), branch: branch.trim() || null });
+        saveProjectDeploy(project, { srcKind: "git", gitUrl: gitUrl.trim(), branch: branch.trim(), label: gitUrl.trim() });
+        onDeploy && onDeploy(data);   // git always provisions → stream the build in InstallPane
+        onClose();
+        return;
+      }
+      // Files: zip the selection, stream it to the server in 1 MiB chunks (progress bar),
+      // then reassemble + unzip + provision. Mirrors `fhcli deploy` (local path).
+      if (!entries.length) { setBusy(false); return setError("Select a file or folder first"); }
       const data = await chunkedDeploy(mkApi(token), project, entries, setProgress);
+      saveProjectDeploy(project, { srcKind, gitUrl: "", branch: "", label: describeSelection(srcKind, entries, rootName) });
       // When a manifest is provisioned the server auto-launches build + run and returns a
       // ws_path; hand off to the InstallPane to stream the deploy live (same as git/plugin
       // installs). A plain file sync (no manifest) just shows its result here.
@@ -583,41 +640,72 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
   };
 
   const dropStyle = { flex: 1, display: "block", border: `2px dashed ${C.bdB}`, borderRadius: "8px", padding: "16px", textAlign: "center", background: C.s1, cursor: "pointer" };
+  const tab = (m, label) => (
+    <button onClick={() => { setMode(m); setError(""); setResult(null); }} style={{
+      flex: 1, padding: "8px", cursor: "pointer", fontFamily: C.ff, fontSize: "11px", fontWeight: 600,
+      background: mode === m ? "#f0ecfe" : C.s3, color: mode === m ? C.purple : C.muted,
+      border: `1px solid ${mode === m ? "#dccffb" : C.bd}`, borderRadius: "8px",
+    }}>{label}</button>
+  );
 
   return (
     <Modal onClose={onClose} width={540}>
-      <ModalHeader title="UPLOAD FILES" color={C.purple} onClose={onClose} />
+      <ModalHeader title="DEPLOY" color={C.purple} onClose={onClose} />
       <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "14px", lineHeight: "1.6" }}>
         {project} · a <span style={{ color: C.txt }}>Dockerfile</span> or <span style={{ color: C.txt }}>docker-compose.yml</span> in the
-        uploaded root sets the deploy mode and provisions automatically (compose wins).
+        deployed root sets the deploy mode and provisions automatically (compose wins).
       </div>
 
       <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
-        <label htmlFor="file-up" style={dropStyle}>
-          <input id="file-up" type="file" multiple onChange={e => pickFiles(e.target.files)} style={{ display: "none" }} />
-          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px" }}>select file(s)</div>
-        </label>
-        <label htmlFor="folder-up" style={dropStyle}>
-          <input id="folder-up" ref={dirRef} type="file" multiple onChange={e => pickFolder(e.target.files)} style={{ display: "none" }} />
-          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px" }}>select a folder</div>
-        </label>
+        {tab("files", "files / folder")}
+        {tab("git", "git URL")}
       </div>
 
-      {entries.length > 0 && !progress && (
-        <div style={{ color: C.green, fontFamily: C.ff, fontSize: "11px", marginBottom: "12px" }}>
-          ✓ {entries.length} file(s) selected
-        </div>
-      )}
+      {mode === "files" ? (
+        <>
+          {prev && prev.srcKind !== "git" && !entries.length && (
+            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "10px" }}>
+              last deploy: <span style={{ color: C.txt }}>{prev.label}</span> — reselect to redeploy
+            </div>
+          )}
+          <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
+            <label htmlFor="file-up" style={dropStyle}>
+              <input id="file-up" type="file" multiple onChange={e => pickFiles(e.target.files)} style={{ display: "none" }} />
+              <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px" }}>select file(s)</div>
+            </label>
+            <label htmlFor="folder-up" style={dropStyle}>
+              <input id="folder-up" ref={dirRef} type="file" multiple onChange={e => pickFolder(e.target.files)} style={{ display: "none" }} />
+              <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px" }}>select a folder</div>
+            </label>
+          </div>
 
-      {progress && (
+          {entries.length > 0 && !progress && (
+            <div style={{ color: C.green, fontFamily: C.ff, fontSize: "11px", marginBottom: "12px" }}>
+              ✓ {entries.length} file(s) selected
+            </div>
+          )}
+
+          {progress && (
+            <div style={{ marginBottom: "12px" }}>
+              <div style={{ height: "8px", background: C.s3, borderRadius: "4px", overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${progress.total ? Math.round(progress.sent / progress.total * 100) : 0}%`,
+                              background: C.green, transition: "width 0.15s ease" }} />
+              </div>
+              <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginTop: "5px" }}>
+                sending {(progress.sent / 1048576).toFixed(1)} / {(progress.total / 1048576).toFixed(1)} MB
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
         <div style={{ marginBottom: "12px" }}>
-          <div style={{ height: "8px", background: C.s3, borderRadius: "4px", overflow: "hidden" }}>
-            <div style={{ height: "100%", width: `${progress.total ? Math.round(progress.sent / progress.total * 100) : 0}%`,
-                          background: C.green, transition: "width 0.15s ease" }} />
-          </div>
-          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginTop: "5px" }}>
-            sending {(progress.sent / 1048576).toFixed(1)} / {(progress.total / 1048576).toFixed(1)} MB
-          </div>
+          <Field label="GIT URL">
+            <TextIn value={gitUrl} onChange={setGitUrl} placeholder="https://github.com/owner/repo.git" />
+          </Field>
+          <div style={{ height: "10px" }} />
+          <Field label="BRANCH (optional)">
+            <TextIn value={branch} onChange={setBranch} placeholder="default branch" />
+          </Field>
         </div>
       )}
 
@@ -635,7 +723,7 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "12px" }}>
         <Btn v="ghost" onClick={onClose}>close</Btn>
-        <Btn v="primary" onClick={upload} busy={busy} disabled={!entries.length}>upload</Btn>
+        <Btn v="primary" onClick={submit} busy={busy} disabled={mode === "files" && !entries.length}>deploy</Btn>
       </div>
     </Modal>
   );
@@ -1063,12 +1151,15 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
   const [name, setName] = useState("");
   const [mode, setMode] = useState("files");   // "files" | "git"
   const [entries, setEntries] = useState([]);   // [{ file, rel }]
+  const [srcKind, setSrcKind] = useState("files");   // "files" | "folder" — which picker fired
+  const [rootName, setRootName] = useState("");      // top folder name of a folder pick
   const [gitUrl, setGitUrl] = useState("");
   const [branch, setBranch] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState(null);
   const [result, setResult] = useState(null);
+  const recentGit = useMemo(() => getRecentGitUrls(), []);
   const dirRef = useRef();
 
   // React drops the non-standard directory attributes, so set them on mount / mode switch.
@@ -1079,8 +1170,11 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
     }
   }, [mode]);
 
-  const pickFiles = (fileList) => { setError(""); setResult(null); setEntries([...fileList].map(f => ({ file: f, rel: f.name }))); };
-  const pickFolder = (fileList) => { setError(""); setResult(null); setEntries([...fileList].map(f => ({ file: f, rel: stripRoot(f.webkitRelativePath || f.name) }))); };
+  const pickFiles = (fileList) => { setError(""); setResult(null); setSrcKind("files"); setRootName(""); setEntries([...fileList].map(f => ({ file: f, rel: f.name }))); };
+  const pickFolder = (fileList) => { setError(""); setResult(null); setSrcKind("folder"); setRootName((fileList[0]?.webkitRelativePath || "").split("/")[0] || ""); setEntries([...fileList].map(f => ({ file: f, rel: stripRoot(f.webkitRelativePath || f.name) }))); };
+
+  // Fill the git fields (and the name, if still empty) from a remembered recent deploy.
+  const useRecent = (r) => { setGitUrl(r.gitUrl); setBranch(r.branch || ""); if (!name.trim() && r.name) setName(r.name); setError(""); };
 
   const submit = async () => {
     if (!name.trim()) return setError("Project name is required");
@@ -1090,10 +1184,12 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
       if (mode === "git") {
         if (!gitUrl.trim()) { setBusy(false); return setError("Git URL is required"); }
         const data = await api.post("/git/add", { name: name.trim(), git_url: gitUrl.trim(), branch: branch.trim() || null });
+        saveProjectDeploy(name.trim(), { srcKind: "git", gitUrl: gitUrl.trim(), branch: branch.trim(), label: gitUrl.trim() });
         onDeployed(data);   // git always provisions (or 400s) → stream the build
       } else {
         if (!entries.length) { setBusy(false); return setError("Select a file or folder first"); }
         const data = await chunkedDeploy(api, name.trim(), entries, setProgress);
+        saveProjectDeploy(name.trim(), { srcKind, gitUrl: "", branch: "", label: describeSelection(srcKind, entries, rootName) });
         if (data.provisioned && data.ws_path) { onDeployed(data); return; }
         setResult(data); onSynced && onSynced();   // no manifest — plain file sync, nothing built
       }
@@ -1153,6 +1249,18 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
             <Field label="GIT URL">
               <TextIn value={gitUrl} onChange={setGitUrl} placeholder="https://github.com/owner/repo.git" />
             </Field>
+            {recentGit.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center" }}>
+                <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>recent:</span>
+                {recentGit.map(r => (
+                  <button key={r.gitUrl} onClick={() => useRecent(r)} title={r.branch ? `${r.gitUrl} (${r.branch})` : r.gitUrl} style={{
+                    cursor: "pointer", fontFamily: C.ff, fontSize: "10px", color: C.blue,
+                    background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "6px", padding: "3px 8px",
+                    maxWidth: "220px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }}>{r.gitUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "")}</button>
+                ))}
+              </div>
+            )}
             <Field label="BRANCH (optional)">
               <TextIn value={branch} onChange={setBranch} placeholder="default branch" />
             </Field>

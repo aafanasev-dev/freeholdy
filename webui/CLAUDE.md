@@ -120,13 +120,24 @@ makes it either one container (`deploy_mode: "dockerfile"`, fields under `projec
 compose stack (`project.services[]`).
 
 `UploadModal` (opened from the **upload** button on every `ProjectCard` header, both modes and
-pending) chunk-uploads to `/projects/{name}/upload/chunk` + `.../upload/complete`. It offers a file
-picker and a folder picker; the folder input is a `<input webkitdirectory>` whose non-standard
-attributes are set via a ref on mount (React won't pass them through). Each `File.webkitRelativePath`
-has its leading folder segment stripped (`stripRoot`) and becomes its zip entry name. A provisioned
-response (carrying `ws_path`) is handed to `onDeploy` (= `handleInstalled`) so the deploy streams in
-the `InstallPane`; the modal closes. The card's primary button reads **deploy** for a provisioned
-project (re-uploading redeploys) and **upload** while pending.
+pending) has the same **files/folder ⇄ git URL** tabs as `DeployForm`: the files tab chunk-uploads
+to `/projects/{name}/upload/chunk` + `.../upload/complete`, the git tab posts `/git/add` (idempotent
+redeploy of the same project name). It offers a file picker and a folder picker; the folder input is
+a `<input webkitdirectory>` whose non-standard attributes are set via a ref on mount (React won't pass
+them through). Each `File.webkitRelativePath` has its leading folder segment stripped (`stripRoot`)
+and becomes its zip entry name. A provisioned response (carrying `ws_path`) is handed to `onDeploy`
+(= `handleInstalled`) so the deploy streams in the `InstallPane`; the modal closes. The card's primary
+button reads **deploy** for a provisioned project (re-uploading redeploys) and **upload** while pending.
+
+**Deploy sources are remembered** in `localStorage["freeholdy_deploy_history"]` (helpers
+`loadDeployHistory`/`getProjectDeploy`/`getRecentGitUrls`/`saveProjectDeploy` near the top of
+`App.jsx`): `{ projects: { [name]: { srcKind, gitUrl, branch, label, ts } }, recentGitUrls: [...] }`.
+A **git** source is fully reusable — `UploadModal` pre-selects the git tab and pre-fills the URL +
+branch of a project's last deploy, and `DeployForm` offers recent git URLs as clickable "recent:"
+chips. A **files/folder** source can only be remembered as a hint (browsers never expose a file path
+and can't re-read files without a fresh user pick): the last selection's `label` (e.g.
+`folder 'x' · 42 files`) is shown, but re-picking is still required. History is saved at the deploy
+call sites in `UploadModal`/`DeployForm` (the source isn't in the deploy response), not in `Dashboard`.
 
 Two row components render the project table; a `pending` project (created, not yet uploaded) renders
 neither — `ProjectCard` shows an "awaiting upload" placeholder and a `pending` chip in the header:
