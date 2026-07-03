@@ -1,0 +1,22 @@
+# imgstore — two services exposed by freeholdy:
+#   web      -> web.{project}.{domain}       (static page served by nginx)
+#   storage  -> storage.{project}.{domain}   (Node/Express API + public /images serving)
+# freeholdy rewrites these container ports to loopback bindings and proxies them via nginx.
+# The `ports: ["N"]` (container-only) form is what marks a service as exposed and sets its
+# container_port (see app/services/compose_service.py::parse_services).
+services:
+  web:
+    build: ./web
+    ports:
+      - "80"
+  storage:
+    build: ./storage
+    ports:
+      - "3000"
+    volumes:
+      # {project}_data — holds uploaded images + tokens.txt. Survives redeploys AND
+      # project deletion (a named volume is not removed by `docker compose down`).
+      - data:/data
+
+volumes:
+  data:

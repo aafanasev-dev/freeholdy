@@ -34,7 +34,7 @@
 #
 # Usage:
 #   ./tests/test_install.sh            # test every plugin under plugins/
-#   ./tests/test_install.sh ws-chat    # test a single plugin
+#   ./tests/test_install.sh nextcloud  # test a single plugin
 #
 # Exit code is 0 only when every check passed, so it is CI-usable.
 set -euo pipefail
@@ -109,7 +109,7 @@ check_compose() {
     hr "docker compose"
     if ! docker compose version &>/dev/null; then
         fail "'docker compose' unavailable — the Compose v2 plugin is missing"
-        warn "compose-mode plugins (ws-chat, nextcloud) cannot install without it"
+        warn "compose-mode plugins (nextcloud, mailserver) cannot install without it"
         warn "fix: apt-get install -y docker-compose-v2   (install.sh now does this)"
         record_fail "docker compose: plugin missing"; return 1
     fi

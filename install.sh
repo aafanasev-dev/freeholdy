@@ -531,7 +531,7 @@ else
     if apt_retry install -y docker-compose-v2 && docker compose version &>/dev/null; then
         ok "docker compose  ($(docker compose version 2>/dev/null | head -n1))"
     else
-        fail "Could not provide 'docker compose' — compose-mode projects (e.g. ws-chat) will fail."
+        fail "Could not provide 'docker compose' — compose-mode projects (e.g. nextcloud) will fail."
         fail "Install the Compose v2 plugin manually, then re-run."
         exit 1
     fi

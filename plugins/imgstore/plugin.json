@@ -1,0 +1,6 @@
+{
+  "name": "imgstore",
+  "description": "Token-gated online image storage — upload via a web UI, share via public sha256 links. Web UI at web.<project>.<domain>, images at storage.<project>.<domain>/images/<sha256>.<ext>. Mint access tokens with a shell script in the storage container.",
+  "deploy_mode": "compose",
+  "type": "plugin"
+}
