@@ -38,9 +38,7 @@ alias fhcli="$(pwd)/venv/bin/python $(pwd)/fhcli.py"
 | `fhcli projects` | List all projects (incl. `system`) with live container status + type |
 | `fhcli plugins` | List available plugins in the catalog (incl. system plugins) |
 | `fhcli plugin-add PLUGIN PROJECT` | Create a project from a plugin, then build + run it |
-| `fhcli git-add NAME GIT_URL [--branch B] [--no-follow]` | Clone a git repo into a new project, auto-detect Dockerfile/compose, then build + run it (build log streams live) |
-| `fhcli create NAME` | Create an empty project (deploy mode decided at upload time) |
-| `fhcli upload PROJECT PATH [--dest DIR] [--no-follow]` | Zip + stream a file or folder in 1 MiB chunks → server unzips, auto-detects Dockerfile/compose, provisions, then builds + runs it (deploy log streams live). Re-run to redeploy. |
+| `fhcli deploy NAME SOURCE [--branch B] [--dest DIR] [--no-follow]` | **Deploy a project** — auto-creates it if new, redeploys if it exists. `SOURCE` is a local file/folder (zipped + streamed in 1 MiB chunks) **or** a git clone URL (cloned server-side). Either way the server auto-detects Dockerfile/compose, provisions nginx + SSL, then builds + runs it (deploy log streams live). `--branch` is git-only; `--dest` is local-upload-only. |
 | `fhcli stop PROJECT` | Stop the container |
 | `fhcli exec PROJECT "COMMAND"` | Run a command inside the container |
 | `fhcli ssl PROJECT` | Issue / retry the SSL certificate |
@@ -50,9 +48,10 @@ alias fhcli="$(pwd)/venv/bin/python $(pwd)/fhcli.py"
 | `fhcli abort PROJECT` | Abort the running docker op |
 | `fhcli remove PROJECT [--yes]` | Delete the project (containers, images, nginx, DB row) |
 
-The deploy mode is **auto-detected** from your upload: a `docker-compose.yml` in the
-uploaded root makes it a compose project (it wins over a `Dockerfile`), a bare
+The deploy mode is **auto-detected** from your source: a `docker-compose.yml` in the
+deployed root makes it a compose project (it wins over a `Dockerfile`), a bare
 `Dockerfile` makes it a single-container project. A Dockerfile must `EXPOSE` its port.
+There is no separate `create` step — `deploy` creates the project on first use.
 
 ## Dockerfile workflow example
 
@@ -60,18 +59,18 @@ uploaded root makes it a compose project (it wins over a `Dockerfile`), a bare
 # Check connectivity
 fhcli health
 
-# Create an empty project, then upload its folder (must contain a Dockerfile that EXPOSEs a port)
-fhcli create myapp
-fhcli upload myapp ./myapp        # detects the Dockerfile, reads EXPOSE, wires nginx + SSL,
+# Deploy a folder (must contain a Dockerfile that EXPOSEs a port) — the project is
+# created automatically on first deploy.
+fhcli deploy myapp ./myapp        # detects the Dockerfile, reads EXPOSE, wires nginx + SSL,
                                   # then builds + runs it — streaming the deploy log live.
-                                  # Re-run `fhcli upload` to redeploy.
+                                  # Re-run `fhcli deploy myapp ./myapp` to redeploy.
 
 # Inspect / operate
 fhcli projects
 fhcli exec myapp "python manage.py migrate"
 fhcli stop myapp
 
-# Retry SSL if it failed during the upload
+# Retry SSL if it failed during the deploy
 fhcli ssl myapp
 ```
 
@@ -82,11 +81,10 @@ service that publishes a port is exposed at `{service}.{project}.{base_domain}`;
 services without `ports:` (databases, caches) stay internal.
 
 ```bash
-# Create an empty project, then upload a folder whose root has a docker-compose.yml
-fhcli create myapp
-fhcli upload myapp ./myapp        # detects compose, sets up nginx + SSL per exposed service,
+# Deploy a folder whose root has a docker-compose.yml (the project is auto-created)
+fhcli deploy myapp ./myapp        # detects compose, sets up nginx + SSL per exposed service,
                                   # then `docker compose up -d` — streaming the deploy log live.
-                                  # Re-run `fhcli upload` to redeploy.
+                                  # Re-run `fhcli deploy myapp ./myapp` to redeploy.
 
 # Inspect
 fhcli projects                 # myapp shows "· compose" + service endpoints
@@ -114,20 +112,22 @@ fhcli plugin-add hello-world mysite --no-follow
 fhcli status mysite          # check progress later
 ```
 
-## Install from a git repository
+## Deploy from a git repository
 
-`git-add` clones a repo into a new project, auto-detects a `Dockerfile` or
-`docker-compose.yml` in the root (compose wins), wires up nginx + SSL, then builds and
-runs it — streaming the build log live, just like `plugin-add`:
+Pass a git clone URL as the `deploy` SOURCE (instead of a local path): the server clones
+the repo, auto-detects a `Dockerfile` or `docker-compose.yml` in the root (compose wins),
+wires up nginx + SSL, then builds and runs it — streaming the build log live. The project
+is created on first deploy and re-cloned + redeployed on subsequent ones. For **private**
+repos, add the server's key first (`fhcli get-git-key`).
 
 ```bash
 # Deploy a public repo as project "mysite"
-fhcli git-add mysite https://github.com/owner/repo.git
+fhcli deploy mysite https://github.com/owner/repo.git
 
 # A specific branch (SSH URLs are accepted; they use the server's own SSH keys)
-fhcli git-add mysite git@github.com:owner/repo.git --branch dev
+fhcli deploy mysite git@github.com:owner/repo.git --branch dev
 
 # Fire-and-forget
-fhcli git-add mysite https://github.com/owner/repo.git --no-follow
+fhcli deploy mysite https://github.com/owner/repo.git --no-follow
 fhcli status mysite          # check progress later
 ```

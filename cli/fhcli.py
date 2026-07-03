@@ -9,12 +9,13 @@ Usage examples:
   fhcli projects
   fhcli plugins
   fhcli plugin-add hello-world mysite
-  fhcli create myapp                    # then upload the project files (see below)
-  fhcli upload myapp ./myapp            # uploads a file or folder over the HTTP API;
+  fhcli deploy myapp ./myapp            # deploy from a local file/folder over the HTTP API;
+                                      # the project is created automatically if new,
                                       # auto-detects Dockerfile / docker-compose.yml,
                                       # provisions, then builds + runs it (streams the
                                       # deploy log). Re-run to redeploy.
-  fhcli upload myapp ./myapp --no-follow
+  fhcli deploy myapp https://github.com/owner/repo.git   # deploy from a git repo instead
+  fhcli deploy myapp ./myapp --no-follow
   fhcli stop  myapp
   fhcli exec  myapp "ls /app"
   fhcli ssl   myapp
@@ -120,6 +121,21 @@ def _validate_project_name(name: str) -> None:
     if suggestion and _SLUG_RE.match(suggestion):
         console.print(f"\n  Try: [bold green]{suggestion}[/]")
     sys.exit(1)
+
+
+# ── git-URL detection ─────────────────────────────────────────────────────────────
+# Mirrors the server's schemas.validate_git_url so `deploy` can dispatch a SOURCE argument
+# to the git route (POST /git/add) vs a local upload without a round-trip.
+
+_GIT_HTTPS_RE = _re.compile(r"^https?://[^\s]+$")
+_GIT_SSH_RE   = _re.compile(r"^ssh://[^\s]+$")
+_GIT_SCP_RE   = _re.compile(r"^[^\s/@]+@[^\s/:]+:[^\s]+$")   # git@github.com:owner/repo.git
+
+
+def _looks_like_git_url(s: str) -> bool:
+    """True if SOURCE looks like a git clone URL (http(s)://, ssh://, or git@host:path)."""
+    s = s.strip()
+    return bool(_GIT_HTTPS_RE.match(s) or _GIT_SSH_RE.match(s) or _GIT_SCP_RE.match(s))
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
@@ -499,7 +515,7 @@ def list_projects():
     data = _get("/projects")
 
     if not data:
-        console.print("[dim]No projects yet. Use [bold]fhcli create[/] to add one.[/]")
+        console.print("[dim]No projects yet. Use [bold]fhcli deploy NAME PATH-OR-GIT-URL[/] to add one.[/]")
         return
 
     for project in data:
@@ -544,31 +560,6 @@ def list_projects():
             )
 
         console.print(table)
-
-
-# ── create ─────────────────────────────────────────────────────────────────────
-
-@cli.command("create")
-@click.argument("name")
-def create_project(name: str):
-    """Create a new (empty) project.
-
-    The project starts with no deploy mode. Upload your files next with
-    [bold]fhcli upload NAME PATH[/]: the server scans the uploaded root for a Dockerfile
-    or docker-compose.yml, picks the deploy mode automatically, and wires up nginx + SSL.
-
-    \b
-    Example:
-      fhcli create myapp                    # then: fhcli upload myapp ./myapp
-    """
-    _validate_project_name(name)
-    console.print(f"Creating project [bold cyan]{name}[/]…")
-    data = _post("/projects", json={"name": name})
-
-    console.print(f"\n[bold green]✓ Project '{data['name']}' created[/]  [dim](deploy mode: "
-                  f"{data.get('deploy_mode', 'pending')})[/]\n")
-    console.print(f"  Next: [bold]fhcli upload {name} ./path-to-your-project[/]")
-    console.print("  [dim]The folder should contain a Dockerfile or a docker-compose.yml.[/]")
 
 
 # ── plugins ──────────────────────────────────────────────────────────────────────
@@ -705,76 +696,7 @@ def plugin_add(plugin: str, project: str, follow: bool):
     console.print("\n[green]✓[/] Plugin installed and running")
 
 
-# ── git-add ──────────────────────────────────────────────────────────────────────
-
-@cli.command("git-add")
-@click.argument("name")
-@click.argument("git_url")
-@click.option("--branch", "-b", default=None, help="Branch/ref to clone (default: the repo's default branch).")
-@click.option(
-    "--follow/--no-follow",
-    default=True,
-    help="Stream provision logs live (default: on). Use --no-follow to fire-and-forget.",
-)
-def git_add(name: str, git_url: str, branch: str | None, follow: bool):
-    """Create a new project from a git repository, then build + run it.
-
-    Clones GIT_URL into the project, auto-detects a Dockerfile or docker-compose.yml
-    (compose wins), wires up nginx + SSL, then builds and starts the container/stack —
-    streaming the build log live.
-
-    \b
-    Examples:
-      fhcli git-add mysite https://github.com/owner/repo.git
-      fhcli git-add mysite git@github.com:owner/repo.git --branch dev
-      fhcli git-add mysite https://github.com/owner/repo.git --no-follow
-    """
-    _validate_project_name(name)
-    console.print(f"Cloning [cyan]{git_url}[/] as project [bold cyan]{name}[/]…")
-    with console.status("Cloning + provisioning (certbot runs during creation)…"):
-        data = _post("/git/add", json={"name": name, "git_url": git_url, "branch": branch})
-
-    proj = data["project"]
-    console.print(f"\n[bold green]✓ {data.get('message', 'Project created')}[/]\n")
-
-    table = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold")
-    table.add_column("Part")
-    table.add_column("Subdomain", style="blue")
-    table.add_column("Local port", justify="right")
-    table.add_column("SSL")
-    is_compose = proj.get("deploy_mode") == "compose"
-    if is_compose:
-        entries = proj.get("services", [])
-    else:
-        c = proj.get("container") or {}
-        entries = [c] if c else []
-    for part in entries:
-        ssl_icon = "[green]✓[/]" if part.get("ssl_enabled") else "[yellow]pending[/]"
-        table.add_row(
-            part.get("name", "container"),
-            part.get("subdomain", ""),
-            str(part.get("local_port", "")),
-            ssl_icon,
-        )
-    console.print(table)
-
-    ws_path = data.get("ws_path") or f"/git/deploy/{name}"
-
-    if not follow:
-        hint = f"fhcli compose-status {name}" if is_compose else f"fhcli status {name}"
-        console.print(f"\n[green]✓[/] Provisioning started. Check progress with: [bold]{hint}[/]")
-        return
-
-    console.print("\n[dim]─── provision output (build → run) ───[/]")
-    code = asyncio.run(_install_ws(ws_path))
-    if code != 0:
-        console.print(
-            f"\n[red]✗ build failed (exit {code})[/] — re-run after fixing, "
-            f"or [bold]fhcli delete {name}[/] to start over"
-        )
-        sys.exit(1)
-    console.print("\n[green]✓[/] Project deployed and running")
-
+# ── git key ────────────────────────────────────────────────────────────────────
 
 @cli.command("get-git-key")
 def get_git_key():
@@ -844,7 +766,7 @@ def compose_status(project: str):
         console.print(Panel(logs.strip(), title="output", border_style="dim"))
 
 
-# ── upload ─────────────────────────────────────────────────────────────────────
+# ── deploy ─────────────────────────────────────────────────────────────────────
 
 def _print_provisioned(data: dict):
     """Render the detected deploy mode + endpoints after an upload provisions a project."""
@@ -947,38 +869,51 @@ def _report_upload(data: dict) -> None:
         _print_provisioned(data)
 
 
-@cli.command("upload")
-@click.argument("project")
-@click.argument("path", metavar="LOCAL_PATH", type=click.Path(exists=True))
-@click.option("--dest", "-d", default="", metavar="REMOTE_DIR",
-              help="Sub-directory inside the project to upload into (default: project root).")
-@click.option(
-    "--follow/--no-follow",
-    default=True,
-    help="Stream the build + run log live when a manifest is provisioned (default: on).",
-)
-def upload(project: str, path: str, dest: str, follow: bool):
-    """Upload a file or a folder into a project, then auto-detect, provision, and deploy.
+def _print_git_summary(data: dict) -> None:
+    """Print the endpoints table after a git deploy provisions a project."""
+    proj = data["project"]
+    console.print(f"\n[bold green]✓ {data.get('message', 'Project deployed')}[/]\n")
+    table = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold")
+    table.add_column("Part")
+    table.add_column("Subdomain", style="blue")
+    table.add_column("Local port", justify="right")
+    table.add_column("SSL")
+    is_compose = proj.get("deploy_mode") == "compose"
+    entries = proj.get("services", []) if is_compose else ([proj.get("container")] if proj.get("container") else [])
+    for part in entries:
+        ssl_icon = "[green]✓[/]" if part.get("ssl_enabled") else "[yellow]pending[/]"
+        table.add_row(part.get("name", "container"), part.get("subdomain", ""),
+                      str(part.get("local_port", "")), ssl_icon)
+    console.print(table)
 
-    LOCAL_PATH may be a single file or a directory (sent recursively, tree preserved).
-    The selection is zipped and streamed to the server in 1 MiB pieces (with a progress
-    bar), so files and folders of any size go through; the server reassembles and unzips
-    the archive, preserving the tree.
 
-    After the files land, the server scans the project root for a manifest: a
-    docker-compose.yml selects compose mode (it wins over a Dockerfile), a bare Dockerfile
-    selects dockerfile mode (its EXPOSE'd port becomes the container port), and nginx + SSL
-    are wired up. When a manifest is found the server then builds and starts the
-    container/stack automatically — exactly like `fhcli git-add` — and the CLI streams the
-    build log live. Re-run `fhcli upload` to redeploy. Uploads with no manifest are a plain
-    file sync (nothing is built).
+def _deploy_git(name: str, git_url: str, branch: str | None, follow: bool) -> None:
+    """Deploy from a git repo: POST /git/add (clone + provision + build/run), then stream."""
+    console.print(f"Cloning [cyan]{git_url}[/] into project [bold cyan]{name}[/]…")
+    with console.status("Cloning + provisioning (certbot runs during deploy)…"):
+        data = _post("/git/add", json={"name": name, "git_url": git_url, "branch": branch})
+    _print_git_summary(data)
 
-    \b
-    Examples:
-      fhcli upload myapp ./myapp            # a project folder (Dockerfile or compose inside)
-      fhcli upload myapp ./Dockerfile       # a single file
-      fhcli upload myapp ./assets --dest static
-    """
+    ws_path = data.get("ws_path") or f"/git/deploy/{name}"
+    is_compose = data["project"].get("deploy_mode") == "compose"
+    if not follow:
+        hint = f"fhcli compose-status {name}" if is_compose else f"fhcli status {name}"
+        console.print(f"\n[green]✓[/] Deploy started. Check progress with: [bold]{hint}[/]")
+        return
+
+    console.print("\n[dim]─── deploy output (build → run) ───[/]")
+    code = asyncio.run(_install_ws(ws_path))
+    if code != 0:
+        console.print(
+            f"\n[red]✗ deploy failed (exit {code})[/] — fix and re-run "
+            f"[bold]fhcli deploy {name} {git_url}[/], or [bold]fhcli remove {name}[/] to start over"
+        )
+        sys.exit(1)
+    console.print("\n[green]✓[/] Project deployed and running")
+
+
+def _deploy_path(project: str, path: str, dest: str, follow: bool) -> None:
+    """Deploy from a local file/folder: chunk-upload (provision + build/run), then stream."""
     file_pairs = _collect_files(path, dest)
     if not file_pairs:
         console.print(f"[yellow]⚠[/] No files found under [cyan]{path}[/]")
@@ -990,7 +925,7 @@ def upload(project: str, path: str, dest: str, follow: bool):
 
     ws_path = data.get("ws_path")
     if not data.get("provisioned") or not ws_path:
-        return  # plain file sync — nothing built
+        return  # plain file sync — no manifest, nothing built
 
     if not follow:
         is_compose = data.get("deploy_mode") == "compose"
@@ -1003,15 +938,67 @@ def upload(project: str, path: str, dest: str, follow: bool):
     if code != 0:
         console.print(
             f"\n[red]✗ deploy failed (exit {code})[/] — fix and re-run "
-            f"[bold]fhcli upload {project} …[/], or [bold]fhcli delete {project}[/] to start over"
+            f"[bold]fhcli deploy {project} {path}[/], or [bold]fhcli remove {project}[/] to start over"
         )
         sys.exit(1)
     console.print("\n[green]✓[/] Project deployed and running")
 
 
-# Build + run is launched automatically by `fhcli upload` (the server streams it back over
-# the deploy WebSocket); re-run `fhcli upload` to redeploy. The former `build` / `start`
-# (and `compose-build` / `compose-up`) commands are gone.
+@cli.command("deploy")
+@click.argument("name")
+@click.argument("source", metavar="LOCAL_PATH_OR_GIT_URL")
+@click.option("--branch", "-b", default=None,
+              help="Git only: branch/ref to clone (default: the repo's default branch).")
+@click.option("--dest", "-d", default="", metavar="REMOTE_DIR",
+              help="Local upload only: sub-directory inside the project to upload into "
+                   "(default: project root).")
+@click.option(
+    "--follow/--no-follow",
+    default=True,
+    help="Stream the build + run log live when a manifest is provisioned (default: on).",
+)
+def deploy(name: str, source: str, branch: str | None, dest: str, follow: bool):
+    """Deploy a project from a local file/folder or a git repo. Creates it if new, redeploys
+    if it already exists (a fresh blue/green version).
+
+    SOURCE is either a local path (a file or a directory, sent recursively with the tree
+    preserved) or a git clone URL (https://…, ssh://…, or git@host:path). A git URL is
+    cloned server-side; a local path is zipped and streamed to the server in 1 MiB pieces
+    (with a progress bar).
+
+    Either way the server scans the project root for a manifest — a docker-compose.yml
+    selects compose mode (it wins over a Dockerfile), a bare Dockerfile selects dockerfile
+    mode (its EXPOSE'd port becomes the container port) — wires up nginx + SSL, then builds
+    and starts the container/stack automatically, streaming the build log live. There is no
+    separate create step. A local upload with no manifest is a plain file sync (nothing is
+    built).
+
+    \b
+    Examples:
+      fhcli deploy myapp ./myapp                              # a project folder
+      fhcli deploy myapp ./Dockerfile                         # a single file
+      fhcli deploy myapp ./assets --dest static               # into a sub-directory
+      fhcli deploy myapp https://github.com/owner/repo.git    # from a git repo
+      fhcli deploy myapp git@github.com:owner/repo.git -b dev # a private repo + branch
+    """
+    _validate_project_name(name)
+
+    if _looks_like_git_url(source):
+        _deploy_git(name, source, branch, follow)
+        return
+
+    if not os.path.exists(source):
+        console.print(
+            f"[bold red]Error:[/] '{source}' is neither an existing local path nor a git "
+            f"clone URL (https://…, ssh://…, or git@host:path)."
+        )
+        sys.exit(1)
+    _deploy_path(name, source, dest, follow)
+
+
+# Build + run is launched automatically by `fhcli deploy` (the server streams it back over
+# the deploy WebSocket); re-run `fhcli deploy` to redeploy. The former `create` / `upload` /
+# `git-add` (and `build` / `start` / `compose-build` / `compose-up`) commands are gone.
 
 
 # ── stop ───────────────────────────────────────────────────────────────────────
@@ -1091,7 +1078,7 @@ def list_versions(project: str):
     versions = data.get("versions", [])
     if not versions:
         console.print(f"[dim]No versions yet for '{project}'. Deploy it first with "
-                      f"[bold]fhcli upload[/].[/]")
+                      f"[bold]fhcli deploy[/].[/]")
         return
     for v in versions:
         table.add_row(

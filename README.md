@@ -8,23 +8,25 @@ REST API to deploy, manage, and expose Docker containers via HTTPS subdomains �
 
 ## How it works
 
-`POST /projects` creates an empty project. You then **upload** your files (a single file or a whole
-folder) and the server scans the uploaded root for a `Dockerfile` or `docker-compose.yml`: that
-selects the deploy mode automatically (compose wins if both are present), allocates the subdomain(s),
-writes the nginx config, and issues the Let's Encrypt cert. The lifecycle endpoints then operate on
-that project.
+A **deploy** creates the project (no separate create step): you **deploy** a local file/folder or a
+git repo, and the server auto-creates the project row if it's new, then scans the deployed root for a
+`Dockerfile` or `docker-compose.yml`: that selects the deploy mode automatically (compose wins if both
+are present), allocates the subdomain(s), writes the nginx config, and issues the Let's Encrypt cert.
+The lifecycle endpoints then operate on that project. Re-deploying redeploys (blue/green).
 
 ```
-POST   /projects                       →  create an empty project (deploy_mode: "pending")
-POST   /projects/{name}/upload         →  upload a file/folder; auto-detect Dockerfile or
-                                          docker-compose.yml in the root → provision
-                                          ({name}.your_domain.com + nginx config + Let's Encrypt
-                                          cert), then build + run it. Returns a ws_path.
-WS     /projects/{name}/deploy         →  stream the build + run log (read-only); re-upload to redeploy
+POST   /projects/{name}/upload/complete →  finish a chunked upload (a file/folder); auto-creates the
+                                          project if new, auto-detects Dockerfile or docker-compose.yml
+                                          in the root → provision ({name}.your_domain.com + nginx config
+                                          + Let's Encrypt cert), then build + run it. Returns a ws_path.
+POST   /git/add                         →  deploy from a git URL {name, git_url, branch?}: clone →
+                                          same auto-create + autodetect + provision + build/run.
+                                          Idempotent — an existing name re-clones + redeploys.
+WS     /projects/{name}/deploy         →  stream the build + run log (read-only); re-deploy to redeploy
 DELETE /projects/{name}                →  stop containers, remove images, delete nginx config, remove from DB
 
 # dockerfile mode (detected from a Dockerfile) — one container per project:
-# (build + run are launched automatically by the upload above — no /build or /start)
+# (build + run are launched automatically by the deploy above — no /build or /start)
 POST   /projects/{name}/stop        →  docker stop   (async, poll /status)
 WS     /projects/{name}/exec         →  interactive docker exec shell
 GET    /projects/{name}/status      →  logs + status of last docker op
@@ -33,7 +35,7 @@ POST   /projects/{name}/ssl         →  (re)issue the Let's Encrypt cert
 POST   /projects/{name}/domain      →  set/clear a custom domain (re-runs nginx + certbot)
 
 # compose mode (detected from a docker-compose.yml) — multi-container stack:
-# (build + up are launched automatically by the upload above — no /compose/build or /compose/up)
+# (build + up are launched automatically by the deploy above — no /compose/build or /compose/up)
 POST   /projects/{name}/compose/down                  →  tear the stack down (async, poll /compose/status)
 GET    /projects/{name}/compose/status                →  logs + status of last compose op
 POST   /projects/{name}/compose/abort                 →  kill running compose subprocess
@@ -384,34 +386,31 @@ https://api.your_domain.com/docs
 TOKEN="your_token_here"
 BASE="https://api.your_domain.com"
 
-# 1. Create an empty project (deploy mode decided at upload time)
-curl -X POST "$BASE/projects" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "myapp"}'
-
-# 2. Upload the project folder (must contain a Dockerfile that EXPOSEs a port).
-#    The server detects the Dockerfile, sets the container port from EXPOSE, provisions
-#    nginx + SSL for myapp.your_domain.com, then builds + runs the container. The response
-#    carries a ws_path; the build streams over WS /projects/myapp/deploy.
+# 1. Deploy the project folder (must contain a Dockerfile that EXPOSEs a port). There is no
+#    separate create step — the server auto-creates "myapp" on this first upload, detects the
+#    Dockerfile, sets the container port from EXPOSE, provisions nginx + SSL for
+#    myapp.your_domain.com, then builds + runs the container. The response carries a ws_path;
+#    the build streams over WS /projects/myapp/deploy. (This multipart form is the simple path;
+#    fhcli / the web UI use the chunked upload/chunk + upload/complete pair for large folders.)
 curl -X POST "$BASE/projects/myapp/upload" \
   -H "Authorization: Bearer $TOKEN" \
   -F "files=@./Dockerfile;filename=Dockerfile" \
   -F "files=@./app.py;filename=app.py"
 
-# 3. Watch the deploy (or just poll status)
+# 2. Watch the deploy (or just poll status)
 curl    "$BASE/projects/myapp/status"     -H "Authorization: Bearer $TOKEN"
 
-# 4. Stop
+# 3. Stop
 curl -X POST "$BASE/projects/myapp/stop" -H "Authorization: Bearer $TOKEN"
 
-# Re-upload to redeploy after changing the code.
+# Re-deploy (re-upload, or POST /git/add again) to redeploy after changing the code.
 ```
 
-For a multi-container stack, upload a folder whose root contains a `docker-compose.yml` (it wins over
-a Dockerfile); the project becomes compose-mode and the upload runs `docker compose up -d` for you
-(tear it down with `.../compose/down`). The `fhcli` CLI wraps all of this (`fhcli create` →
-`fhcli upload`, which provisions and deploys in one step) — see `cli/README.md`.
+For a multi-container stack, deploy a folder whose root contains a `docker-compose.yml` (it wins over
+a Dockerfile); the project becomes compose-mode and the deploy runs `docker compose up -d` for you
+(tear it down with `.../compose/down`). The `fhcli` CLI wraps all of this in one command —
+`fhcli deploy NAME PATH-OR-GIT-URL` auto-creates, provisions, and deploys in one step — see
+`cli/README.md`.
 
 ---
 
@@ -447,7 +446,7 @@ freeholdy/
 │   │   ├── orm.py            # DB models: Project, ComposeService, Token
 │   │   └── schemas.py        # Pydantic request/response models
 │   ├── routers/
-│   │   ├── projects.py       # GET/POST/DELETE /projects + unified /upload (autodetect)
+│   │   ├── projects.py       # GET/DELETE /projects + unified /upload (auto-create + autodetect)
 │   │   ├── container.py      # dockerfile lifecycle: build / start / stop / exec / ssl / status / abort
 │   │   ├── compose.py        # provision_compose + compose lifecycle: build / up / down / status / abort
 │   │   └── plugins.py        # list + add plugins

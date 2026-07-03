@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 The React control panel for freeholdy (`webui/`). It is a pure browser-side client of the
 FastAPI server documented in `../CLAUDE.md` — it ships no backend of its own and talks to the
 live API over HTTPS. The web UI does file/folder upload over the API via the unified
-`UploadModal`; the CLI's `fhcli upload` uploads over the same API.
+`UploadModal` / `DeployForm`; the CLI's `fhcli deploy` deploys over the same API.
 
 ## Commands
 
@@ -58,19 +58,22 @@ Things that require reading the whole file to understand:
 
 The UI assumes these endpoints and is the place this contract is exercised from the client side:
 
-- `GET /health`, `GET /projects`, `POST /projects` (name only — no deploy_mode), `DELETE /projects/{name}`
+- `GET /health`, `GET /projects`, `DELETE /projects/{name}` (there is **no** `POST /projects`
+  create endpoint — a deploy auto-creates the row; see below)
 - `GET /plugins` — each item carries `name`, `description`, `about` (Markdown from the plugin's
   `ABOUT.md`, empty when none), `deploy_mode`, `container_port`, `has_install`, `type`. `PluginPanel`
   is a master-detail view: a ~25% name list on the left, a ~75% detail pane on the right that renders
   `about` (falling back to `description`) via the tiny inline `Markdown` component, with a solid-green
   **install** button (`Btn v="green"`) in the pane's top-right. `system`-type plugins are filtered out.
-- Upload (chunked): `POST /projects/{name}/upload/chunk` then `.../upload/complete`. Reassembles +
-  unzips the tree under the project dir, auto-detects a `Dockerfile`/`docker-compose.yml` in the root
-  and provisions (compose wins), then **auto-launches build + run and returns a `ws_path`** — the
-  same unified deploy path git/plugins use. Returns `{ status, message, count, files, deploy_mode,
-  provisioned, project, ws_path, job }`. `UploadModal` hands a provisioned response to
-  `handleInstalled` → `InstallPane` to stream the deploy log live (a no-manifest sync has no
-  `ws_path` and just shows its result). Re-upload to redeploy.
+- Upload (chunked): `POST /projects/{name}/upload/chunk` then `.../upload/complete`. **Auto-creates
+  the project row if it doesn't exist yet** (no separate create call), reassembles + unzips the tree
+  under the project dir, auto-detects a `Dockerfile`/`docker-compose.yml` in the root and provisions
+  (compose wins), then **auto-launches build + run and returns a `ws_path`** — the same unified deploy
+  path git/plugins use. Returns `{ status, message, count, files, deploy_mode, provisioned, project,
+  ws_path, job }`. The shared `chunkedDeploy(api, project, entries, onProgress)` helper implements the
+  zip → chunk → complete round-trip; both `UploadModal` (per-card redeploy) and `DeployForm` (new
+  project) call it. A provisioned response is handed to `handleInstalled` → `InstallPane` to stream the
+  deploy log live (a no-manifest sync has no `ws_path` and just shows its result). Re-upload to redeploy.
 - Dockerfile (single-container) actions, all project-level:
   `POST /projects/{name}/{stop|ssl|abort}` and `GET /projects/{name}/status` (no `/build` or `/start`)
 - **Blue/green versions** (dockerfile only): `GET /projects/{name}/versions` (active/inactive/archived
@@ -90,32 +93,51 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   connects to `WS /plugins/{plugin}/install/{project}` and `InstallPane` streams the build log live
   (interactive plugins also drive `install.sh` via an input row). The `exit` frame reports the build
   result — no `/status` polling during install.
-- **Git projects:** `POST /git/add` (body `{ name, git_url, branch? }`) clones a repo, auto-detects
-  a Dockerfile/compose, provisions nginx + SSL, then builds + runs it. Same response shape as
+- **Git deploy:** `POST /git/add` (body `{ name, git_url, branch? }`) auto-creates-or-reuses the row
+  (idempotent: new name creates, existing name redeploys), clones a repo, auto-detects a
+  Dockerfile/compose, provisions nginx + SSL, then builds + runs it. Same response shape as
   `/plugins/{name}/add` (`{ project, job, ws_path }`); the build streams over
-  `WS /git/deploy/{project}` (read-only — git deploys never prompt). `GitProjectForm` posts this and
-  hands the response to the same `handleInstalled` → `InstallPane` path as plugins (interactive is
-  always false). The "+ git project" toolbar button toggles the form alongside "new project"/"add plugin".
+  `WS /git/deploy/{project}` (read-only — git deploys never prompt). `DeployForm`'s **git tab** posts
+  this and hands the response to the same `handleInstalled` → `InstallPane` path as plugins (interactive
+  is always false).
 - **Git SSH key:** `GET /git/key` returns the server's GitHub SSH public key (`{ public_key, created,
   key_path, instructions }`), creating an ed25519 keypair server-side on first use. The header's
   "git key" button opens `GitKeyModal`, which fetches it and shows the key (with a copy button) plus
   GitHub instructions — so a user can add the key to GitHub and clone private repos over
   `git@github.com:…`. A `POST /git/add` clone that fails SSH auth returns a 400 whose detail points
-  the user here, surfaced in `GitProjectForm`'s `<Err>`.
+  the user here, surfaced in `DeployForm`'s `<Err>` (git tab).
 
-There are **no `/parts/{type}/...`, `/dockerfile`, `/compose`, or `/context` upload endpoints** — a
-project starts as `deploy_mode: "pending"` and the first `upload` makes it either one container
-(`deploy_mode: "dockerfile"`, fields under `project.container`) or a compose stack
-(`project.services[]`).
+`DeployForm` is the single new-project entry point (toolbar **+ deploy project** button, `showDeploy`
+state), alongside **+ add plugin**. It takes a project name plus a **files/folder ⇄ git URL** toggle:
+the files tab calls `chunkedDeploy`, the git tab posts `/git/add`; a provisioned response is handed to
+`onDeployed` (= `handleInstalled`) to stream in the `InstallPane`, a manifest-less file sync calls
+`onSynced` (= `fetchProjects`). It replaces the former `CreateForm` (which posted the now-removed
+`POST /projects`) and `GitProjectForm`.
+
+There are **no `/parts/{type}/...`, `/dockerfile`, `/compose`, `/context`, or `POST /projects`
+endpoints** — a deploy auto-creates the row as `deploy_mode: "pending"` and the manifest it detects
+makes it either one container (`deploy_mode: "dockerfile"`, fields under `project.container`) or a
+compose stack (`project.services[]`).
 
 `UploadModal` (opened from the **upload** button on every `ProjectCard` header, both modes and
-pending) chunk-uploads to `/projects/{name}/upload/chunk` + `.../upload/complete`. It offers a file
-picker and a folder picker; the folder input is a `<input webkitdirectory>` whose non-standard
-attributes are set via a ref on mount (React won't pass them through). Each `File.webkitRelativePath`
-has its leading folder segment stripped (`stripRoot`) and becomes its zip entry name. A provisioned
-response (carrying `ws_path`) is handed to `onDeploy` (= `handleInstalled`) so the deploy streams in
-the `InstallPane`; the modal closes. The card's primary button reads **deploy** for a provisioned
-project (re-uploading redeploys) and **upload** while pending.
+pending) has the same **files/folder ⇄ git URL** tabs as `DeployForm`: the files tab chunk-uploads
+to `/projects/{name}/upload/chunk` + `.../upload/complete`, the git tab posts `/git/add` (idempotent
+redeploy of the same project name). It offers a file picker and a folder picker; the folder input is
+a `<input webkitdirectory>` whose non-standard attributes are set via a ref on mount (React won't pass
+them through). Each `File.webkitRelativePath` has its leading folder segment stripped (`stripRoot`)
+and becomes its zip entry name. A provisioned response (carrying `ws_path`) is handed to `onDeploy`
+(= `handleInstalled`) so the deploy streams in the `InstallPane`; the modal closes. The card's primary
+button reads **deploy** for a provisioned project (re-uploading redeploys) and **upload** while pending.
+
+**Deploy sources are remembered** in `localStorage["freeholdy_deploy_history"]` (helpers
+`loadDeployHistory`/`getProjectDeploy`/`getRecentGitUrls`/`saveProjectDeploy` near the top of
+`App.jsx`): `{ projects: { [name]: { srcKind, gitUrl, branch, label, ts } }, recentGitUrls: [...] }`.
+A **git** source is fully reusable — `UploadModal` pre-selects the git tab and pre-fills the URL +
+branch of a project's last deploy, and `DeployForm` offers recent git URLs as clickable "recent:"
+chips. A **files/folder** source can only be remembered as a hint (browsers never expose a file path
+and can't re-read files without a fresh user pick): the last selection's `label` (e.g.
+`folder 'x' · 42 files`) is shown, but re-picking is still required. History is saved at the deploy
+call sites in `UploadModal`/`DeployForm` (the source isn't in the deploy response), not in `Dashboard`.
 
 Two row components render the project table; a `pending` project (created, not yet uploaded) renders
 neither — `ProjectCard` shows an "awaiting upload" placeholder and a `pending` chip in the header:
@@ -136,11 +158,11 @@ Operation flow (`Dashboard` + `ContainerRow`):
   and `ExecTerminal` respectively.)
 - `abort` posts to the matching `.../abort` and stops the poll.
 
-## Project = subdomain; mode + port auto-detected from the upload
+## Project = subdomain; mode + port auto-detected from the deploy
 
 A project's name is its subdomain label — a dockerfile project is served at `{name}.your_domain.com`
-(`CreateForm` previews this), compose services at `{service}.{name}.your_domain.com`. `CreateForm`
-takes **only a name** — there is no deploy-mode or port input. The deploy mode is auto-detected
-server-side from the first `upload` (a `docker-compose.yml` wins over a `Dockerfile`), and a
-dockerfile project's container port is read from the Dockerfile's `EXPOSE` instruction, so the
-Dockerfile must declare one (the upload is rejected otherwise).
+(`DeployForm` previews this), compose services at `{service}.{name}.your_domain.com`. `DeployForm`
+takes **only a name** (plus the files/git source) — there is no deploy-mode or port input. The deploy
+mode is auto-detected server-side from the deployed source (a `docker-compose.yml` wins over a
+`Dockerfile`), and a dockerfile project's container port is read from the Dockerfile's `EXPOSE`
+instruction, so the Dockerfile must declare one (the deploy is rejected otherwise).

@@ -41,21 +41,25 @@ def add_git_project(
     db: Session = Depends(get_db),
     _=Depends(require_auth),
 ):
-    """Create a project from a git clone URL. Clones the repo into the project dir, scans
+    """Deploy a project from a git clone URL. Clones the repo into the project dir, scans
     the root for a Dockerfile / docker-compose.yml (compose wins) and wires nginx/SSL/ports
     exactly like an upload, then launches an async build+run job. The response carries a
-    `ws_path` — connect to `WS /git/deploy/{name}` to stream the build log live."""
-    name = request.name
-    if db.query(Project).filter(Project.name == name).first():
-        raise HTTPException(status_code=409, detail=f"Project '{name}' already exists")
+    `ws_path` — connect to `WS /git/deploy/{name}` to stream the build log live.
 
-    project = Project(name=name, type=ProjectType.user.value, deploy_mode="pending")
-    db.add(project)
-    db.flush()
+    Idempotent: a new name creates the project; an existing name re-clones + redeploys it
+    (a fresh blue/green version), so `deploy NAME <git-url>` behaves like a re-upload."""
+    name = request.name
+    existing = db.query(Project).filter(Project.name == name).first()
+    if existing:
+        project = existing
+    else:
+        project = Project(name=name, type=ProjectType.user.value, deploy_mode="pending")
+        db.add(project)
+        db.flush()
 
     project_dir = os.path.abspath(compose_service.project_dir(name))
-    # git clone needs a clean target; clear any stale dir left by a prior failed attempt
-    # (the 409 check above guarantees there is no live project row for this name).
+    # git clone needs a clean target; clear the existing tree (a prior deploy or a stale dir
+    # from a failed attempt) so the clone lands fresh.
     if os.path.isdir(project_dir):
         shutil.rmtree(project_dir, ignore_errors=True)
 
@@ -93,18 +97,20 @@ def add_git_project(
     # 3. Launch the async build + run job (no install.sh) — same dispatch the upload flow uses.
     job_key = launch_deploy(project)
 
+    verb = "Redeploying" if existing else "Cloned and provisioning"
     job = docker_service.get_job(job_key)
     job_resp = DockerJobStatusResponse(
         status=job.status if job else "no_job",
         operation=job.operation if job else None,
-        message=f"Cloned and provisioning '{name}' ({detected_mode}) — stream {_deploy_ws_path(name)}",
+        message=f"{verb} '{name}' ({detected_mode}) — stream {_deploy_ws_path(name)}",
         logs=docker_service.get_job_logs(job_key),
         exit_code=job.exit_code if job else None,
     )
 
     return PluginAddResponse(
         status="ok",
-        message=f"Project '{name}' created from git repo",
+        message=(f"Project '{name}' redeployed from git repo" if existing
+                 else f"Project '{name}' created from git repo"),
         project=project_response(project),
         job=job_resp,
         ws_path=_deploy_ws_path(name),
