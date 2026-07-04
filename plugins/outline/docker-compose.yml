@@ -1,0 +1,41 @@
+# Outline Server (Shadowbox) — a single container on HOST networking, deliberately
+# invisible to nginx.
+#
+# Why host networking (matches Outline's own `docker run --net host`):
+#   Outline exposes two things that freeholdy's normal compose path can't carry —
+#     1) a Shadowsocks access-key port that must be reachable publicly over BOTH
+#        TCP and UDP, and
+#     2) a TLS management API whose self-signed cert is pinned by the Outline
+#        Manager (certSha256) and therefore must be reached DIRECTLY, never through
+#        nginx's Let's Encrypt termination.
+#   freeholdy force-loopback-pins any compose service that publishes a TCP port
+#   (it rewrites `ports:` to 127.0.0.1:… behind an nginx vhost). Host networking
+#   sidesteps that entirely: with no `ports:` entries this service is not
+#   "exposed", so freeholdy creates no subdomain, no vhost and no certificate —
+#   the generated override merely pins container_name (freeholdy_{project}_shadowbox)
+#   and restart: unless-stopped. Shadowbox binds SB_API_PORT (tcp) and the keys
+#   port (tcp+udp) straight onto the host. One instance per host (real host ports).
+#
+# Ports and secrets come from ${PROJECT_DIR}/.env, written by install.sh's pre
+# phase. All state lives under ./persisted-state (the project dir) so
+# DELETE /projects/{name} (rmtree) cleans it up.
+#
+# The operator MUST open SB_API_PORT/tcp and the keys port (tcp+udp) in the cloud
+# firewall — Docker-published/host-bound ports bypass ufw on stock installs, but
+# the cloud provider security group is the operator's responsibility.
+services:
+  shadowbox:
+    image: quay.io/outline/shadowbox:stable
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./persisted-state:/opt/outline/persisted-state
+    environment:
+      - SB_STATE_DIR=/opt/outline/persisted-state
+      - SB_API_PORT=${SB_API_PORT}
+      - SB_API_PREFIX=${SB_API_PREFIX}
+      - SB_CERTIFICATE_FILE=/opt/outline/persisted-state/shadowbox-selfsigned.crt
+      - SB_PRIVATE_KEY_FILE=/opt/outline/persisted-state/shadowbox-selfsigned.key
+      - SB_DEFAULT_SERVER_NAME=${SB_SERVER_NAME}
+    logging:
+      driver: local
