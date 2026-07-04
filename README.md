@@ -459,7 +459,7 @@ freeholdy/
 │   └── templates/
 │       ├── nginx_http.conf.j2  # HTTP-only (for ACME challenge)
 │       └── nginx_ssl.conf.j2   # Full HTTPS config
-├── plugins/                  # Built-in plugins (webui, hello-world, nextcloud, …)
+├── plugins/                  # Built-in plugins (webui, freeholdy-help, nextcloud, …)
 ├── examples/                 # Deployable sample projects (fhcli deploy) + DEPLOY.md
 ├── cli/                      # Standalone `fhcli` CLI (own venv + .env)
 ├── webui/                    # React control panel (source for the webui plugin)

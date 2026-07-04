@@ -104,11 +104,11 @@ in one step, streaming the combined log:
 # See what's available
 fhcli plugins
 
-# Deploy the hello-world plugin as project "mysite"
-fhcli plugin-add hello-world mysite
+# Deploy the freeholdy-help plugin as project "mysite"
+fhcli plugin-add freeholdy-help mysite
 
 # Don't wait for build/run to finish
-fhcli plugin-add hello-world mysite --no-follow
+fhcli plugin-add freeholdy-help mysite --no-follow
 fhcli status mysite          # check progress later
 ```
 

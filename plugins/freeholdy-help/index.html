@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>freeholdy</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      background: #0f172a;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      color: #f1f5f9;
+      line-height: 1.6;
+      padding: 3rem 1.5rem;
+      display: flex;
+      justify-content: center;
+    }
+    .wrap { width: 100%; max-width: 760px; }
+    header { text-align: center; margin-bottom: 2.5rem; }
+    h1 {
+      font-size: 3rem;
+      letter-spacing: -1.5px;
+      background: linear-gradient(90deg, #818cf8, #38bdf8);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .tagline {
+      margin-top: 0.9rem;
+      color: #94a3b8;
+      font-size: 1.05rem;
+      max-width: 560px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .tagline code {
+      font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+      font-size: 0.9em;
+      color: #cbd5e1;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 5px;
+      padding: 1px 6px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1rem;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 0.9rem;
+      padding: 1.4rem 1.5rem;
+    }
+    .card h2 {
+      font-size: 1.05rem;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      letter-spacing: -0.3px;
+    }
+    .card .ico { font-size: 1.3rem; line-height: 1; }
+    .card p { margin-top: 0.6rem; color: #94a3b8; font-size: 0.92rem; }
+    footer {
+      margin-top: 2.5rem;
+      text-align: center;
+      color: #64748b;
+      font-size: 0.85rem;
+    }
+    footer code {
+      font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>freeholdy</h1>
+      <p class="tagline">
+        A single-VPS orchestrator that puts your Docker apps behind nginx +
+        Let's Encrypt, each live at its own <code>*.your_domain.com</code> subdomain —
+        with HTTPS wired up automatically.
+      </p>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <h2><span class="ico">📁</span> Folder deploy</h2>
+        <p>
+          Push a local project folder. freeholdy auto-detects your
+          <code>Dockerfile</code> or <code>docker-compose.yml</code>, builds it, runs it,
+          and wires up nginx + SSL — no config to write.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico">🔗</span> Git deploy</h2>
+        <p>
+          Deploy straight from a git URL — public repos, or private ones via the
+          server's own SSH key. Re-clone any time to redeploy the latest commit.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico">🧩</span> Plugins</h2>
+        <p>
+          One-command installs of pre-packaged apps — Nextcloud, a full mailserver,
+          Jitsi Meet, a VPN server, and more — provisioned and served in minutes.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2><span class="ico">⏮️</span> Versions &amp; rollback</h2>
+        <p>
+          Every deploy is blue/green with archived backups: a failed build never takes
+          the live site down, and you can roll back to any previous version instantly.
+        </p>
+      </div>
+    </div>
+
+    <footer>
+      You're seeing this page because someone deployed the
+      <code>freeholdy-help</code> plugin. Replace it with your own project any time.
+    </footer>
+  </div>
+</body>
+</html>
