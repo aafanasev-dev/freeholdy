@@ -108,7 +108,16 @@ def provision_compose(
     rows_by_name: dict[str, ComposeService] = {}
 
     for svc in services:
+        # Unexposed services (host networking, UDP-only, or internal-only) are still
+        # tracked — for status display and exec — but get no port, subdomain, or vhost.
         if not svc["exposed"]:
+            db.add(ComposeService(
+                project_id=project.id,
+                name=svc["name"],
+                exposed=False,
+                container_name=f"freeholdy_{project_name}_{svc['name']}",
+                websocket=svc["websocket"],
+            ))
             continue
         port = _next_port(db, reserved)
         reserved.add(port)
@@ -126,6 +135,7 @@ def provision_compose(
         row = ComposeService(
             project_id=project.id,
             name=svc["name"],
+            exposed=True,
             subdomain=subdomain,
             custom_domain=custom_domain,
             local_port=port,
@@ -199,6 +209,11 @@ def set_service_domain(
     target = next((s for s in project.services if s.name == service_name), None)
     if target is None:
         raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found in project '{project_name}'")
+    if not target.exposed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Service '{service_name}' publishes no TCP port — it has no nginx endpoint to attach a domain to",
+        )
 
     if request.custom_domain:
         assert_domain_available(db, request.custom_domain, exclude_service_id=target.id)
@@ -209,7 +224,7 @@ def set_service_domain(
         "subdomain": s.effective_domain,
         "local_port": s.local_port,
         "websocket": bool(s.websocket),
-    } for s in project.services]
+    } for s in project.services if s.exposed]
     ssl_result = nginx_service.setup_nginx(project_name, endpoints)
     for s in project.services:
         s.ssl_enabled = bool(ssl_result["ssl"].get(s.effective_domain, {}).get("success"))

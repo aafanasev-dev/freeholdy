@@ -41,17 +41,21 @@ class Project(Base):
 
 
 class ComposeService(Base):
-    """One exposed service of a compose project (one per published port). Compose-only;
-    dockerfile projects keep their single container's fields on Project itself."""
+    """One service of a compose project. Compose-only; dockerfile projects keep their
+    single container's fields on Project itself. `exposed` services publish a TCP port
+    and get a loopback binding, subdomain, and nginx vhost; unexposed services (host
+    networking, UDP-only, or internal-only) have NULL port/subdomain/container_port and
+    no nginx endpoint — they are still tracked for status display and exec."""
     __tablename__ = "compose_services"
 
     id = Column(Integer, primary_key=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     name = Column(String, nullable=False)             # the compose service name
-    subdomain = Column(String, nullable=False)        # auto-generated, {service}.{project}.your_domain.com
+    exposed = Column(Boolean, nullable=False, default=True)  # publishes a TCP port → nginx endpoint
+    subdomain = Column(String, nullable=True)         # auto-generated, {service}.{project}.your_domain.com (exposed only)
     custom_domain = Column(String, nullable=True)     # optional override; when set it wins over subdomain
-    local_port = Column(Integer, nullable=False, unique=True)
-    container_port = Column(Integer, nullable=False, default=80)
+    local_port = Column(Integer, nullable=True, unique=True)  # NULL for unexposed services
+    container_port = Column(Integer, nullable=True)   # NULL for unexposed services
     container_name = Column(String, nullable=False)   # freeholdy_{project}_{service}
     ssl_enabled = Column(Boolean, default=False)
     websocket = Column(Boolean, default=False)        # detected from this service's compose block

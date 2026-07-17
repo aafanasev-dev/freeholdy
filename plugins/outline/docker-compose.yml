@@ -1,5 +1,5 @@
 # Outline Server (Shadowbox) — a single container on HOST networking, deliberately
-# invisible to nginx.
+# kept out of nginx.
 #
 # Why host networking (matches Outline's own `docker run --net host`):
 #   Outline exposes two things that freeholdy's normal compose path can't carry —
@@ -10,11 +10,13 @@
 #        nginx's Let's Encrypt termination.
 #   freeholdy force-loopback-pins any compose service that publishes a TCP port
 #   (it rewrites `ports:` to 127.0.0.1:… behind an nginx vhost). Host networking
-#   sidesteps that entirely: with no `ports:` entries this service is not
-#   "exposed", so freeholdy creates no subdomain, no vhost and no certificate —
-#   the generated override merely pins container_name (freeholdy_{project}_shadowbox)
-#   and restart: unless-stopped. Shadowbox binds SB_API_PORT (tcp) and the keys
-#   port (tcp+udp) straight onto the host. One instance per host (real host ports).
+#   sidesteps that entirely: with no `ports:` entries this service is "unexposed",
+#   so freeholdy creates no subdomain, no vhost and no certificate — the generated
+#   override merely pins container_name (freeholdy_{project}_shadowbox) and
+#   restart: unless-stopped. It is still tracked as an unexposed service, so the
+#   web UI shows its status and offers exec (no subdomain/SSL). Shadowbox binds
+#   SB_API_PORT (tcp) and the keys port (tcp+udp) straight onto the host. One
+#   instance per host (real host ports).
 #
 # Ports and secrets come from ${PROJECT_DIR}/.env, written by install.sh's pre
 # phase. All state lives under ./persisted-state (the project dir) so
