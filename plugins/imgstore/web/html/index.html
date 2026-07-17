@@ -100,6 +100,8 @@
           <div class="muted" style="margin-top:.4rem">jpeg · png · gif · webp — up to 50 MB</div>
           <input type="file" id="file" accept="image/jpeg,image/png,image/gif,image/webp" class="hidden" />
         </div>
+        <input type="text" id="uploadName" style="margin-top:.75rem"
+               placeholder="optional name — blank = auto (sha256)" autocomplete="off" />
       </div>
       <div id="grid" class="grid"></div>
       <p id="empty" class="muted" hidden style="margin-top:1.25rem">No images yet.</p>
@@ -115,6 +117,8 @@
     const TOKEN_KEY = "imgstore_token";
 
     const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s).replace(/[&<>"']/g,
+      (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     let token = localStorage.getItem(TOKEN_KEY) || "";
 
     function toast(msg, kind) {
@@ -175,22 +179,25 @@
         card.innerHTML = `
           <a class="thumb" href="${url}" target="_blank" rel="noopener" style="background-image:url('${url}')"></a>
           <div class="meta">
-            <div class="name">${img.name}</div>
+            <div class="name">${esc(img.name)}</div>
             <div class="actions">
               <button class="link" data-copy="${url}">Copy link</button>
-              <button class="danger" data-del="${img.name}">Delete</button>
+              <button class="link" data-rename="${esc(img.name)}">Rename</button>
+              <button class="danger" data-del="${esc(img.name)}">Delete</button>
             </div>
           </div>`;
         grid.appendChild(card);
       }
     }
 
-    async function upload(file) {
+    async function upload(file, name) {
       if (!file) return;
       const fd = new FormData();
+      if (name) fd.append("name", name); // before "image" so multer parses it as a text field
       fd.append("image", file);
       try {
         await api("/api/images", { method: "POST", body: fd });
+        $("uploadName").value = "";
         toast("Uploaded", "ok");
         refresh();
       } catch (e) {
@@ -209,22 +216,37 @@
     $("logout").addEventListener("click", signOut);
 
     // Upload interactions
+    const uploadName = () => $("uploadName").value.trim();
     $("pick").addEventListener("click", () => $("file").click());
-    $("file").addEventListener("change", (e) => upload(e.target.files[0]));
+    $("file").addEventListener("change", (e) => upload(e.target.files[0], uploadName()));
     const drop = $("drop");
     ["dragenter", "dragover"].forEach((ev) =>
       drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
     ["dragleave", "drop"].forEach((ev) =>
       drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
-    drop.addEventListener("drop", (e) => upload(e.dataTransfer.files[0]));
+    drop.addEventListener("drop", (e) => upload(e.dataTransfer.files[0], uploadName()));
 
     // Grid actions (event delegation)
     $("grid").addEventListener("click", async (e) => {
       const copy = e.target.getAttribute("data-copy");
+      const ren = e.target.getAttribute("data-rename");
       const del = e.target.getAttribute("data-del");
       if (copy) {
         try { await navigator.clipboard.writeText(copy); toast("Link copied", "ok"); }
         catch { toast(copy); }
+      } else if (ren) {
+        const cur = ren.replace(/\.(jpeg|png|gif|webp)$/, ""); // default = current stem
+        const next = prompt("New name (extension is kept):", cur);
+        if (next === null || next.trim() === "" || next.trim() === cur) return;
+        try {
+          await api("/api/images/" + ren, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: next.trim() }),
+          });
+          toast("Renamed", "ok");
+          refresh();
+        } catch (err) { toast(err.message, "err"); }
       } else if (del) {
         if (!confirm("Delete this image?")) return;
         try { await api("/api/images/" + del, { method: "DELETE" }); toast("Deleted", "ok"); refresh(); }

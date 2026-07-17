@@ -16,9 +16,27 @@ Uploaded images are served at:
 https://storage.<project>.<domain>/images/<sha256>.<ext>
 ```
 
-The filename is the SHA-256 of the image bytes (so re-uploading the same file is a
-no-op), and `<ext>` is one of `jpeg`, `png`, `gif`, `webp`. These links need **no
-token** — the long random path is the capability, so they're safe to paste anywhere.
+By default the filename is the SHA-256 of the image bytes (so re-uploading the same
+file is a no-op), and `<ext>` is one of `jpeg`, `png`, `gif`, `webp`. These links need
+**no token** — the long random path is the capability, so they're safe to paste
+anywhere.
+
+## Naming
+
+Instead of the sha256, you can give an image a **custom name** that appears in its URL:
+
+- **On upload** — type a name in the box next to the drop zone (leave it blank to keep
+  the auto sha256 name). The image is then served at `/images/<name>.<ext>`.
+- **After upload** — click **Rename** on any image card to change its name.
+
+Names may contain letters, digits, `.`, `_`, and `-` (they must start with a letter or
+digit). The extension is fixed by the image's content type and can't be changed by
+renaming. Two images can't share a name — a clash is rejected. A **custom-named** image
+is stored under that name (so re-uploading identical bytes under a *new* name keeps both
+copies; the sha256 dedup only applies to blank-name uploads). Note that a **friendly
+name is more guessable** than a sha256, so it's a weaker capability. Renaming or deleting
+an image invalidates its old URL (a subsequent upload could even reuse a freed name for
+different bytes), so treat a changed URL as a new link.
 
 ## Access tokens
 
