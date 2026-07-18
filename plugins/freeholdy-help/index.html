@@ -3,128 +3,428 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>freeholdy</title>
+  <title>freeholdy — user guide</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      min-height: 100vh;
-      background: #0f172a;
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      color: #f1f5f9;
-      line-height: 1.6;
-      padding: 3rem 1.5rem;
-      display: flex;
-      justify-content: center;
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --border: #334155;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --faint: #64748b;
+      --accent: #38bdf8;
+      --header-h: 3.25rem;
+      --sidebar-w: 232px;
     }
-    .wrap { width: 100%; max-width: 760px; }
-    header { text-align: center; margin-bottom: 2.5rem; }
-    h1 {
-      font-size: 3rem;
-      letter-spacing: -1.5px;
+    html { scroll-behavior: smooth; scroll-padding-top: calc(var(--header-h) + 1rem); }
+    body {
+      background: var(--bg);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      color: var(--text);
+      line-height: 1.6;
+    }
+    code {
+      font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+      font-size: 0.9em;
+      color: #cbd5e1;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 1px 6px;
+    }
+    pre {
+      background: #0b1120;
+      border: 1px solid var(--border);
+      border-radius: 0.6rem;
+      padding: 0.8rem 1rem;
+      margin: 0.8rem 0;
+      overflow-x: auto;
+    }
+    pre code { background: none; border: none; padding: 0; color: #e2e8f0; font-size: 0.85rem; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Header */
+    header {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: var(--header-h);
+      background: rgba(15, 23, 42, 0.92);
+      backdrop-filter: blur(6px);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0 1.25rem;
+      z-index: 20;
+    }
+    .wordmark {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: -0.5px;
       background: linear-gradient(90deg, #818cf8, #38bdf8);
       -webkit-background-clip: text;
       background-clip: text;
       color: transparent;
     }
-    .tagline {
-      margin-top: 0.9rem;
-      color: #94a3b8;
-      font-size: 1.05rem;
-      max-width: 560px;
+    .header-sub { color: var(--faint); font-size: 0.85rem; padding-top: 2px; }
+    #nav-toggle {
+      display: none;
       margin-left: auto;
-      margin-right: auto;
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--muted);
+      font-size: 1.1rem;
+      padding: 0.15rem 0.55rem;
+      cursor: pointer;
     }
-    .tagline code {
-      font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
-      font-size: 0.9em;
-      color: #cbd5e1;
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 5px;
-      padding: 1px 6px;
+
+    /* Sidebar */
+    nav {
+      position: fixed;
+      top: var(--header-h);
+      left: 0;
+      bottom: 0;
+      width: var(--sidebar-w);
+      border-right: 1px solid var(--border);
+      padding: 1.25rem 0.75rem 2rem;
+      overflow-y: auto;
+      background: var(--bg);
+      z-index: 15;
     }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-      gap: 1rem;
+    nav a {
+      display: block;
+      color: var(--muted);
+      font-size: 0.92rem;
+      padding: 0.35rem 0.75rem;
+      border-radius: 6px;
+      border-left: 2px solid transparent;
     }
+    nav a.sub { padding-left: 1.6rem; font-size: 0.85rem; }
+    nav a:hover { color: var(--text); text-decoration: none; background: var(--panel); }
+    nav a.active { color: var(--accent); border-left-color: var(--accent); background: var(--panel); }
+
+    /* Content */
+    main {
+      margin-left: var(--sidebar-w);
+      padding: calc(var(--header-h) + 2rem) 1.5rem 4rem;
+      display: flex;
+      justify-content: center;
+    }
+    .content { width: 100%; max-width: 760px; }
+    section { margin-bottom: 3.25rem; }
+    h1 { font-size: 1.7rem; letter-spacing: -0.5px; margin-bottom: 0.9rem; }
+    h2 { font-size: 1.15rem; letter-spacing: -0.3px; margin: 1.6rem 0 0.5rem; }
+    p, ul, ol { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.7rem; }
+    ul, ol { padding-left: 1.3rem; }
+    li { margin-bottom: 0.3rem; }
+    strong { color: #cbd5e1; }
+    .lead { font-size: 1.02rem; }
+
     .card {
-      background: #1e293b;
-      border: 1px solid #334155;
+      background: var(--panel);
+      border: 1px solid var(--border);
       border-radius: 0.9rem;
-      padding: 1.4rem 1.5rem;
+      padding: 1.1rem 1.25rem;
+      margin: 0.9rem 0;
     }
-    .card h2 {
-      font-size: 1.05rem;
+    .card h3 {
+      font-size: 1rem;
       display: flex;
       align-items: center;
-      gap: 0.6rem;
+      gap: 0.5rem;
       letter-spacing: -0.3px;
+      color: var(--text);
     }
-    .card .ico { font-size: 1.3rem; line-height: 1; }
-    .card p { margin-top: 0.6rem; color: #94a3b8; font-size: 0.92rem; }
+    .card p { margin: 0.45rem 0 0; font-size: 0.9rem; }
+    .card pre { margin-bottom: 0; }
+    .badge {
+      display: inline-block;
+      font-size: 0.7rem;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0 0.5rem;
+      margin-left: auto;
+      white-space: nowrap;
+    }
+    .note {
+      border-left: 3px solid var(--accent);
+      background: var(--panel);
+      border-radius: 0 0.6rem 0.6rem 0;
+      padding: 0.7rem 1rem;
+      margin: 0.9rem 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
     footer {
-      margin-top: 2.5rem;
-      text-align: center;
-      color: #64748b;
+      margin-top: 1rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+      color: var(--faint);
       font-size: 0.85rem;
+      text-align: center;
     }
-    footer code {
-      font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
-      color: #94a3b8;
+    footer code { color: var(--muted); }
+
+    @media (max-width: 820px) {
+      #nav-toggle { display: block; }
+      nav { transform: translateX(-100%); transition: transform 0.2s ease; width: min(75vw, var(--sidebar-w)); }
+      nav.open { transform: translateX(0); box-shadow: 0 0 40px rgba(0,0,0,0.6); }
+      main { margin-left: 0; }
     }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <header>
-      <h1>freeholdy</h1>
-      <p class="tagline">
-        A single-VPS orchestrator that puts your Docker apps behind nginx +
-        Let's Encrypt, each live at its own <code>*.your_domain.com</code> subdomain —
-        with HTTPS wired up automatically.
-      </p>
-    </header>
+  <header>
+    <span class="wordmark">freeholdy</span>
+    <span class="header-sub">user guide</span>
+    <button id="nav-toggle" aria-label="Toggle navigation">☰</button>
+  </header>
 
-    <div class="grid">
-      <div class="card">
-        <h2><span class="ico">📁</span> Folder deploy</h2>
-        <p>
-          Push a local project folder. freeholdy auto-detects your
-          <code>Dockerfile</code> or <code>docker-compose.yml</code>, builds it, runs it,
-          and wires up nginx + SSL — no config to write.
-        </p>
-      </div>
+  <nav id="sidebar">
+    <a href="#what-is-freeholdy">What is freeholdy</a>
+    <a href="#installation">Installation</a>
+    <a href="#deploying-apps">Deploying apps</a>
+    <a href="#deploy-folder" class="sub">From a folder</a>
+    <a href="#deploy-git" class="sub">From git</a>
+    <a href="#deploy-plugins" class="sub">From plugins</a>
+    <a href="#plugin-catalog">Plugin catalog</a>
+    <a href="#versions-rollback">Versions &amp; rollback</a>
+    <a href="#ai-integration">AI integration</a>
+  </nav>
 
-      <div class="card">
-        <h2><span class="ico">🔗</span> Git deploy</h2>
-        <p>
-          Deploy straight from a git URL — public repos, or private ones via the
-          server's own SSH key. Re-clone any time to redeploy the latest commit.
-        </p>
-      </div>
+  <main>
+    <div class="content">
 
-      <div class="card">
-        <h2><span class="ico">🧩</span> Plugins</h2>
-        <p>
-          One-command installs of pre-packaged apps — Nextcloud, a full mailserver,
-          Jitsi Meet, a VPN server, and more — provisioned and served in minutes.
+      <section id="what-is-freeholdy">
+        <h1>What is freeholdy</h1>
+        <p class="lead">
+          freeholdy is a <strong>single-VPS orchestrator</strong> for your Docker apps. It puts
+          every project behind nginx + Let's Encrypt and serves each one at its own
+          <code>{name}.your_domain.com</code> subdomain — with HTTPS wired up automatically.
         </p>
-      </div>
+        <p>
+          You push code (a folder, a git URL, or a pre-packaged plugin); freeholdy auto-detects
+          whether it's a single-container <code>Dockerfile</code> project or a multi-container
+          <code>docker-compose.yml</code> stack (compose wins when both are present), builds it,
+          runs it, and wires up the reverse proxy and SSL certificate. No per-project nginx or
+          certbot configuration to write.
+        </p>
+        <p>There are three ways to drive it:</p>
+        <ul>
+          <li><strong>CLI</strong> — <code>fhcli</code>, a small command-line client (used in the examples below).</li>
+          <li><strong>Web UI</strong> — a control panel at <code>ui.&lt;your-domain&gt;</code> covering the same operations in the browser.</li>
+          <li><strong>REST API</strong> — everything above is a thin client over the API at <code>api.&lt;your-domain&gt;</code>, authenticated with a bearer token.</li>
+        </ul>
+      </section>
 
-      <div class="card">
-        <h2><span class="ico">⏮️</span> Versions &amp; rollback</h2>
+      <section id="installation">
+        <h1>Installation</h1>
+        <h2>Prerequisites</h2>
+        <ul>
+          <li>A fresh <strong>Ubuntu VPS</strong> with root access. The installer handles all packages itself.</li>
+          <li>A <strong>base domain</strong> with a wildcard DNS record (<code>*.your_domain.com</code>) pointing at the server — projects are served at <code>{name}.your_domain.com</code> and the API at <code>api.your_domain.com</code>.</li>
+        </ul>
+        <h2>One-command bootstrap</h2>
+        <pre><code>bash &lt;(curl -fsSL https://raw.githubusercontent.com/aafanasev-dev/freeholdy/main/install.sh)</code></pre>
         <p>
-          Every deploy is blue/green with archived backups: a failed build never takes
-          the live site down, and you can roll back to any previous version instantly.
+          On a server that already runs other apps, clone the repo and run
+          <code>sudo bash install.sh</code> instead. The installer auto-detects one of two modes
+          and asks you to confirm before touching anything:
         </p>
-      </div>
+        <ul>
+          <li><strong>FRESH</strong> — docker and/or nginx are missing → it installs what's missing. For a dedicated or empty VPS.</li>
+          <li><strong>COEXIST</strong> — both are already present → it never installs, restarts, or upgrades docker or nginx, and aborts early if your existing nginx config is broken. Safe next to other apps.</li>
+        </ul>
+        <p>The installer then:</p>
+        <ol>
+          <li>Prompts for a service user (default <code>freeholdy</code>), your base domain, and a Let's Encrypt email.</li>
+          <li>Sets up the service user with docker access and passwordless nginx/certbot sudo.</li>
+          <li>Creates the Python venv, writes <code>.env</code>, and picks a free local API port.</li>
+          <li>Adds the <code>api.&lt;domain&gt;</code> nginx vhost, obtains its SSL certificate, and installs a nightly renewal cron.</li>
+          <li>Installs and starts the <code>freeholdy</code> systemd service.</li>
+          <li>Prints your first <strong>API token — shown once</strong>; save it.</li>
+        </ol>
+        <p>
+          Flags: <code>-u USER</code> (service user), <code>-y</code> (assume yes),
+          <code>-r</code> (redo every step). Progress is tracked in <code>install.log</code>, so
+          re-running is idempotent — it skips finished steps and can, for example, re-enable SSL
+          after DNS propagates.
+        </p>
+        <h2>Set up the CLI</h2>
+        <p>On your workstation (or the server), from a clone of the repo:</p>
+        <pre><code>cd cli/
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # set TOKEN and BASE_DOMAIN</code></pre>
+        <p>Check it works with <code>./fhcli.py health</code>.</p>
+      </section>
+
+      <section id="deploying-apps">
+        <h1>Deploying apps</h1>
+        <p>
+          There is no separate "create project" step — the first deploy creates the project, and
+          re-running the same deploy redeploys it. Every deploy streams its build log live to
+          your terminal.
+        </p>
+
+        <h2 id="deploy-folder">From a folder</h2>
+        <pre><code>fhcli deploy myapp ./myapp</code></pre>
+        <p>
+          Uploads the folder, auto-detects the manifest — a <code>Dockerfile</code> (it must
+          <code>EXPOSE</code> a port) or a <code>docker-compose.yml</code> — builds it, runs it,
+          and wires up nginx + SSL at <code>myapp.your_domain.com</code>. Compose stacks get one
+          subdomain per exposed service (<code>{service}.myapp.your_domain.com</code>). Re-run
+          the command to redeploy.
+        </p>
+
+        <h2 id="deploy-git">From git</h2>
+        <pre><code>fhcli deploy mysite https://github.com/owner/repo.git
+fhcli deploy mysite git@github.com:owner/repo.git --branch dev</code></pre>
+        <p>
+          Clones the repo on the server and runs the exact same detect → build → run → nginx
+          pipeline. Re-run to redeploy the latest commit.
+        </p>
+        <p>
+          For <strong>private repos</strong>, run <code>fhcli get-git-key</code> — it prints the
+          server's SSH public key (generated on first use); add it as a deploy key on the repo,
+          then deploy over the <code>git@…</code> URL.
+        </p>
+
+        <h2 id="deploy-plugins">From plugins</h2>
+        <pre><code>fhcli plugins                       # list available plugins
+fhcli plugin-add nextcloud mycloud  # install one as project "mycloud"</code></pre>
+        <p>
+          Plugins are pre-packaged apps that deploy through the same pipeline. Some are
+          <strong>interactive</strong>: the install prompts you right in the terminal (e.g. to
+          choose an admin account) before the build starts. If your terminal disconnects
+          mid-install, re-running <code>plugin-add</code> resumes it.
+        </p>
+      </section>
+
+      <section id="plugin-catalog">
+        <h1>Plugin catalog</h1>
+
+        <div class="card">
+          <h3>☁️ nextcloud <span class="badge">interactive</span></h3>
+          <p>Nextcloud file sync &amp; share at <code>nextcloud.&lt;domain&gt;</code> (app, postgres, redis, cron). The install prompts for the admin account.</p>
+        </div>
+
+        <div class="card">
+          <h3>📮 mailserver <span class="badge">interactive</span></h3>
+          <p>Full e-mail server (docker-mailserver) — SMTP, IMAP, and DKIM at <code>mail.&lt;domain&gt;</code>. Choose addons and the first mailbox during install.</p>
+        </div>
+
+        <div class="card">
+          <h3>✉️ snappymail <span class="badge">interactive</span></h3>
+          <p>SnappyMail webmail — a web UI for your mail server at <code>mailui.&lt;domain&gt;</code>. Pairs with the mailserver plugin.</p>
+        </div>
+
+        <div class="card">
+          <h3>🎥 jitsi-meet <span class="badge">interactive · UDP 10000</span></h3>
+          <p>Jitsi Meet video conferencing at <code>meet.&lt;domain&gt;</code>. Choose the moderator account during install; UDP 10000 must be reachable from the internet.</p>
+        </div>
+
+        <div class="card">
+          <h3>🖼️ imgstore</h3>
+          <p>Token-gated image storage — upload via a web UI, share via public links with custom names or auto sha256 URLs.</p>
+        </div>
+
+        <div class="card">
+          <h3>📂 sftp-go <span class="badge">interactive</span></h3>
+          <p>Personal SFTPGo file server — SFTP, WebDAV &amp; WebClient over your own folder.</p>
+        </div>
+
+        <div class="card">
+          <h3>🛡️ amneziavpn <span class="badge">interactive · UDP port</span></h3>
+          <p>AmneziaWG (DPI-resistant WireGuard) VPN server on a raw UDP port — no subdomain, no SSL. Pick the port, client DNS, and first client during install; your firewall must allow the UDP port in.</p>
+        </div>
+
+        <div class="card">
+          <h3>🔑 outline <span class="badge">interactive · 2 ports</span></h3>
+          <p>Outline Server (Shadowbox) — self-hosted Shadowsocks VPN managed from the Outline Manager desktop app. Pick the API and access-key ports during install; your firewall must allow both in.</p>
+        </div>
+
+        <div class="card">
+          <h3>📖 freeholdy-help</h3>
+          <p>This guide — a static page that also doubles as a smoke test for a fresh install.</p>
+        </div>
+      </section>
+
+      <section id="versions-rollback">
+        <h1>Versions &amp; rollback</h1>
+        <p>
+          Every deploy is <strong>blue/green versioned</strong>: the new version is built and
+          verified running <em>before</em> traffic switches to it, so a failed build never takes
+          the live site down. Previous versions are kept for rollback.
+        </p>
+        <pre><code>fhcli versions myapp            # list versions: active / inactive / archived
+fhcli rollback myapp 2          # make version 2 live again
+fhcli set-backup-limit myapp 3  # keep at most 3 archived versions</code></pre>
+        <ul>
+          <li><strong>active</strong> — the running version nginx points at.</li>
+          <li><strong>inactive</strong> — the previous version, kept as a stopped container for instant rollback (Dockerfile projects only).</li>
+          <li><strong>archived</strong> — older versions with their image retained, capped by the backup limit (default 5, oldest pruned first).</li>
+        </ul>
+        <div class="note">
+          Compose rollback restores the project's code snapshot and images, then brings the
+          stack back up — but <strong>named-volume data is not rolled back</strong>. Databases
+          keep their current contents.
+        </div>
+      </section>
+
+      <section id="ai-integration">
+        <h1>AI integration</h1>
+        <p>
+          freeholdy ships a <strong>Claude Code skill</strong>, <code>fhdeploy</code>, that lets
+          Claude deploy to your server for you — no <code>fhcli</code> required. It talks to the
+          REST API directly: uploads a folder (or points the server at a git URL), follows the
+          build, and reports the live endpoints.
+        </p>
+        <h2>Setup</h2>
+        <ol>
+          <li>Copy <code>skills/fhdeploy/</code> from the freeholdy repo into your Claude Code skills directory (e.g. <code>~/.claude/skills/</code>).</li>
+          <li>Run it from any Claude Code session:
+            <pre><code>/fhdeploy myapp ./myapp
+/fhdeploy mysite https://github.com/owner/repo.git</code></pre>
+          </li>
+          <li>On first use it asks for your API <strong>token</strong> (printed by the installer) and <strong>base domain</strong>, and remembers them in Claude Code memory for next time.</li>
+        </ol>
+        <p>
+          Beyond deploys, the skill knows the versioning API — it can list a project's versions
+          and roll back — and the git deploy-key flow for private repos. In practice: tell
+          Claude to build something, then tell it to ship it.
+        </p>
+      </section>
+
+      <footer>
+        You're seeing this page because someone deployed the
+        <code>freeholdy-help</code> plugin. Replace it with your own project any time.
+      </footer>
+
     </div>
+  </main>
 
-    <footer>
-      You're seeing this page because someone deployed the
-      <code>freeholdy-help</code> plugin. Replace it with your own project any time.
-    </footer>
-  </div>
+  <script>
+    const links = Array.from(document.querySelectorAll('nav a'));
+    const targets = links.map(a => document.getElementById(a.getAttribute('href').slice(1)));
+    const sidebar = document.getElementById('sidebar');
+
+    function setActive() {
+      const fromTop = window.scrollY + 90;
+      let current = 0;
+      targets.forEach((el, i) => { if (el && el.offsetTop <= fromTop) current = i; });
+      links.forEach((a, i) => a.classList.toggle('active', i === current));
+    }
+    window.addEventListener('scroll', setActive, { passive: true });
+    setActive();
+
+    document.getElementById('nav-toggle').addEventListener('click', () => sidebar.classList.toggle('open'));
+    links.forEach(a => a.addEventListener('click', () => sidebar.classList.remove('open')));
+  </script>
 </body>
 </html>
