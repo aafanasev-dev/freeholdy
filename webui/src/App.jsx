@@ -1056,6 +1056,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
   const [uploadModal, setUploadModal] = useState(false);
   const isCompose = project.deploy_mode === "compose";
   const isPending = project.deploy_mode !== "compose" && project.deploy_mode !== "dockerfile";
+  const isPlugin = project.type === "plugin";
 
   const remove = async () => {
     setRemoving(true);
@@ -1097,6 +1098,9 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
             )}
             {isPending && (
               <span style={{ color: C.amber, background: "#fbf2e0", border: "1px solid #f0e1bc", fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "8px" }}>pending</span>
+            )}
+            {isPlugin && (
+              <span style={{ color: C.muted, background: C.s3, border: `1px solid ${C.bd}`, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "8px" }}>plugin</span>
             )}
             <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>
               {isCompose ? `${project.services?.length ?? 0} service${project.services?.length !== 1 ? "s" : ""}` : isPending ? "awaiting upload" : "container"}
@@ -1383,7 +1387,9 @@ const PluginPanel = ({ token, onInstalled, onCancel }) => {
                   </div>
                   <Btn v="green" onClick={() => setInstalling(active)} style={{ flexShrink: 0 }}>install</Btn>
                 </div>
-                <Markdown text={active.about || active.description} />
+                <div style={{ maxHeight: "65vh", overflowY: "auto" }}>
+                  <Markdown text={active.about || active.description} />
+                </div>
               </>
             )}
           </div>
