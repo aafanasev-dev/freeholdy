@@ -45,7 +45,7 @@ router = APIRouter()
 def _next_port(db: Session, reserved: set[int]) -> int:
     """First free loopback port, considering both dockerfile projects and compose services."""
     used = {row[0] for row in db.query(Project.local_port).filter(Project.local_port.isnot(None)).all()}
-    used |= {row[0] for row in db.query(ComposeService.local_port).all()}
+    used |= {row[0] for row in db.query(ComposeService.local_port).filter(ComposeService.local_port.isnot(None)).all()}
     used |= {row[0] for row in db.query(ProjectVersion.local_port).filter(ProjectVersion.local_port.isnot(None)).all()}
     used |= reserved
     for port in range(settings.PORT_RANGE_START, settings.PORT_RANGE_END):
@@ -105,6 +105,7 @@ def _container_info(project: Project) -> dict:
 def _service_info(svc: ComposeService) -> dict:
     return {
         "name": svc.name,
+        "exposed": bool(svc.exposed),
         "subdomain": svc.effective_domain,
         "custom_domain": svc.custom_domain,
         "local_port": svc.local_port,

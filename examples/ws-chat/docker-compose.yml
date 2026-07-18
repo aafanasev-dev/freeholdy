@@ -8,8 +8,9 @@ services:
     build:
       context: ./frontend
       args:
-        # Set by install.sh's interactive pre phase (.env); default keeps the stack
-        # buildable if the pre phase never ran.
+        # Chat room name baked into the frontend bundle. Defaults to "ws-chat";
+        # override by exporting CHAT_NAME (or adding a CHAT_NAME=… line to a .env
+        # file next to this compose file — freeholdy uploads it with the project).
         VITE_CHAT_NAME: ${CHAT_NAME:-ws-chat}
     ports:
       - "80"

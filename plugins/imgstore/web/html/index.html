@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>imgstore</title>
+  <style>
+    :root {
+      --bg: #0f1115; --panel: #181b22; --border: #262b36; --fg: #e6e8ec;
+      --muted: #8b93a1; --accent: #4f8cff; --danger: #ff5c72; --ok: #35c46b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+      padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); flex-wrap: wrap;
+    }
+    header h1 { font-size: 1.15rem; margin: 0; letter-spacing: .3px; }
+    header .who { color: var(--muted); font-size: .85rem; }
+    main { max-width: 960px; margin: 0 auto; padding: 1.25rem; }
+    .panel {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 12px; padding: 1.25rem;
+    }
+    button {
+      font: inherit; cursor: pointer; border: 1px solid var(--border);
+      background: #222735; color: var(--fg); padding: .5rem .9rem; border-radius: 8px;
+    }
+    button:hover { border-color: #3a4152; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.link { background: transparent; border: none; color: var(--accent); padding: .25rem; }
+    button.danger { background: transparent; border-color: transparent; color: var(--danger); }
+    input[type=text], input[type=password] {
+      font: inherit; width: 100%; padding: .6rem .7rem; border-radius: 8px;
+      border: 1px solid var(--border); background: #11141a; color: var(--fg);
+    }
+    .row { display: flex; gap: .6rem; align-items: center; }
+    .muted { color: var(--muted); }
+    .hidden { display: none !important; }
+    .drop {
+      border: 1.5px dashed var(--border); border-radius: 12px; padding: 1.75rem;
+      text-align: center; color: var(--muted); transition: border-color .15s, background .15s;
+    }
+    .drop.over { border-color: var(--accent); background: #141a26; color: var(--fg); }
+    .grid {
+      display: grid; gap: 1rem; margin-top: 1.25rem;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    }
+    .card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 12px; overflow: hidden; display: flex; flex-direction: column;
+    }
+    .card .thumb {
+      aspect-ratio: 4 / 3; background: #0a0c10 center/contain no-repeat;
+      display: block;
+    }
+    .card .meta { padding: .6rem .7rem; display: flex; flex-direction: column; gap: .4rem; }
+    .card .name { font-size: .72rem; color: var(--muted); word-break: break-all; }
+    .card .actions { display: flex; justify-content: space-between; align-items: center; }
+    .toast {
+      position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%);
+      background: #222735; border: 1px solid var(--border); padding: .6rem 1rem;
+      border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none;
+    }
+    .toast.show { opacity: 1; }
+    .toast.err { border-color: var(--danger); color: var(--danger); }
+    .toast.ok { border-color: var(--ok); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🖼️ imgstore</h1>
+    <div class="row" id="session" hidden>
+      <span class="who" id="storageHost"></span>
+      <button id="logout">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Token gate -->
+    <section id="gate" class="panel">
+      <h2 style="margin-top:0">Enter access token</h2>
+      <p class="muted">Mint one on the server with
+        <code>fhcli exec &lt;project&gt; --service storage /app/gen-token.sh</code>.</p>
+      <form id="tokenForm" class="row" style="margin-top:1rem">
+        <input type="password" id="tokenInput" placeholder="access token" autocomplete="off" />
+        <button class="primary" type="submit">Unlock</button>
+      </form>
+    </section>
+
+    <!-- App -->
+    <section id="app" hidden>
+      <div class="panel">
+        <div id="drop" class="drop">
+          <strong>Drop an image here</strong> or
+          <button id="pick" class="link" style="font-size:1rem">choose a file</button>
+          <div class="muted" style="margin-top:.4rem">jpeg · png · gif · webp — up to 50 MB</div>
+          <input type="file" id="file" accept="image/jpeg,image/png,image/gif,image/webp" class="hidden" />
+        </div>
+        <input type="text" id="uploadName" style="margin-top:.75rem"
+               placeholder="optional name — blank = auto (sha256)" autocomplete="off" />
+      </div>
+      <div id="grid" class="grid"></div>
+      <p id="empty" class="muted" hidden style="margin-top:1.25rem">No images yet.</p>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    // The web UI is served at web.<project>.<domain>; the API is its sibling
+    // storage.<project>.<domain>. Derive it by swapping the leading "web." label.
+    const STORAGE_BASE = location.protocol + "//" + location.hostname.replace(/^web\./, "storage.");
+    const TOKEN_KEY = "imgstore_token";
+
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s).replace(/[&<>"']/g,
+      (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    let token = localStorage.getItem(TOKEN_KEY) || "";
+
+    function toast(msg, kind) {
+      const t = $("toast");
+      t.textContent = msg;
+      t.className = "toast show " + (kind || "");
+      setTimeout(() => (t.className = "toast"), 2200);
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch(STORAGE_BASE + path, {
+        ...opts,
+        headers: { Authorization: "Bearer " + token, ...(opts.headers || {}) },
+      });
+      if (res.status === 401) {
+        signOut();
+        throw new Error("Unauthorized — token rejected");
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || ("HTTP " + res.status));
+      }
+      return res.status === 204 ? null : res.json();
+    }
+
+    function showApp() {
+      $("gate").hidden = true;
+      $("app").hidden = false;
+      $("session").hidden = false;
+      $("storageHost").textContent = STORAGE_BASE.replace(/^https?:\/\//, "");
+      refresh();
+    }
+
+    function signOut() {
+      token = "";
+      localStorage.removeItem(TOKEN_KEY);
+      $("app").hidden = true;
+      $("session").hidden = true;
+      $("gate").hidden = false;
+      $("tokenInput").value = "";
+    }
+
+    async function refresh() {
+      let images = [];
+      try {
+        ({ images } = await api("/api/images"));
+      } catch (e) {
+        toast(e.message, "err");
+        return;
+      }
+      const grid = $("grid");
+      grid.innerHTML = "";
+      $("empty").hidden = images.length > 0;
+      for (const img of images) {
+        const url = STORAGE_BASE + img.url;
+        const card = document.createElement("div");
+        card.className = "card";
+        card.innerHTML = `
+          <a class="thumb" href="${url}" target="_blank" rel="noopener" style="background-image:url('${url}')"></a>
+          <div class="meta">
+            <div class="name">${esc(img.name)}</div>
+            <div class="actions">
+              <button class="link" data-copy="${url}">Copy link</button>
+              <button class="link" data-rename="${esc(img.name)}">Rename</button>
+              <button class="danger" data-del="${esc(img.name)}">Delete</button>
+            </div>
+          </div>`;
+        grid.appendChild(card);
+      }
+    }
+
+    async function upload(file, name) {
+      if (!file) return;
+      const fd = new FormData();
+      if (name) fd.append("name", name); // before "image" so multer parses it as a text field
+      fd.append("image", file);
+      try {
+        await api("/api/images", { method: "POST", body: fd });
+        $("uploadName").value = "";
+        toast("Uploaded", "ok");
+        refresh();
+      } catch (e) {
+        toast(e.message, "err");
+      }
+    }
+
+    // Token gate
+    $("tokenForm").addEventListener("submit", (e) => {
+      e.preventDefault();
+      token = $("tokenInput").value.trim();
+      if (!token) return;
+      localStorage.setItem(TOKEN_KEY, token);
+      showApp();
+    });
+    $("logout").addEventListener("click", signOut);
+
+    // Upload interactions
+    const uploadName = () => $("uploadName").value.trim();
+    $("pick").addEventListener("click", () => $("file").click());
+    $("file").addEventListener("change", (e) => upload(e.target.files[0], uploadName()));
+    const drop = $("drop");
+    ["dragenter", "dragover"].forEach((ev) =>
+      drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+    ["dragleave", "drop"].forEach((ev) =>
+      drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+    drop.addEventListener("drop", (e) => upload(e.dataTransfer.files[0], uploadName()));
+
+    // Grid actions (event delegation)
+    $("grid").addEventListener("click", async (e) => {
+      const copy = e.target.getAttribute("data-copy");
+      const ren = e.target.getAttribute("data-rename");
+      const del = e.target.getAttribute("data-del");
+      if (copy) {
+        try { await navigator.clipboard.writeText(copy); toast("Link copied", "ok"); }
+        catch { toast(copy); }
+      } else if (ren) {
+        const cur = ren.replace(/\.(jpeg|png|gif|webp)$/, ""); // default = current stem
+        const next = prompt("New name (extension is kept):", cur);
+        if (next === null || next.trim() === "" || next.trim() === cur) return;
+        try {
+          await api("/api/images/" + ren, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: next.trim() }),
+          });
+          toast("Renamed", "ok");
+          refresh();
+        } catch (err) { toast(err.message, "err"); }
+      } else if (del) {
+        if (!confirm("Delete this image?")) return;
+        try { await api("/api/images/" + del, { method: "DELETE" }); toast("Deleted", "ok"); refresh(); }
+        catch (err) { toast(err.message, "err"); }
+      }
+    });
+
+    // Boot
+    if (token) showApp();
+  </script>
+</body>
+</html>

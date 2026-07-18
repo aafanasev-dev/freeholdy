@@ -1,5 +1,5 @@
 #!/bin/bash
-# install.sh — populates the build context for the hello-world plugin.
+# install.sh — populates the build context for the freeholdy-help plugin.
 #
 # freeholdy invokes this with cwd = the project build context and:
 #   PLUGIN_DIR   — this plugin's source directory (copy bundled assets from here)

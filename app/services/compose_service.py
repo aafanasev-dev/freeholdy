@@ -147,3 +147,42 @@ def write_files(project: str, compose_text: str, services: list[dict]) -> tuple[
         yaml.safe_dump({"services": override_services}, f, default_flow_style=False, sort_keys=False)
 
     return compose_path, override_path
+
+
+def backfill_unexposed_services(db) -> int:
+    """Insert ComposeService rows for compose services that predate unexposed-service
+    tracking (host-networking / UDP-only / internal-only services got no row before).
+
+    Idempotent and cheap: for every compose project whose compose file is on disk, re-parse
+    it and add a row (exposed=False, NULL port/subdomain) for any service that has no row yet.
+    Runs once at startup (needs YAML parsing, which the sqlite migration can't do). Returns
+    the number of rows inserted. Callers commit.
+    """
+    from app.models.orm import Project, ComposeService  # local import: avoid import cycle
+
+    inserted = 0
+    projects = db.query(Project).filter(Project.deploy_mode == "compose").all()
+    for project in projects:
+        path = compose_file_path(project.name)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path) as f:
+                services = parse_services(f.read())
+        except (OSError, ValueError):
+            continue  # unreadable/malformed compose — skip; a redeploy will fix it
+        existing = {s.name for s in project.services}
+        for svc in services:
+            if svc["name"] in existing or svc["exposed"]:
+                continue
+            db.add(ComposeService(
+                project_id=project.id,
+                name=svc["name"],
+                exposed=False,
+                container_name=f"freeholdy_{project.name}_{svc['name']}",
+                websocket=svc["websocket"],
+            ))
+            inserted += 1
+    if inserted:
+        db.commit()
+    return inserted

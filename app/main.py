@@ -5,13 +5,25 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.models.database import init_db
+from app.models.database import init_db, SessionLocal
+from app.services import compose_service
 from app.routers import projects, container, plugins, compose, git, versions
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # Backfill rows for compose services that predate unexposed-service tracking
+    # (schema columns are added by migrate_db.sh; this fills the missing rows).
+    db = SessionLocal()
+    try:
+        added = compose_service.backfill_unexposed_services(db)
+        if added:
+            logging.getLogger("uvicorn").info(
+                "Backfilled %d unexposed compose service row(s)", added
+            )
+    finally:
+        db.close()
     if settings.DEBUG:
         logging.getLogger("uvicorn").warning(
             "DEBUG mode: bearer-token auth is DISABLED — do not run like this in production"

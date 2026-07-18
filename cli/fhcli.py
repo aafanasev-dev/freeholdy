@@ -8,7 +8,7 @@ Usage examples:
   fhcli -p 8000 health                  # talk to a local dev server (http://localhost:8000)
   fhcli projects
   fhcli plugins
-  fhcli plugin-add hello-world mysite
+  fhcli plugin-add freeholdy-help mysite
   fhcli deploy myapp ./myapp            # deploy from a local file/folder over the HTTP API;
                                       # the project is created automatically if new,
                                       # auto-detects Dockerfile / docker-compose.yml,
@@ -620,8 +620,8 @@ def plugin_add(plugin: str, project: str, follow: bool):
 
     \b
     Examples:
-      fhcli plugin-add hello-world mysite
-      fhcli plugin-add hello-world mysite --no-follow
+      fhcli plugin-add freeholdy-help mysite
+      fhcli plugin-add freeholdy-help mysite --no-follow
     """
     _validate_project_name(project)
     console.print(f"Installing plugin [cyan]{plugin}[/] as project [bold cyan]{project}[/]…")

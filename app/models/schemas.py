@@ -133,12 +133,15 @@ class ContainerInfo(BaseModel):
 
 
 class ServiceInfo(BaseModel):
-    """One exposed service of a compose-mode project."""
+    """One service of a compose-mode project. `exposed` services publish a TCP port and
+    have a subdomain/port/nginx endpoint; unexposed ones (host networking, UDP-only, or
+    internal-only) have those fields null and are tracked only for status + exec."""
     name: str
-    subdomain: str                         # effective hostname served (custom domain if set, else auto subdomain)
+    exposed: bool = True
+    subdomain: Optional[str] = None        # effective hostname served (custom domain if set, else auto subdomain); null when unexposed
     custom_domain: Optional[str] = None    # the override, when one is set
-    local_port: int
-    container_port: int
+    local_port: Optional[int] = None       # null when unexposed
+    container_port: Optional[int] = None   # null when unexposed
     container_name: str
     ssl_enabled: bool = False
     websocket: bool = False

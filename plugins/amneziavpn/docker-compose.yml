@@ -1,10 +1,11 @@
-# AmneziaWG VPN server — a single UDP service, deliberately invisible to nginx.
+# AmneziaWG VPN server — a single UDP service, deliberately kept out of nginx.
 #
 # freeholdy only "exposes" compose services that publish a TCP port; this stack
 # publishes UDP only, so provisioning creates no subdomain, no nginx vhost, no
 # certificate — the ${AWG_PORT} binding below passes through the override merge
 # untouched and the generated override merely pins container_name
-# (freeholdy_{project}_awg) and restart: unless-stopped.
+# (freeholdy_{project}_awg) and restart: unless-stopped. It is still tracked as
+# an unexposed service, so the web UI shows its status and offers exec.
 #
 # Image pinned by digest: metaligh/amneziawg:latest as of 2024-10-01 (the image
 # is updated rarely; the digest is what install.sh and add-client.sh were

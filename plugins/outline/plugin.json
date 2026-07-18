@@ -1,0 +1,7 @@
+{
+  "name": "outline",
+  "description": "Outline Server (Shadowbox) — Jigsaw's self-hosted Shadowsocks VPN. Runs with host networking on a TLS management API port + a Shadowsocks access-key port (TCP+UDP), managed from the Outline Manager desktop app. No subdomain, no nginx. Interactive install: pick the API and keys ports and confirm the public host. Your cloud firewall must allow both ports in.",
+  "deploy_mode": "compose",
+  "type": "plugin",
+  "interactive": true
+}

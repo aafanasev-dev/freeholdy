@@ -964,10 +964,15 @@ const Cells = ({ label, info }) => (
       {info.custom_domain && (
         <span style={{ color: C.blue, background: "#e9f0ff", border: "1px solid #cfddff", fontSize: "8px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "8px", marginLeft: "7px" }}>custom</span>
       )}
+      {info.exposed === false && (
+        <span style={{ color: C.dim, background: "#f0f0f2", border: "1px solid #dcdce0", fontSize: "8px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "8px", marginLeft: "7px" }} title="No published TCP port — runs outside nginx (host networking, UDP-only, or internal-only)">unproxied</span>
+      )}
     </td>
     <td style={{ padding: "7px 10px", fontFamily: C.ff, fontSize: "11px", color: C.txt, textAlign: "right", minWidth: "55px" }}>{info.local_port ?? "—"}</td>
     <td style={{ padding: "7px 10px", textAlign: "center", minWidth: "38px" }}>
-      <span style={{ color: info.ssl_enabled ? C.green : C.dim, fontFamily: C.ff, fontSize: "11px" }}>{info.ssl_enabled ? "✓" : "✗"}</span>
+      {info.exposed === false
+        ? <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>—</span>
+        : <span style={{ color: info.ssl_enabled ? C.green : C.dim, fontFamily: C.ff, fontSize: "11px" }}>{info.ssl_enabled ? "✓" : "✗"}</span>}
     </td>
     <td style={{ padding: "7px 10px", minWidth: "130px" }}><Tag status={info.container_status} /></td>
   </>
@@ -1032,7 +1037,9 @@ const ServiceRow = ({ project, info, token, onOperation, onRefresh }) => {
       <td style={{ padding: "6px 8px" }}>
         <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
           <Btn sm v="amber" onClick={() => setModal("exec")} disabled={!isRunning} title="Exec command in this service's container">exec</Btn>
-          <Btn sm v="blue" onClick={() => setModal("domain")} title="Set or clear a custom domain">domain</Btn>
+          {info.exposed !== false && (
+            <Btn sm v="blue" onClick={() => setModal("domain")} title="Set or clear a custom domain">domain</Btn>
+          )}
         </div>
         {modal === "exec"   && <ExecTerminal token={token} project={project} service={info.name} label={`${project} → ${info.name}`} onClose={() => setModal(null)} />}
         {modal === "domain" && <DomainModal token={token} project={project} service={info.name} info={info} onClose={() => setModal(null)} onDone={onRefresh} />}
@@ -1049,6 +1056,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
   const [uploadModal, setUploadModal] = useState(false);
   const isCompose = project.deploy_mode === "compose";
   const isPending = project.deploy_mode !== "compose" && project.deploy_mode !== "dockerfile";
+  const isPlugin = project.type === "plugin";
 
   const remove = async () => {
     setRemoving(true);
@@ -1091,6 +1099,9 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
             {isPending && (
               <span style={{ color: C.amber, background: "#fbf2e0", border: "1px solid #f0e1bc", fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "8px" }}>pending</span>
             )}
+            {isPlugin && (
+              <span style={{ color: C.muted, background: C.s3, border: `1px solid ${C.bd}`, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "8px" }}>plugin</span>
+            )}
             <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>
               {isCompose ? `${project.services?.length ?? 0} service${project.services?.length !== 1 ? "s" : ""}` : isPending ? "awaiting upload" : "container"}
             </span>
@@ -1113,7 +1124,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
           </div>
         ) : isCompose && (project.services || []).length === 0 ? (
           <div style={{ padding: "18px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
-            no services yet — use <span style={{ color: C.purple }}>upload</span> to add a docker-compose.yml
+            no services recorded — <span style={{ color: C.purple }}>deploy</span> again to register this project's containers
           </div>
         ) : (
         <div style={{ overflowX: "auto" }}>
@@ -1376,7 +1387,9 @@ const PluginPanel = ({ token, onInstalled, onCancel }) => {
                   </div>
                   <Btn v="green" onClick={() => setInstalling(active)} style={{ flexShrink: 0 }}>install</Btn>
                 </div>
-                <Markdown text={active.about || active.description} />
+                <div style={{ maxHeight: "65vh", overflowY: "auto" }}>
+                  <Markdown text={active.about || active.description} />
+                </div>
               </>
             )}
           </div>
