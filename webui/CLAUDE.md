@@ -76,10 +76,12 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   deploy log live (a no-manifest sync has no `ws_path` and just shows its result). Re-upload to redeploy.
 - Dockerfile (single-container) actions, all project-level:
   `POST /projects/{name}/{stop|ssl|abort}` and `GET /projects/{name}/status` (no `/build` or `/start`)
-- **Blue/green versions** (dockerfile only): `GET /projects/{name}/versions` (active/inactive/archived
-  list + counts + backup limit), `PUT /projects/{name}/backup-limit` (`{limit}`), and
-  `POST /projects/{name}/rollback` (`{version}`, returns `{job, ws_path}`). The **versions** button on
-  `ContainerRow` opens `VersionsModal` (backup-limit control + versions table). A **rollback** streams
+- **Blue/green versions** (both modes): `GET /projects/{name}/versions` (active/inactive/archived
+  list + counts + backup limit; compose versions are active/archived only and carry null
+  `image_name`/`container_name`/`local_port`), `PUT /projects/{name}/backup-limit` (`{limit}`), and
+  `POST /projects/{name}/rollback` (`{version}`, returns `{job, ws_path}`). The **versions** button
+  lives on `ContainerRow` for dockerfile projects and on the `ProjectCard` header for compose ones;
+  both open the shared `VersionsModal` (backup-limit control + versions table). A **rollback** streams
   over `WS /projects/{name}/deploy` — the modal hands the returned `ws_path` up via `onStream`
   (`Dashboard.handleDeployStream`) to the shared `InstallPane`, exactly like a deploy. `mkApi` now also
   has a `put`.

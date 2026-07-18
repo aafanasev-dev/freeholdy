@@ -245,6 +245,15 @@ def _teardown_compose(project: Project, details: list[str], errors: list[str]) -
             if not ok:
                 errors.append(msg)
 
+    # Blue/green version artifacts: retained per-version image tags + file snapshots
+    # (`compose down --rmi all` only removes images the *current* compose files reference).
+    # Tags are matched by prefix rather than iterating version rows, so nothing lingers
+    # even if the DB and docker drifted apart.
+    from app.services import deploy_service  # lazy
+    removed_tags = deploy_service.remove_all_compose_version_artifacts(name)
+    if removed_tags or project.versions:
+        details.append(f"Removed {removed_tags} retained version image tag(s) + snapshots")
+
     if os.path.isdir(cdir):
         shutil.rmtree(cdir, ignore_errors=True)
         details.append(f"Compose directory '{cdir}' removed")
@@ -506,17 +515,15 @@ def launch_deploy(project: Project) -> str:
     """Launch the async build + run job for an already-provisioned project, dispatching on
     its deploy mode, and return the job_key the client streams over a deploy WebSocket.
 
-    The single place that maps (deploy_mode → docker_service call); shared by the upload
+    The single place that maps (deploy_mode → deploy_service call); shared by the upload
     flow (`WS /projects/{name}/deploy`), git deploy (`WS /git/deploy/{name}`), and the
-    non-interactive plugin install. Compose runs `docker compose up -d`; dockerfile runs a
-    blue/green build + run + nginx switch via `deploy_service.bluegreen_deploy`."""
+    non-interactive plugin install. Both modes run a blue/green versioned deploy: compose
+    via `deploy_service.compose_bluegreen_deploy` (build-first, brief down/up switch),
+    dockerfile via `deploy_service.bluegreen_deploy` (build + run + nginx switch)."""
     from app.services import deploy_service  # lazy: deploy_service imports _next_port from here
 
     if project.deploy_mode == "compose":
-        project_dir = os.path.abspath(compose_service.project_dir(project.name))
-        job_key = f"compose:{project.name}"
-        docker_service.compose_up(project.name, project_dir, job_key)
-        return job_key
+        return deploy_service.compose_bluegreen_deploy(project.id)
     return deploy_service.bluegreen_deploy(project.id)
 
 

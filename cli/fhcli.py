@@ -1051,7 +1051,11 @@ def _version_status_text(status: str) -> Text:
 @cli.command("versions")
 @click.argument("project")
 def list_versions(project: str):
-    """List a dockerfile project's blue/green versions (active / inactive / archived).
+    """List a project's blue/green versions (active / inactive / archived).
+
+    Dockerfile projects keep the previous version as a stopped container (inactive) and
+    older ones as retained images (archived). Compose projects keep active + archived
+    only — each archived version retains its per-service images and a file snapshot.
 
     \b
     Example:
@@ -1099,6 +1103,9 @@ def list_versions(project: str):
               help="Stream the rollback log until it completes (default: on).")
 def rollback(project: str, version: int, follow: bool):
     """Roll back PROJECT to an earlier VERSION (an inactive or archived one).
+
+    Compose projects: the current stack is downed, the version's file snapshot restored,
+    and its retained images brought back up (named-volume data is not rolled back).
 
     \b
     Example:

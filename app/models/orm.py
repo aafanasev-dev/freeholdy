@@ -69,19 +69,26 @@ class ComposeService(Base):
 
 
 class ProjectVersion(Base):
-    """One deployed version (image + container) of a dockerfile-mode project, for
-    blue/green deploys with archived backups. At any time a project has at most one
+    """One deployed version of a project, for blue/green deploys with archived backups.
+
+    Dockerfile mode: image + container per version. At any time a project has at most one
     `active` (running, nginx points at it), at most one `inactive` (previous version,
     container stopped but kept for fast rollback), and zero-or-more `archived` (image
-    kept, container removed, port freed) versions capped by Project.backup_limit."""
+    kept, container removed, port freed) versions capped by Project.backup_limit.
+
+    Compose mode: image_name/container_name/local_port stay NULL — per-service image tags
+    are deterministic (`freeholdy_{project}_{service}:v{N}`) and ports live on
+    ComposeService rows. Statuses are `active` | `archived` only (no stopped-container
+    "inactive" tier: `compose down` removes containers); each version also keeps a file
+    snapshot under `{DATA_DIR}/versions/{project}/v{N}/`."""
     __tablename__ = "project_versions"
 
     id = Column(Integer, primary_key=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     version = Column(Integer, nullable=False)          # the Project.version_counter value at deploy
-    image_name = Column(String, nullable=False)        # freeholdy_{name}:v{N}
-    container_name = Column(String, nullable=False)    # freeholdy_{name}_v{N}
-    local_port = Column(Integer, nullable=True)        # loopback port; NULL once archived (freed)
+    image_name = Column(String, nullable=True)         # freeholdy_{name}:v{N} (dockerfile; NULL for compose)
+    container_name = Column(String, nullable=True)     # freeholdy_{name}_v{N} (dockerfile; NULL for compose)
+    local_port = Column(Integer, nullable=True)        # loopback port; NULL once archived (freed) and for compose
     status = Column(String, nullable=False)            # active | inactive | archived
     created_at = Column(DateTime, default=datetime.utcnow)
 

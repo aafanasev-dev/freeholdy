@@ -94,14 +94,18 @@ def register_external_job(
     key: str,
     operation: str,
     command: list,
-    process: subprocess.Popen,
+    process: Optional[subprocess.Popen],
     log_path: str,
 ) -> DockerJob:
     """Register a process whose lifecycle is managed by the caller (e.g. an interactive
     install session, see interactive_service) so GET /status, log reads, and abort_job
     work on it like any spawned job. The caller writes the log file and must report the
     outcome via finish_external_job — no monitor thread is started here. Note that a
-    later _spawn under the same key replaces this job and unlinks its log file."""
+    later _spawn under the same key replaces this job and unlinks its log file.
+
+    `process` may be None for a multi-phase job (compose blue/green deploys) that hasn't
+    spawned its first subprocess yet — the runner points the job at each phase's process
+    via update_job_process so abort_job always terminates the right one."""
     job = DockerJob(
         operation=operation,
         command=command,
@@ -118,6 +122,15 @@ def register_external_job(
                 pass
         _jobs[key] = job
     return job
+
+
+def update_job_process(key: str, process: subprocess.Popen) -> None:
+    """Point an external job at its currently running subprocess phase, so abort_job
+    terminates the right process while a multi-phase job (compose deploy) advances."""
+    with _lock:
+        job = _jobs.get(key)
+        if job is not None:
+            job.process = process
 
 
 def finish_external_job(key: str, exit_code: Optional[int], aborted: bool = False) -> None:
@@ -162,7 +175,8 @@ def abort_job(key: str) -> tuple:
         return False, "No job found for this part"
     if job.status != "running":
         return False, f"Job is not running (current status: {job.status})"
-    job.process.terminate()
+    if job.process is not None:      # a multi-phase job may be between subprocesses
+        job.process.terminate()
     with _lock:
         job.status = "aborted"
     return True, f"Job '{job.operation}' aborted"

@@ -94,9 +94,12 @@ def provision_compose(
     # Persist the deploy mode (mirrors provision_dockerfile). A rollback below reverts this.
     project.deploy_mode = "compose"
 
-    # Re-provision: capture any custom domains keyed by service name so they survive,
-    # then drop existing service rows first so their ports are freed.
+    # Re-provision: capture custom domains AND auto subdomains keyed by service name so
+    # they survive (a plugin-assigned domain_prefix subdomain must not be renamed by a
+    # later re-upload or version rollback, which re-provision without the prefix), then
+    # drop existing service rows first so their ports are freed.
     prior_custom_domains = {s.name: s.custom_domain for s in project.services if s.custom_domain}
+    prior_subdomains = {s.name: s.subdomain for s in project.services if s.subdomain}
     for old in list(project.services):
         db.delete(old)
     db.flush()
@@ -127,7 +130,7 @@ def provision_compose(
             else:
                 subdomain = ".".join(s for s in [svc["name"], domain_prefix, settings.BASE_DOMAIN] if s)
         else:
-            subdomain = f"{svc['name']}.{project_name}.{settings.BASE_DOMAIN}"
+            subdomain = prior_subdomains.get(svc["name"]) or f"{svc['name']}.{project_name}.{settings.BASE_DOMAIN}"
         custom_domain = prior_custom_domains.get(svc["name"])
         effective = custom_domain or subdomain
         svc["local_port"] = port      # augment for write_files + response

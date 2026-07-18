@@ -225,14 +225,14 @@ class ProjectDeleteResponse(BaseModel):
     details: List[str]    # per-step log of what was done / skipped
 
 
-# ── Versions / blue-green backups (dockerfile mode) ─────────────────────────────
+# ── Versions / blue-green backups ───────────────────────────────────────────────
 
 class VersionInfo(BaseModel):
-    """One deployed version of a dockerfile project."""
+    """One deployed version of a project (dockerfile or compose)."""
     version: int
-    status: str                          # active | inactive | archived
-    image_name: str
-    container_name: str
+    status: str                          # active | inactive | archived (compose: never inactive)
+    image_name: Optional[str] = None     # None for compose (per-service tags are deterministic)
+    container_name: Optional[str] = None # None for compose
     local_port: Optional[int] = None     # None once archived (port freed)
     container_status: str = "not_found"  # running | exited | not_found | error
     created_at: datetime

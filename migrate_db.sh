@@ -12,6 +12,10 @@
 #      nullable and adds a compose_services.exposed column (all existing rows are exposed).
 #      Row backfill for previously-untracked unexposed services happens at app startup
 #      (needs YAML parsing) — see app/services/compose_service.backfill_unexposed_services.
+#   3. compose versioning — makes project_versions.image_name/container_name nullable
+#      (compose versions leave them NULL; per-service tags are deterministic). Backfill of
+#      existing compose projects as active v1 happens at app startup (needs docker + YAML) —
+#      see app/services/deploy_service.backfill_compose_versions.
 #
 # Usage:
 #   ./migrate_db.sh [path/to/freeholdy.db]
@@ -59,7 +63,14 @@ if [ -z "$has_compose_services" ] || [ -n "$has_exposed" ]; then
     compose_done=1
 fi
 
-if [ -n "$bluegreen_done" ] && [ -n "$compose_done" ]; then
+# project_versions.image_name NOT NULL marks a pre-compose-versioning table (compose
+# versions need it nullable). A missing table is created nullable by the bluegreen step.
+versions_notnull=""
+if [ -n "$has_versions" ]; then
+    versions_notnull="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('project_versions') WHERE name='image_name' AND \"notnull\"=1;")"
+fi
+
+if [ -n "$bluegreen_done" ] && [ -n "$compose_done" ] && [ -z "$versions_notnull" ]; then
     echo "Database '$DB' is already up to date — nothing to migrate."
     exit 0
 fi
@@ -85,8 +96,8 @@ if [ -z "$has_versions" ]; then
         id             INTEGER PRIMARY KEY,
         project_id     INTEGER NOT NULL REFERENCES projects(id),
         version        INTEGER NOT NULL,
-        image_name     VARCHAR NOT NULL,
-        container_name VARCHAR NOT NULL,
+        image_name     VARCHAR,
+        container_name VARCHAR,
         local_port     INTEGER,
         status         VARCHAR NOT NULL,
         created_at     DATETIME
@@ -138,6 +149,29 @@ if [ -z "$compose_done" ]; then
       FROM compose_services;
     DROP TABLE compose_services;
     ALTER TABLE compose_services_new RENAME TO compose_services;"
+fi
+
+# project_versions: drop the NOT NULL on image_name/container_name (compose versions leave
+# them NULL). SQLite can't ALTER these in place, so rebuild the table and copy rows.
+if [ -n "$versions_notnull" ]; then
+    echo "  + rebuilding project_versions (nullable image_name/container_name)"
+    SQL="$SQL
+    CREATE TABLE project_versions_new (
+        id             INTEGER PRIMARY KEY,
+        project_id     INTEGER NOT NULL REFERENCES projects(id),
+        version        INTEGER NOT NULL,
+        image_name     VARCHAR,
+        container_name VARCHAR,
+        local_port     INTEGER,
+        status         VARCHAR NOT NULL,
+        created_at     DATETIME
+    );
+    INSERT INTO project_versions_new
+        (id, project_id, version, image_name, container_name, local_port, status, created_at)
+    SELECT id, project_id, version, image_name, container_name, local_port, status, created_at
+      FROM project_versions;
+    DROP TABLE project_versions;
+    ALTER TABLE project_versions_new RENAME TO project_versions;"
 fi
 
 SQL="$SQL COMMIT;"

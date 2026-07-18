@@ -1,7 +1,7 @@
 """
-deploy_service.py — blue/green deploys with archived backups for dockerfile projects.
+deploy_service.py — blue/green deploys with archived backups (both deploy modes).
 
-Every dockerfile deploy builds a new version `freeholdy_{name}:v{N}` in a container
+Dockerfile mode: every deploy builds a new version `freeholdy_{name}:v{N}` in a container
 `freeholdy_{name}_v{N}` on its own loopback port, runs it, and only then switches nginx
 to it (zero downtime; a failed build never takes the running site down). The previous
 version is kept as a stopped `inactive` container for fast rollback; older ones are
@@ -13,15 +13,37 @@ stable base job key `freeholdy_{name}` via docker_service's external-job registr
 existing `WS /projects/{name}/deploy` (interactive_service.stream_job) shows the whole thing
 and abort_job() cancels the build. The base key is version-independent, so a reconnecting
 deploy socket always finds the job regardless of which vN is building.
+
+Compose mode: true side-by-side blue/green is impossible for a stack in general (stacks
+bind host ports themselves, some use host networking, named volumes are shared), so compose
+deploys are **build-first with a brief switch**: build + pull run while the old stack keeps
+serving (a failed build never takes the site down), each service's resolved image is
+retagged `freeholdy_{name}_{service}:v{N}` and pinned via a generated
+`docker-compose.images.yml`, then a short `down` + `up -d --no-build` switches over
+(seconds; images already local). A version keeps its pinned images plus a file snapshot of
+the whole project dir under `{DATA_DIR}/versions/{name}/v{N}/` (outside PROJECTS_DIR, which
+git redeploys wipe). Statuses are `active` | `archived` only — `down` removes containers,
+so there is no stopped-container "inactive" tier — and rollback restores the snapshot,
+re-provisions, and brings the pinned images back up. Named volumes are shared across
+versions: rollback restores code + images, not data. Compose jobs register under the
+existing key `compose:{name}` so all status/abort endpoints and deploy WebSockets work
+unchanged.
 """
 
+import json
 import os
+import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import threading
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
+import yaml
+from fastapi import HTTPException
+
+from app.config import settings
 from app.models.database import SessionLocal
 from app.models.orm import Project, ProjectVersion
 from app.services import docker_service, nginx_service, compose_service
@@ -212,7 +234,10 @@ def enforce_backup_limit(project_id: int) -> None:
     try:
         project = db.query(Project).filter(Project.id == project_id).first()
         if project is not None:
-            _prune_archived(db, project, lambda _msg: None)
+            if project.deploy_mode == "compose":
+                _compose_prune_archived(db, project, lambda _msg: None)
+            else:
+                _prune_archived(db, project, lambda _msg: None)
             db.commit()
     finally:
         db.close()
@@ -328,3 +353,475 @@ def rollback_to_version(project_id: int, version: int) -> str:
             db2.close()
 
     return _spawn(job_key, cmd, container_name, promote, cleanup=None)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Compose mode — build-first blue/green with archived backups
+# ════════════════════════════════════════════════════════════════════════════════
+
+PIN_FILE = "docker-compose.images.yml"
+
+
+def compose_job_key(name: str) -> str:
+    """The job key compose deploys/rollbacks register under — the same `compose:{name}`
+    the compose lifecycle endpoints and deploy WebSockets already use."""
+    return f"compose:{name}"
+
+
+def compose_version_tag(project: str, service: str, n: int) -> str:
+    """The retained per-service image tag for version N of a compose project. Project and
+    service names are DNS slugs (no `_`), so the `freeholdy_{project}_` prefix never
+    collides with another project's tags or with dockerfile-mode `freeholdy_{name}:vN`."""
+    return f"freeholdy_{project}_{service}:v{n}"
+
+
+def compose_versions_root(project: str) -> str:
+    return os.path.join(settings.DATA_DIR, "versions", project)
+
+
+def compose_snapshot_dir(project: str, n: int) -> str:
+    """Per-version file snapshot (compose file, override, pin file, .env, bind-mounted
+    assets). Lives outside PROJECTS_DIR because git redeploys wipe the project dir."""
+    return os.path.join(compose_versions_root(project), f"v{n}")
+
+
+def _compose_files_cmd(name: str, project_dir: str, *args: str, pins: bool = False) -> list:
+    """A `docker compose` invocation on the project's compose + override files, optionally
+    adding the generated image-pin override so `up` runs exactly the retained v{N} tags."""
+    cmd = [
+        "docker", "compose", "-p", name,
+        "-f", os.path.join(project_dir, "docker-compose.yml"),
+        "-f", os.path.join(project_dir, "docker-compose.override.yml"),
+    ]
+    if pins:
+        cmd += ["-f", os.path.join(project_dir, PIN_FILE)]
+    return cmd + list(args)
+
+
+def _new_log_file() -> str:
+    fd = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".log", prefix="freeholdy_deploy_", delete=False,
+    )
+    fd.close()
+    return fd.name
+
+
+def _append_log(path: str, msg: str) -> None:
+    try:
+        with open(path, "a") as f:
+            f.write(msg if msg.endswith("\n") else msg + "\n")
+    except OSError:
+        pass
+
+
+def _aborted(job_key: str) -> bool:
+    job = docker_service.get_job(job_key)
+    return job is not None and job.status == "aborted"
+
+
+def _run_phase(job_key: str, log_path: str, cmd: list) -> int:
+    """Run one subprocess phase of a multi-phase job, appending its output to the shared
+    job log and pointing the job at it so abort_job kills the right process."""
+    with open(log_path, "a") as log_fd:
+        proc = subprocess.Popen(cmd, stdout=log_fd, stderr=subprocess.STDOUT, text=True)
+        docker_service.update_job_process(job_key, proc)
+        return proc.wait()
+
+
+def _resolve_compose_services(name: str, project_dir: str) -> dict:
+    """Resolve the stack's services via `docker compose config`: service → {image, build}.
+
+    `image` is the tag the service will run after build/pull: the (env-substituted)
+    `image:` from the compose files, or compose v2's default `{project}-{service}` build
+    tag when only `build:` is given. Raises RuntimeError on a config failure."""
+    result = subprocess.run(
+        _compose_files_cmd(name, project_dir, "config", "--format", "json"),
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"docker compose config failed: {result.stderr.strip()}")
+    doc = json.loads(result.stdout)
+    services = {}
+    for svc, spec in (doc.get("services") or {}).items():
+        spec = spec or {}
+        services[str(svc)] = {
+            "image": spec.get("image") or f"{name}-{svc}",
+            "build": "build" in spec,
+        }
+    if not services:
+        raise RuntimeError("docker compose config returned no services")
+    return services
+
+
+def _write_pin_file(project_dir: str, name: str, n: int, service_names: Iterable[str]) -> None:
+    """Write docker-compose.images.yml pinning every service to its v{N} tag."""
+    pins = {svc: {"image": compose_version_tag(name, svc, n)} for svc in sorted(service_names)}
+    with open(os.path.join(project_dir, PIN_FILE), "w") as f:
+        f.write("# Generated by freeholdy — pins this deploy's images. Do not edit manually.\n")
+        yaml.safe_dump({"services": pins}, f, default_flow_style=False, sort_keys=False)
+
+
+def _compose_version_image_tags(name: str, version: Optional[int]) -> list:
+    """All retained `freeholdy_{name}_{service}:v{version}` tags currently on disk,
+    discovered from `docker images` (no stored per-service list is needed). With
+    version=None, matches every version's tags for the project."""
+    result = subprocess.run(
+        ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return []
+    suffix = r"v\d+" if version is None else f"v{int(version)}"
+    pattern = re.compile(
+        rf"^freeholdy_{re.escape(name)}_[a-z0-9][a-z0-9-]*:{suffix}$"
+    )
+    return [line.strip() for line in result.stdout.splitlines() if pattern.match(line.strip())]
+
+
+def remove_compose_version_artifacts(name: str, version: int) -> None:
+    """Remove one compose version's retained image tags + file snapshot (prune)."""
+    for tag in _compose_version_image_tags(name, version):
+        docker_service.remove_image(tag)
+    shutil.rmtree(compose_snapshot_dir(name, version), ignore_errors=True)
+
+
+def remove_all_compose_version_artifacts(name: str) -> int:
+    """Project teardown: remove every retained version tag (matched by prefix, so tags
+    survive even if DB rows and docker drifted apart) + the whole snapshots dir.
+    Returns the number of image tags removed."""
+    tags = _compose_version_image_tags(name, None)
+    for tag in tags:
+        docker_service.remove_image(tag)
+    shutil.rmtree(compose_versions_root(name), ignore_errors=True)
+    return len(tags)
+
+
+def _compose_prune_archived(db, project: Project, log: Callable[[str], None]) -> None:
+    archived = sorted(
+        [v for v in project.versions if v.status == "archived"], key=lambda v: v.version
+    )
+    excess = len(archived) - project.backup_limit
+    for v in archived[: max(0, excess)]:
+        log(f"── pruning archived v{v.version} (limit {project.backup_limit}) ──")
+        remove_compose_version_artifacts(project.name, v.version)
+        db.delete(v)
+
+
+def _compose_verify(project: Project, log: Callable[[str], None]) -> bool:
+    """Post-`up` sanity check: every exposed service's container must be running; an
+    unexposed one must at least exist (one-shot helpers may exit by design)."""
+    ok = True
+    for s in project.services:
+        status = docker_service.get_container_status(s.container_name)
+        if (s.exposed and status != "running") or (not s.exposed and status == "not_found"):
+            log(f"── service '{s.name}' ({s.container_name}) is {status} ──")
+            ok = False
+    return ok
+
+
+def _compose_promote(db, project: Project, n: int, project_dir: str,
+                     log: Callable[[str], None]) -> None:
+    """Version bookkeeping after a successful switch: snapshot the project dir, record
+    v{n} active, archive the previous active, prune beyond backup_limit. Commits."""
+    snap = compose_snapshot_dir(project.name, n)
+    shutil.rmtree(snap, ignore_errors=True)
+    os.makedirs(os.path.dirname(snap), exist_ok=True)
+    shutil.copytree(project_dir, snap, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+    log(f"── snapshot saved to {snap} ──")
+
+    db.add(ProjectVersion(project_id=project.id, version=n, status="active"))
+    project.version_counter = max(project.version_counter, n)
+    db.flush()
+    for v in list(project.versions):
+        if v.version != n and v.status in ("active", "inactive"):
+            log(f"── archiving v{v.version} (images + snapshot kept) ──")
+            v.status = "archived"
+            v.local_port = None
+    _compose_prune_archived(db, project, log)
+    db.commit()
+
+
+def _compose_recover_previous(name: str, prev_version: int,
+                              job_key: str, log_path: str,
+                              log: Callable[[str], None]) -> None:
+    """Best-effort keep-alive after a failed switchover `up`: bring the previous version
+    back up straight from its snapshot dir (its own compose/override/pin files, so bind
+    mounts resolve to the snapshot's copies of the old files)."""
+    snap = compose_snapshot_dir(name, prev_version)
+    if not os.path.isdir(snap):
+        log(f"── no snapshot for v{prev_version} — cannot recover automatically ──")
+        return
+    log(f"── recovering previous v{prev_version} from {snap} ──")
+    code = _run_phase(job_key, log_path, _compose_files_cmd(name, snap, "up", "-d", "--no-build", pins=True))
+    log(f"── recovery {'succeeded — v%d is serving again' % prev_version if code == 0 else 'FAILED — stack is down'} ──")
+
+
+def compose_bluegreen_deploy(project_id: int) -> str:
+    """Deploy the next version of a compose project: build + pull while the old stack keeps
+    serving (a failed build never takes the site down), retag each service's image as
+    `freeholdy_{name}_{svc}:v{N}`, then a brief `down` + `up -d --no-build` switchover on
+    the pinned images. Registers under the existing `compose:{name}` job key; stream over
+    `WS /projects/{name}/deploy`. nginx needs no switch — ports were fixed at provision."""
+    db = SessionLocal()
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        name = project.name
+        n = project.version_counter + 1
+        prev = next((v for v in project.versions if v.status == "active"), None)
+        prev_version = prev.version if prev else None
+    finally:
+        db.close()
+
+    project_dir = os.path.abspath(compose_service.project_dir(name))
+    job_key = compose_job_key(name)
+    log_path = _new_log_file()
+    docker_service.register_external_job(
+        job_key, "deploy", ["compose-bluegreen-deploy", name], None, log_path,
+    )
+    threading.Thread(
+        target=_compose_deploy_job,
+        args=(project_id, name, n, prev_version, project_dir, job_key, log_path),
+        daemon=True,
+    ).start()
+    return job_key
+
+
+def _compose_deploy_job(project_id: int, name: str, n: int, prev_version: Optional[int],
+                        project_dir: str, job_key: str, log_path: str) -> None:
+    def log(msg: str) -> None:
+        _append_log(log_path, msg)
+
+    green_tags: list = []
+
+    def fail(exit_code: int, msg: str, cleanup_tags: bool = True) -> None:
+        log(msg)
+        if cleanup_tags:
+            for tag in green_tags:
+                docker_service.remove_image(tag)
+        docker_service.finish_external_job(job_key, exit_code, aborted=_aborted(job_key))
+
+    try:
+        # 1. Resolve the stack's services + target images (env-substituted).
+        log(f"── resolving services for v{n} ──")
+        services = _resolve_compose_services(name, project_dir)
+
+        # 2. Build — the old stack keeps serving through the long part.
+        log("── docker compose build ──")
+        code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "build", "--progress=plain"))
+        if _aborted(job_key) or code != 0:
+            fail(code or 1, f"── build failed (exit {code}) — current version kept ──")
+            return
+
+        # 3. Pull registry images for services without a build context.
+        pull_images = sorted({s["image"] for s in services.values() if not s["build"]})
+        if pull_images:
+            log("── docker pull ──")
+            script = "\n".join(["set -e"] + [f"docker pull {shlex.quote(img)}" for img in pull_images])
+            code = _run_phase(job_key, log_path, ["bash", "-c", script])
+            if _aborted(job_key) or code != 0:
+                fail(code or 1, f"── pull failed (exit {code}) — current version kept ──")
+                return
+
+        # 4. Retag every service's image as v{n} and write the pin override.
+        log(f"── tagging images as v{n} ──")
+        for svc, spec in services.items():
+            tag = compose_version_tag(name, svc, n)
+            result = subprocess.run(["docker", "tag", spec["image"], tag], capture_output=True, text=True)
+            if result.returncode != 0:
+                fail(1, f"── tagging {spec['image']} → {tag} failed: {result.stderr.strip()} — current version kept ──")
+                return
+            green_tags.append(tag)
+        _write_pin_file(project_dir, name, n, services.keys())
+        if _aborted(job_key):
+            fail(1, "── aborted — current version kept ──")
+            return
+
+        # 5. Brief switchover: down the old stack, up the pinned new one.
+        log("── switching: docker compose down ──")
+        code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "down"))
+        if _aborted(job_key) or code != 0:
+            fail(code or 1, f"── down failed (exit {code}) ──")
+            return
+        log(f"── switching: docker compose up (v{n}) ──")
+        code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "up", "-d", "--no-build", pins=True))
+        if _aborted(job_key) or code != 0:
+            log(f"── up failed (exit {code}) ──")
+            if prev_version is not None:
+                _compose_recover_previous(name, prev_version, job_key, log_path, log)
+            fail(code or 1, "── deploy failed ──")
+            return
+
+        # 6. Verify + promote (snapshot, version rows, prune).
+        db = SessionLocal()
+        try:
+            project = db.query(Project).filter(Project.id == project_id).first()
+            healthy = _compose_verify(project, log)
+            _compose_promote(db, project, n, project_dir, log)
+        finally:
+            db.close()
+        if not healthy:
+            log(f"── v{n} deployed but some services are not running — "
+                f"roll back with: fhcli rollback {name} {prev_version if prev_version is not None else '<version>'} ──")
+            docker_service.finish_external_job(job_key, 1)
+            return
+        log(f"── v{n} is now active ──")
+        docker_service.finish_external_job(job_key, 0)
+    except Exception as e:  # never leave the job stuck "running"
+        fail(1, f"── deploy error: {e} ──")
+
+
+def compose_rollback_to_version(project_id: int, version: int) -> str:
+    """Make an archived compose version active again: `down` the current stack, restore the
+    version's file snapshot into the project dir, re-provision (service rows, ports,
+    override, nginx/SSL — subdomains and custom domains are preserved), then `up` on the
+    retained v{N} image tags. Streams over the same `WS /projects/{name}/deploy`.
+    Does NOT bump version_counter (mirrors the dockerfile rollback)."""
+    db = SessionLocal()
+    try:
+        name = db.query(Project).filter(Project.id == project_id).first().name
+    finally:
+        db.close()
+
+    project_dir = os.path.abspath(compose_service.project_dir(name))
+    job_key = compose_job_key(name)
+    log_path = _new_log_file()
+    docker_service.register_external_job(
+        job_key, "rollback", ["compose-rollback", name, f"v{version}"], None, log_path,
+    )
+    threading.Thread(
+        target=_compose_rollback_job,
+        args=(project_id, name, version, project_dir, job_key, log_path),
+        daemon=True,
+    ).start()
+    return job_key
+
+
+def _compose_rollback_job(project_id: int, name: str, version: int,
+                          project_dir: str, job_key: str, log_path: str) -> None:
+    from app.routers.compose import provision_compose  # lazy: router imports services
+
+    def log(msg: str) -> None:
+        _append_log(log_path, msg)
+
+    def fail(exit_code: int, msg: str) -> None:
+        log(msg)
+        docker_service.finish_external_job(job_key, exit_code, aborted=_aborted(job_key))
+
+    try:
+        snap = compose_snapshot_dir(name, version)
+
+        # 1. Down the current stack (with the current files, while they're still on disk).
+        if os.path.exists(compose_service.override_file_path(name)):
+            log("── docker compose down (current version) ──")
+            code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "down"))
+            if _aborted(job_key) or code != 0:
+                fail(code or 1, f"── down failed (exit {code}) — rollback stopped ──")
+                return
+
+        # 2. Restore the snapshot into the project dir.
+        log(f"── restoring v{version} snapshot ──")
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.copytree(snap, project_dir, symlinks=True)
+
+        # 3. Re-provision: rebuild service rows/ports/override + nginx/SSL from the restored
+        #    compose file (handles a service set that differed in v{version}).
+        log("── re-provisioning services + nginx ──")
+        db = SessionLocal()
+        try:
+            project = db.query(Project).filter(Project.id == project_id).first()
+            with open(compose_service.compose_file_path(name)) as f:
+                compose_text = f.read()
+            provision_compose(db, project, compose_text)
+        except HTTPException as e:
+            fail(1, f"── re-provision failed: {e.detail} ──")
+            return
+        finally:
+            db.close()
+
+        # 4. Up on the retained v{version} tags (the snapshot carries its own pin file).
+        log(f"── docker compose up (v{version}) ──")
+        code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "up", "-d", "--no-build", pins=True))
+        if _aborted(job_key) or code != 0:
+            fail(code or 1, f"── up failed (exit {code}) ──")
+            return
+
+        # 5. Promote: target active, old active archived, prune.
+        db = SessionLocal()
+        try:
+            project = db.query(Project).filter(Project.id == project_id).first()
+            healthy = _compose_verify(project, log)
+            target = next(v for v in project.versions if v.version == version)
+            target.status = "active"
+            db.flush()
+            for v in list(project.versions):
+                if v.version != version and v.status in ("active", "inactive"):
+                    log(f"── archiving v{v.version} ──")
+                    v.status = "archived"
+                    v.local_port = None
+            _compose_prune_archived(db, project, log)
+            db.commit()
+        finally:
+            db.close()
+        log(f"── rolled back to v{version} ──")
+        docker_service.finish_external_job(job_key, 0 if healthy else 1)
+    except Exception as e:  # never leave the job stuck "running"
+        fail(1, f"── rollback error: {e} ──")
+
+
+def backfill_compose_versions() -> int:
+    """Give pre-versioning compose projects an immediate rollback point: for each compose
+    project with no versions yet whose containers exist, retag each service's current image
+    as v1, write the pin file, snapshot the project dir, and record an active v1 row.
+    Idempotent + best-effort (skips projects whose containers or files are missing); runs
+    once at startup (mirrors migrate_db.sh's dockerfile v1 backfill, which pure SQL can't
+    do for compose — this needs docker + the filesystem). Returns projects backfilled."""
+    backfilled = 0
+    db = SessionLocal()
+    try:
+        projects = (
+            db.query(Project)
+            .filter(Project.deploy_mode == "compose", Project.version_counter == 0)
+            .all()
+        )
+        for project in projects:
+            try:
+                if project.versions or not project.services:
+                    continue
+                name = project.name
+                project_dir = os.path.abspath(compose_service.project_dir(name))
+                if not os.path.exists(compose_service.compose_file_path(name)):
+                    continue
+                # Every service's container must exist so its image can be pinned.
+                images = {}
+                for s in project.services:
+                    result = subprocess.run(
+                        ["docker", "inspect", "--format", "{{.Image}}", s.container_name],
+                        capture_output=True, text=True,
+                    )
+                    if result.returncode != 0:
+                        images = None
+                        break
+                    images[s.name] = result.stdout.strip()
+                if not images:
+                    continue
+                for svc, image_id in images.items():
+                    result = subprocess.run(
+                        ["docker", "tag", image_id, compose_version_tag(name, svc, 1)],
+                        capture_output=True, text=True,
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(result.stderr.strip())
+                _write_pin_file(project_dir, name, 1, images.keys())
+                snap = compose_snapshot_dir(name, 1)
+                shutil.rmtree(snap, ignore_errors=True)
+                os.makedirs(os.path.dirname(snap), exist_ok=True)
+                shutil.copytree(project_dir, snap, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+                db.add(ProjectVersion(project_id=project.id, version=1, status="active"))
+                project.version_counter = 1
+                db.commit()
+                backfilled += 1
+            except Exception:
+                db.rollback()  # best-effort: a broken project must not block startup
+    finally:
+        db.close()
+    return backfilled

@@ -840,10 +840,11 @@ const DomainModal = ({ token, project, service = null, info, onClose, onDone }) 
 };
 
 // ── Versions modal (blue/green backups) ─────────────────────────────────────────
-// Lists a dockerfile project's deployed versions (active / inactive / archived), lets the
-// user set the backup limit (how many archived versions to keep), and roll back to an
-// earlier one. A rollback streams over WS /projects/{name}/deploy via the shared InstallPane
-// (handed up through onStream), exactly like a deploy.
+// Lists a project's deployed versions (dockerfile: active / inactive / archived; compose:
+// active / archived — a compose switchover downs the previous stack), lets the user set the
+// backup limit (how many archived versions to keep), and roll back to an earlier one. A
+// rollback streams over WS /projects/{name}/deploy via the shared InstallPane (handed up
+// through onStream), exactly like a deploy.
 const VC = { active: C.green, inactive: C.amber, archived: C.muted };
 const VI = { active: "▶", inactive: "■", archived: "○" };
 const VersionBadge = ({ status }) => (
@@ -1054,6 +1055,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState({});
   const [uploadModal, setUploadModal] = useState(false);
+  const [versionsModal, setVersionsModal] = useState(false);
   const isCompose = project.deploy_mode === "compose";
   const isPending = project.deploy_mode !== "compose" && project.deploy_mode !== "dockerfile";
   const isPlugin = project.type === "plugin";
@@ -1112,6 +1114,9 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
           <div style={{ display: "flex", gap: "6px" }}>
             <Btn sm v="primary" onClick={() => setUploadModal(true)} title="Upload files or a folder — auto-detects Dockerfile / docker-compose.yml, provisions, and deploys">{isPending ? "upload" : "deploy"}</Btn>
             {isCompose && (
+              <Btn sm v="primary" onClick={() => setVersionsModal(true)} title="View versions, roll back, set backup limit">versions</Btn>
+            )}
+            {isCompose && (
               <Btn sm v="danger" onClick={() => composeAct("down")} busy={busy.down} title="docker compose down">down</Btn>
             )}
             <Btn v="danger" sm onClick={() => setConfirm(true)} busy={removing}>remove</Btn>
@@ -1147,6 +1152,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
       </div>
 
       {uploadModal && <UploadModal token={token} project={project.name} onClose={() => setUploadModal(false)} onUploaded={() => onRefresh && onRefresh()} onDeploy={onDeploy} />}
+      {versionsModal && <VersionsModal token={token} project={project.name} onClose={() => setVersionsModal(false)} onStream={onStream} onRefresh={onRefresh} />}
       {confirm && <ConfirmModal message={`Delete "${project.name}"? This stops containers, removes images and nginx config.`} onConfirm={remove} onCancel={() => setConfirm(false)} loading={removing} />}
     </>
   );

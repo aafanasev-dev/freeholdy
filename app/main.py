@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.models.database import init_db, SessionLocal
-from app.services import compose_service
+from app.services import compose_service, deploy_service
 from app.routers import projects, container, plugins, compose, git, versions
 
 
@@ -24,6 +24,13 @@ async def lifespan(app: FastAPI):
             )
     finally:
         db.close()
+    # Backfill compose projects that predate compose versioning as active v1 (retag their
+    # running images + snapshot their files) so they get an immediate rollback point.
+    backfilled = deploy_service.backfill_compose_versions()
+    if backfilled:
+        logging.getLogger("uvicorn").info(
+            "Backfilled %d compose project(s) as active v1", backfilled
+        )
     if settings.DEBUG:
         logging.getLogger("uvicorn").warning(
             "DEBUG mode: bearer-token auth is DISABLED — do not run like this in production"
