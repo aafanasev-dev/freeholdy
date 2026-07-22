@@ -4,44 +4,48 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>freeholdy — user guide</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* Grafana-style dark palette — matches the freeholdy web UI (C palette in webui/src/App.jsx). */
     :root {
-      --bg: #0f172a;
-      --panel: #1e293b;
-      --border: #334155;
-      --text: #f1f5f9;
-      --muted: #94a3b8;
-      --faint: #64748b;
-      --accent: #38bdf8;
+      --bg: #111217;
+      --panel: #181b1f;
+      --border: #2c3235;
+      --text: #ccccdc;
+      --muted: #8e8e98;
+      --faint: #5b5e63;
+      --accent: #F55F3E;
       --header-h: 3.25rem;
       --sidebar-w: 232px;
     }
     html { scroll-behavior: smooth; scroll-padding-top: calc(var(--header-h) + 1rem); }
     body {
       background: var(--bg);
-      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
       color: var(--text);
       line-height: 1.6;
     }
     code {
-      font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+      font-family: 'Roboto Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
       font-size: 0.9em;
-      color: #cbd5e1;
+      color: #d8d9da;
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: 5px;
       padding: 1px 6px;
     }
     pre {
-      background: #0b1120;
+      background: #0d0e12;
       border: 1px solid var(--border);
-      border-radius: 0.6rem;
+      border-radius: 0.5rem;
       padding: 0.8rem 1rem;
       margin: 0.8rem 0;
       overflow-x: auto;
     }
-    pre code { background: none; border: none; padding: 0; color: #e2e8f0; font-size: 0.85rem; }
+    pre code { background: none; border: none; padding: 0; color: #ccccdc; font-size: 0.85rem; }
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
 
@@ -50,7 +54,7 @@
       position: fixed;
       top: 0; left: 0; right: 0;
       height: var(--header-h);
-      background: rgba(15, 23, 42, 0.92);
+      background: rgba(17, 18, 23, 0.92);
       backdrop-filter: blur(6px);
       border-bottom: 1px solid var(--border);
       display: flex;
@@ -63,10 +67,7 @@
       font-size: 1.25rem;
       font-weight: 700;
       letter-spacing: -0.5px;
-      background: linear-gradient(90deg, #818cf8, #38bdf8);
-      -webkit-background-clip: text;
-      background-clip: text;
-      color: transparent;
+      color: var(--accent);
     }
     .header-sub { color: var(--faint); font-size: 0.85rem; padding-top: 2px; }
     #nav-toggle {
@@ -120,13 +121,13 @@
     p, ul, ol { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.7rem; }
     ul, ol { padding-left: 1.3rem; }
     li { margin-bottom: 0.3rem; }
-    strong { color: #cbd5e1; }
+    strong { color: #d8d9da; }
     .lead { font-size: 1.02rem; }
 
     .card {
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 0.9rem;
+      border-radius: 0.5rem;
       padding: 1.1rem 1.25rem;
       margin: 0.9rem 0;
     }
@@ -179,7 +180,7 @@
 </head>
 <body>
   <header>
-    <span class="wordmark">freeholdy</span>
+    <span class="wordmark">🐾 freeholdy</span>
     <span class="header-sub">user guide</span>
     <button id="nav-toggle" aria-label="Toggle navigation">☰</button>
   </header>

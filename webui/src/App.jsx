@@ -74,26 +74,37 @@ const mkApi = (token) => {
 };
 
 // ── Theme ─────────────────────────────────────────────────────────────────────
-// Light, calm palette inspired by hostinger.com: lavender-white surfaces, a
-// royal-purple primary accent, dark-navy text, soft borders and gentle shadows.
+// Grafana-style dark palette: near-black chrome, flat bordered panels, a
+// Grafana-orange primary accent (C.brand), and translucent tint tokens so button
+// variants / chips / badges read correctly on the dark surfaces. Green/amber/red
+// stay reserved for status semantics; blue for links/info.
 const C = {
-  bg:     "#f4f4fb",   // app background — light lavender
-  s1:     "#ffffff",   // primary card surface
-  s2:     "#faf9ff",   // header / secondary surface
-  s3:     "#f1f0fa",   // tertiary surface (default buttons, fills)
-  bd:     "#ececf4",   // subtle border
-  bdB:    "#dedaee",   // stronger border
-  purple: "#673de6",   // brand / primary accent
-  green:  "#149a6a",   // success / running
-  amber:  "#c77f1a",   // warning / exited
-  red:    "#dc4549",   // error / danger
-  blue:   "#2f6bff",   // info / links
-  txt:    "#1b1a3a",   // primary text (dark meteorite)
-  muted:  "#6c6a86",   // secondary text
-  dim:    "#a6a3c0",   // tertiary text / placeholders
-  shadow: "0 1px 2px rgba(27,26,58,.05), 0 6px 20px rgba(27,26,58,.05)",
-  ff:     "'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-  mono:   "'JetBrains Mono', 'Fira Code', monospace",
+  bg:     "#111217",   // app background
+  s1:     "#181b1f",   // primary panel / card surface
+  s2:     "#1f2329",   // nav rail / header / secondary surface
+  s3:     "#22252b",   // tertiary surface (default buttons, fills, code bg)
+  bd:     "#2c3235",   // subtle border
+  bdB:    "#3d444b",   // stronger border
+  brand:  "#F55F3E",   // Grafana orange — brand / primary accent
+  brandH: "#ff780a",   // brighter orange (hover)
+  green:  "#6ccf8e",   // success / running
+  amber:  "#ff9830",   // warning / exited
+  red:    "#e5564f",   // error / danger
+  blue:   "#6e9fff",   // info / links
+  txt:    "#ccccdc",   // primary text
+  muted:  "#8e8e98",   // secondary text
+  dim:    "#5b5e63",   // tertiary text / placeholders
+  shadow: "0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.35)",
+  ff:     "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+  mono:   "'Roboto Mono', 'JetBrains Mono', monospace",
+  // Translucent tint tokens (fill + border) for variant buttons, chips, badges.
+  purple: "#a970ff",   // versions button accent (distinct from the orange brand)
+  brandFill: "rgba(245,95,62,.14)",   brandBd: "rgba(245,95,62,.42)",
+  purpleFill:"rgba(169,112,255,.15)", purpleBd:"rgba(169,112,255,.42)",
+  blueFill:  "rgba(110,159,255,.14)", blueBd:  "rgba(110,159,255,.42)",
+  greenFill: "rgba(108,207,142,.14)", greenBd: "rgba(108,207,142,.40)",
+  amberFill: "rgba(255,152,48,.14)",  amberBd:  "rgba(255,152,48,.40)",
+  redFill:   "rgba(229,86,79,.16)",   redBd:    "rgba(229,86,79,.42)",
 };
 
 const SC = {
@@ -112,13 +123,14 @@ const SI = {
 // ── Tiny shared components ────────────────────────────────────────────────────
 const Btn = ({ children, onClick, v = "default", sm, disabled, busy, title, style: st = {} }) => {
   const vs = {
-    default: { bg: C.s3,           color: C.txt,    bd: C.bdB },
-    primary: { bg: "#f0ecfe",      color: C.purple, bd: "#dccffb" },
-    danger:  { bg: "#fdecec",      color: C.red,    bd: "#f6d2d3" },
-    amber:   { bg: "#fbf2e0",      color: C.amber,  bd: "#f0e1bc" },
-    ghost:   { bg: "transparent",  color: C.muted,  bd: "transparent" },
-    blue:    { bg: "#e9f0ff",      color: C.blue,   bd: "#cfddff" },
-    green:   { bg: C.green,        color: "#ffffff", bd: C.green },
+    default: { bg: C.s3,           color: C.txt,     bd: C.bdB },
+    primary: { bg: C.brandFill,    color: C.brand,   bd: C.brandBd },
+    danger:  { bg: C.redFill,      color: C.red,     bd: C.redBd },
+    amber:   { bg: C.amberFill,    color: C.amber,   bd: C.amberBd },
+    ghost:   { bg: "transparent",  color: C.muted,   bd: "transparent" },
+    blue:    { bg: C.blueFill,     color: C.blue,    bd: C.blueBd },
+    purple:  { bg: C.purpleFill,   color: C.purple,  bd: C.purpleBd },
+    green:   { bg: C.green,        color: "#0b0c0e", bd: C.green },
   };
   const vv = vs[v] || vs.default;
   return (
@@ -162,13 +174,13 @@ const TextIn = ({ value, onChange, placeholder, type = "text", style: st = {} })
 );
 
 const Err = ({ msg }) => msg ? (
-  <div style={{ color: C.red, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: "#fdecec", border: `1px solid #f6d2d3`, borderRadius: "8px" }}>
+  <div style={{ color: C.red, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: C.redFill, border: `1px solid ${C.redBd}`, borderRadius: "8px" }}>
     ✗ {msg}
   </div>
 ) : null;
 
 const Ok = ({ msg }) => msg ? (
-  <div style={{ color: C.green, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: "#e6f6ef", border: `1px solid #c6e9d9`, borderRadius: "8px" }}>
+  <div style={{ color: C.green, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: C.greenFill, border: `1px solid ${C.greenBd}`, borderRadius: "8px" }}>
     ✓ {msg}
   </div>
 ) : null;
@@ -220,7 +232,7 @@ const Markdown = ({ text }) => {
     <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", lineHeight: "1.7" }}>
       {blocks.map((b, k) => {
         if (b.type === "h") return (
-          <div key={k} style={{ color: b.level === 1 ? C.txt : C.purple, fontWeight: b.level === 1 ? 700 : 600, fontSize: hSize[b.level] || "12px", letterSpacing: b.level >= 3 ? "0.06em" : 0, textTransform: b.level >= 3 ? "uppercase" : "none", margin: k === 0 ? "0 0 10px" : "18px 0 8px" }}>{mdInline(b.text, `h${k}`)}</div>
+          <div key={k} style={{ color: b.level === 1 ? C.txt : C.brand, fontWeight: b.level === 1 ? 700 : 600, fontSize: hSize[b.level] || "12px", letterSpacing: b.level >= 3 ? "0.06em" : 0, textTransform: b.level >= 3 ? "uppercase" : "none", margin: k === 0 ? "0 0 10px" : "18px 0 8px" }}>{mdInline(b.text, `h${k}`)}</div>
         );
         if (b.type === "ul") return (
           <ul key={k} style={{ margin: "0 0 12px", paddingLeft: "18px" }}>
@@ -362,8 +374,8 @@ const InstallPane = ({ token, wsPath, project, interactive, onExit, onClose }) =
 
 // ── Modal wrapper ─────────────────────────────────────────────────────────────
 const Modal = ({ onClose, width = 460, children }) => (
-  <div style={{ position: "fixed", inset: 0, background: "rgba(27,26,58,.38)", backdropFilter: "blur(2px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 }} onClick={onClose}>
-    <div style={{ background: C.s1, border: `1px solid ${C.bdB}`, borderRadius: "8px", padding: "22px", width, maxWidth: "95vw", boxShadow: "0 24px 64px rgba(27,26,58,.18)" }} onClick={e => e.stopPropagation()}>
+  <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", backdropFilter: "blur(2px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 }} onClick={onClose}>
+    <div style={{ background: C.s1, border: `1px solid ${C.bdB}`, borderRadius: "8px", padding: "22px", width, maxWidth: "95vw", boxShadow: "0 24px 64px rgba(0,0,0,.6)" }} onClick={e => e.stopPropagation()}>
       {children}
     </div>
   </div>
@@ -443,7 +455,7 @@ const ExecTerminal = ({ token, project, service, label, onClose }) => {
   useEffect(() => {
     const term = new Terminal({
       fontFamily: C.mono, fontSize: 12, cursorBlink: true, convertEol: false,
-      theme: { background: "#1b1a3a", foreground: "#e8e7f3", cursor: "#b9aef3" },
+      theme: { background: "#0d0e12", foreground: "#ccccdc", cursor: "#F55F3E" },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -497,7 +509,7 @@ const ExecTerminal = ({ token, project, service, label, onClose }) => {
         <span style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px" }}>{label || project}</span>
         <Tag status={status} />
       </div>
-      <div ref={mountRef} style={{ height: "420px", background: "#1b1a3a", borderRadius: "8px", padding: "8px 10px", overflow: "hidden" }} />
+      <div ref={mountRef} style={{ height: "420px", background: "#0d0e12", borderRadius: "8px", padding: "8px 10px", overflow: "hidden" }} />
     </Modal>
   );
 };
@@ -521,7 +533,7 @@ const InstallPluginModal = ({ token, plugin, onClose, onInstalled }) => {
 
   return (
     <Modal onClose={onClose}>
-      <ModalHeader title="INSTALL PLUGIN" color={C.purple} onClose={onClose} />
+      <ModalHeader title="INSTALL PLUGIN" color={C.brand} onClose={onClose} />
       <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "14px" }}>
         {plugin.name} · {plugin.deploy_mode === "compose" ? "compose" : `port ${plugin.container_port}`}
       </div>
@@ -643,14 +655,14 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
   const tab = (m, label) => (
     <button onClick={() => { setMode(m); setError(""); setResult(null); }} style={{
       flex: 1, padding: "8px", cursor: "pointer", fontFamily: C.ff, fontSize: "11px", fontWeight: 600,
-      background: mode === m ? "#f0ecfe" : C.s3, color: mode === m ? C.purple : C.muted,
-      border: `1px solid ${mode === m ? "#dccffb" : C.bd}`, borderRadius: "8px",
+      background: mode === m ? C.brandFill : C.s3, color: mode === m ? C.brand : C.muted,
+      border: `1px solid ${mode === m ? C.brandBd : C.bd}`, borderRadius: "8px",
     }}>{label}</button>
   );
 
   return (
     <Modal onClose={onClose} width={540}>
-      <ModalHeader title="DEPLOY" color={C.purple} onClose={onClose} />
+      <ModalHeader title="DEPLOY" color={C.brand} onClose={onClose} />
       <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "14px", lineHeight: "1.6" }}>
         {project} · a <span style={{ color: C.txt }}>Dockerfile</span> or <span style={{ color: C.txt }}>docker-compose.yml</span> in the
         deployed root sets the deploy mode and provisions automatically (compose wins).
@@ -894,7 +906,7 @@ const VersionsModal = ({ token, project, onClose, onStream, onRefresh }) => {
 
   return (
     <Modal onClose={onClose} width={660}>
-      <ModalHeader title={`VERSIONS — ${project}`} color={C.purple} onClose={onClose} />
+      <ModalHeader title={`VERSIONS — ${project}`} color={C.brand} onClose={onClose} />
 
       {/* Backup limit control + counts */}
       <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "12px", marginBottom: "14px", flexWrap: "wrap" }}>
@@ -930,7 +942,7 @@ const VersionsModal = ({ token, project, onClose, onStream, onRefresh }) => {
             <tbody>
               {data.versions.map(v => (
                 <tr key={v.version} style={{ borderBottom: `1px solid ${C.bd}` }}>
-                  <td style={{ ...td, textAlign: "right", color: C.purple, fontWeight: 600 }}>v{v.version}</td>
+                  <td style={{ ...td, textAlign: "right", color: C.brand, fontWeight: 600 }}>v{v.version}</td>
                   <td style={td}><VersionBadge status={v.status} /></td>
                   <td style={{ ...td, textAlign: "right" }}>{v.local_port ?? "—"}</td>
                   <td style={td}><Tag status={v.container_status} /></td>
@@ -963,10 +975,10 @@ const Cells = ({ label, info }) => (
         ? <a href={`https://${info.subdomain}`} target="_blank" rel="noreferrer" style={{ color: C.muted, textDecoration: "none" }}>{info.subdomain}</a>
         : <span style={{ color: C.dim }}>—</span>}
       {info.custom_domain && (
-        <span style={{ color: C.blue, background: "#e9f0ff", border: "1px solid #cfddff", fontSize: "8px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "8px", marginLeft: "7px" }}>custom</span>
+        <span style={{ color: C.blue, background: C.blueFill, border: `1px solid ${C.blueBd}`, fontSize: "8px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "8px", marginLeft: "7px" }}>custom</span>
       )}
       {info.exposed === false && (
-        <span style={{ color: C.dim, background: "#f0f0f2", border: "1px solid #dcdce0", fontSize: "8px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "8px", marginLeft: "7px" }} title="No published TCP port — runs outside nginx (host networking, UDP-only, or internal-only)">unproxied</span>
+        <span style={{ color: C.dim, background: C.s3, border: `1px solid ${C.bd}`, fontSize: "8px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "8px", marginLeft: "7px" }} title="No published TCP port — runs outside nginx (host networking, UDP-only, or internal-only)">unproxied</span>
       )}
     </td>
     <td style={{ padding: "7px 10px", fontFamily: C.ff, fontSize: "11px", color: C.txt, textAlign: "right", minWidth: "55px" }}>{info.local_port ?? "—"}</td>
@@ -1012,7 +1024,7 @@ const ContainerRow = ({ project, info, token, onOperation, onRefresh, onStream }
             <Btn sm v="amber" onClick={() => setModal({ type: "exec" })} disabled={!isRunning} title="Exec command in container">exec</Btn>
             <Btn sm onClick={() => act("ssl")} busy={busy.ssl} title="Issue/renew SSL cert">ssl</Btn>
             <Btn sm v="blue" onClick={() => setModal({ type: "domain" })} title="Set or clear a custom domain">domain</Btn>
-            <Btn sm v="primary" onClick={() => setModal({ type: "versions" })} title="View versions, roll back, set backup limit">versions</Btn>
+            <Btn sm v="purple" onClick={() => setModal({ type: "versions" })} title="View versions, roll back, set backup limit">versions</Btn>
             <Btn sm v="ghost" onClick={() => act("status")} busy={busy.status} title="View job status & logs">status</Btn>
           </div>
         </td>
@@ -1094,12 +1106,12 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
       <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", marginBottom: "10px", overflow: "hidden", boxShadow: C.shadow }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: C.s2, borderBottom: `1px solid ${C.bd}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <span style={{ color: C.purple, fontFamily: C.ff, fontSize: "14px", fontWeight: 600 }}>{project.name}</span>
+            <span style={{ color: C.brand, fontFamily: C.ff, fontSize: "14px", fontWeight: 600 }}>{project.name}</span>
             {isCompose && (
-              <span style={{ color: C.purple, background: "#f0ecfe", border: "1px solid #dccffb", fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "8px" }}>compose</span>
+              <span style={{ color: C.brand, background: C.brandFill, border: `1px solid ${C.brandBd}`, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "8px" }}>compose</span>
             )}
             {isPending && (
-              <span style={{ color: C.amber, background: "#fbf2e0", border: "1px solid #f0e1bc", fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "8px" }}>pending</span>
+              <span style={{ color: C.amber, background: C.amberFill, border: `1px solid ${C.amberBd}`, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "8px" }}>pending</span>
             )}
             {isPlugin && (
               <span style={{ color: C.muted, background: C.s3, border: `1px solid ${C.bd}`, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "8px" }}>plugin</span>
@@ -1112,9 +1124,9 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
             )}
           </div>
           <div style={{ display: "flex", gap: "6px" }}>
-            <Btn sm v="primary" onClick={() => setUploadModal(true)} title="Upload files or a folder — auto-detects Dockerfile / docker-compose.yml, provisions, and deploys">{isPending ? "upload" : "deploy"}</Btn>
+            <Btn sm v="green" onClick={() => setUploadModal(true)} title="Upload files or a folder — auto-detects Dockerfile / docker-compose.yml, provisions, and deploys">{isPending ? "upload" : "deploy"}</Btn>
             {isCompose && (
-              <Btn sm v="primary" onClick={() => setVersionsModal(true)} title="View versions, roll back, set backup limit">versions</Btn>
+              <Btn sm v="purple" onClick={() => setVersionsModal(true)} title="View versions, roll back, set backup limit">versions</Btn>
             )}
             {isCompose && (
               <Btn sm v="danger" onClick={() => composeAct("down")} busy={busy.down} title="docker compose down">down</Btn>
@@ -1125,11 +1137,11 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
 
         {isPending ? (
           <div style={{ padding: "18px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
-            awaiting upload — use <span style={{ color: C.purple }}>upload</span> to add a Dockerfile or docker-compose.yml
+            awaiting upload — use <span style={{ color: C.brand }}>upload</span> to add a Dockerfile or docker-compose.yml
           </div>
         ) : isCompose && (project.services || []).length === 0 ? (
           <div style={{ padding: "18px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
-            no services recorded — <span style={{ color: C.purple }}>deploy</span> again to register this project's containers
+            no services recorded — <span style={{ color: C.brand }}>deploy</span> again to register this project's containers
           </div>
         ) : (
         <div style={{ overflowX: "auto" }}>
@@ -1219,15 +1231,15 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
   const tab = (m, label) => (
     <button onClick={() => { setMode(m); setError(""); setResult(null); }} style={{
       flex: 1, padding: "8px", cursor: "pointer", fontFamily: C.ff, fontSize: "11px", fontWeight: 600,
-      background: mode === m ? "#f0ecfe" : C.s3, color: mode === m ? C.purple : C.muted,
-      border: `1px solid ${mode === m ? "#dccffb" : C.bd}`, borderRadius: "8px",
+      background: mode === m ? C.brandFill : C.s3, color: mode === m ? C.brand : C.muted,
+      border: `1px solid ${mode === m ? C.brandBd : C.bd}`, borderRadius: "8px",
     }}>{label}</button>
   );
 
   return (
     <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "18px", marginBottom: "12px", boxShadow: C.shadow }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
-        <span style={{ color: C.purple, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>DEPLOY PROJECT</span>
+        <span style={{ color: C.brand, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>DEPLOY PROJECT</span>
         <Btn v="ghost" sm onClick={onCancel}>✕</Btn>
       </div>
 
@@ -1336,7 +1348,7 @@ const PluginPanel = ({ token, onInstalled, onCancel }) => {
   }, [token]);
 
   const chip = (text, accent) => (
-    <span style={{ background: accent ? "#f0ecfe" : C.s3, color: accent ? C.purple : C.muted, border: `1px solid ${accent ? "#dccffb" : C.bd}`, borderRadius: "8px", padding: "2px 9px", fontFamily: C.ff, fontSize: "10px" }}>{text}</span>
+    <span style={{ background: accent ? C.brandFill : C.s3, color: accent ? C.brand : C.muted, border: `1px solid ${accent ? C.brandBd : C.bd}`, borderRadius: "8px", padding: "2px 9px", fontFamily: C.ff, fontSize: "10px" }}>{text}</span>
   );
 
   const active = plugins.find(p => p.name === selected) || null;
@@ -1344,7 +1356,7 @@ const PluginPanel = ({ token, onInstalled, onCancel }) => {
   return (
     <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", marginBottom: "12px", boxShadow: C.shadow, overflow: "hidden" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
-        <span style={{ color: C.purple, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>AVAILABLE PLUGINS</span>
+        <span style={{ color: C.brand, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>AVAILABLE PLUGINS</span>
         <Btn v="ghost" sm onClick={onCancel}>✕</Btn>
       </div>
 
@@ -1363,14 +1375,14 @@ const PluginPanel = ({ token, onInstalled, onCancel }) => {
               return (
                 <button key={p.name} onClick={() => setSelected(p.name)} style={{
                   display: "block", width: "100%", textAlign: "left",
-                  background: sel ? "#f0ecfe" : "transparent",
-                  color: sel ? C.purple : C.txt,
-                  border: `1px solid ${sel ? "#dccffb" : "transparent"}`,
+                  background: sel ? C.brandFill : "transparent",
+                  color: sel ? C.brand : C.txt,
+                  border: `1px solid ${sel ? C.brandBd : "transparent"}`,
                   borderRadius: "8px", padding: "9px 11px", marginBottom: "2px", cursor: "pointer",
                   fontFamily: C.ff, fontSize: "13px", fontWeight: sel ? 600 : 500,
                 }}>
                   {p.name}
-                  <div style={{ color: sel ? C.purple : C.dim, fontSize: "10px", fontWeight: 400, marginTop: "2px", opacity: sel ? 0.8 : 1 }}>
+                  <div style={{ color: sel ? C.brand : C.dim, fontSize: "10px", fontWeight: 400, marginTop: "2px", opacity: sel ? 0.8 : 1 }}>
                     {p.deploy_mode === "compose" ? "compose" : "dockerfile"}
                   </div>
                 </button>
@@ -1432,9 +1444,9 @@ const LoginScreen = ({ onAuth }) => {
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ width: 380, background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "36px", boxShadow: "0 12px 48px rgba(27,26,58,.12)" }}>
+      <div style={{ width: 380, background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "8px", padding: "36px", boxShadow: "0 12px 48px rgba(0,0,0,.5)" }}>
         <div style={{ marginBottom: "30px" }}>
-          <div style={{ color: C.purple, fontFamily: C.ff, fontSize: "22px", fontWeight: 700, marginBottom: "6px" }}>freeholdy</div>
+          <div style={{ color: C.brand, fontFamily: C.ff, fontSize: "22px", fontWeight: 700, marginBottom: "6px" }}>freeholdy</div>
           <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", letterSpacing: "0.12em" }}>CLOUDOPEN.SPACE CONTROL PANEL</div>
         </div>
 
@@ -1459,6 +1471,22 @@ const LoginScreen = ({ onAuth }) => {
   );
 };
 
+// ── Nav rail item (Grafana-style left rail) ─────────────────────────────────────
+const NavItem = ({ icon, label, active, onClick, title }) => (
+  <button onClick={onClick} title={title} style={{
+    display: "flex", alignItems: "center", gap: "10px", width: "100%", textAlign: "left",
+    background: active ? C.brandFill : "transparent",
+    color: active ? C.brand : C.txt,
+    border: "1px solid transparent",
+    borderLeft: `3px solid ${active ? C.brand : "transparent"}`,
+    borderRadius: "6px", padding: "9px 12px", marginBottom: "2px", cursor: "pointer",
+    fontFamily: C.ff, fontSize: "13px", fontWeight: active ? 600 : 500,
+  }}>
+    <span style={{ fontSize: "14px", width: "18px", textAlign: "center" }}>{icon}</span>
+    <span>{label}</span>
+  </button>
+);
+
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 const Dashboard = ({ token, onLogout }) => {
   const [projects, setProjects] = useState([]);
@@ -1468,6 +1496,7 @@ const Dashboard = ({ token, onLogout }) => {
   const [showDeploy, setShowDeploy] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
   const [showGitKey, setShowGitKey] = useState(false);
+  const [railOpen, setRailOpen] = useState(false);   // mobile: off-canvas nav rail
   const [activeLog, setActiveLog] = useState(null);
   const [interactiveLog, setInteractiveLog] = useState(null);  // { project, wsPath, kind }
   const pollRef = useRef(null);
@@ -1563,87 +1592,114 @@ const Dashboard = ({ token, onLogout }) => {
 
   const healthColor = health === "ok" ? C.green : health === "unreachable" ? C.red : C.amber;
 
+  const sectionTitle = showDeploy ? "Deploy project"
+    : showPlugins ? "Plugins"
+    : `Projects (${projects.length})`;
+
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.txt, fontFamily: C.ff }}>
-      {/* Header */}
-      <div style={{ background: C.s1, borderBottom: `1px solid ${C.bd}`, padding: "0 22px", display: "flex", alignItems: "center", justifyContent: "space-between", height: "52px", position: "sticky", top: 0, zIndex: 50, boxShadow: "0 1px 3px rgba(27,26,58,.06)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
-          <span style={{ color: C.purple, fontSize: "15px", fontWeight: 700 }}>freeholdy</span>
-          {version && (
-            <span style={{ color: C.purple, fontSize: "10px", fontWeight: 600, padding: "2px 7px", border: `1px solid ${C.bd}`, borderRadius: "5px" }}>
-              v{version.version} · {version.type}
+      {/* Left nav rail (Grafana-style) */}
+      <nav className={`fh-rail${railOpen ? " open" : ""}`} style={{
+        position: "fixed", top: 0, left: 0, bottom: 0, width: "220px", zIndex: 60,
+        background: C.s2, borderRight: `1px solid ${C.bd}`,
+        display: "flex", flexDirection: "column", padding: "14px 12px", overflowY: "auto",
+      }}>
+        {/* Brand */}
+        <div style={{ display: "flex", alignItems: "center", gap: "9px", padding: "4px 8px 12px" }}>
+          <span style={{ color: C.brand, fontSize: "17px", fontWeight: 700, letterSpacing: "-0.3px" }}>freeholdy</span>
+        </div>
+        {version && (
+          <div style={{ margin: "0 8px 14px", alignSelf: "flex-start", color: C.muted, fontSize: "10px", fontWeight: 600, padding: "3px 8px", border: `1px solid ${C.bd}`, borderRadius: "6px" }}>
+            v{version.version} · {version.type}
+          </div>
+        )}
+        {/* Nav */}
+        <div style={{ flex: 1 }}>
+          <NavItem icon="▣" label="Projects" active={!showDeploy && !showPlugins}
+            onClick={() => { setShowDeploy(false); setShowPlugins(false); setRailOpen(false); }} />
+          <NavItem icon="＋" label="Deploy" active={showDeploy}
+            onClick={() => { setShowPlugins(false); setShowDeploy(true); setRailOpen(false); }} />
+          <NavItem icon="⧉" label="Plugins" active={showPlugins}
+            onClick={() => { setShowDeploy(false); setShowPlugins(true); setRailOpen(false); }} />
+          <NavItem icon="🔑" label="Git key"
+            title="Get the server's GitHub SSH public key to add to GitHub for cloning private repos"
+            onClick={() => { setShowGitKey(true); setRailOpen(false); }} />
+        </div>
+        {/* Footer */}
+        <div style={{ borderTop: `1px solid ${C.bd}`, paddingTop: "8px" }}>
+          <NavItem icon="↻" label="Refresh" onClick={() => { checkHealth(); fetchProjects(); }} />
+          <NavItem icon="⎋" label="Logout" onClick={onLogout} />
+        </div>
+      </nav>
+
+      {railOpen && (
+        <div onClick={() => setRailOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 55 }} />
+      )}
+
+      {/* Main column (shifts right of the rail) */}
+      <div className="fh-main" style={{ marginLeft: "220px", minHeight: "100vh" }}>
+        {/* Slim top bar */}
+        <div style={{ background: C.s1, borderBottom: `1px solid ${C.bd}`, padding: "0 20px", display: "flex", alignItems: "center", justifyContent: "space-between", height: "48px", position: "sticky", top: 0, zIndex: 50 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <button className="fh-burger" onClick={() => setRailOpen(o => !o)} style={{ display: "none", alignItems: "center", justifyContent: "center", background: "transparent", border: `1px solid ${C.bd}`, borderRadius: "6px", color: C.muted, fontSize: "14px", padding: "4px 9px", cursor: "pointer" }}>☰</button>
+            <span style={{ color: C.txt, fontSize: "13px", fontWeight: 600 }}>{sectionTitle}</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <span style={{ color: healthColor, fontFamily: C.ff, fontSize: "10px", display: "flex", alignItems: "center", gap: "5px" }}>
+              <span style={{ fontSize: "7px" }}>●</span>api {health ?? "checking…"}
             </span>
+            <span style={{ width: 1, height: 14, background: C.bd, display: "inline-block" }} />
+            <span style={{ color: C.dim, fontSize: "10px" }}>{DOMAIN}</span>
+          </div>
+        </div>
+
+        {/* Content */}
+        <div style={{ maxWidth: 1260, margin: "0 auto", padding: "18px 22px" }}>
+          {showDeploy && (
+            <DeployForm token={token}
+              onDeployed={(data) => { setShowDeploy(false); handleInstalled(data); }}
+              onSynced={fetchProjects}
+              onCancel={() => setShowDeploy(false)} />
           )}
-          <span style={{ width: 1, height: 16, background: C.bd, display: "inline-block" }} />
-          <span style={{ color: C.dim, fontSize: "10px" }}>{DOMAIN}</span>
+
+          {showPlugins && (
+            <PluginPanel token={token} onInstalled={handleInstalled} onCancel={() => setShowPlugins(false)} />
+          )}
+
+          {/* The deployed-projects list shows only in the Projects view — Deploy / Plugins
+              replace it with their own panel (above). */}
+          {!showDeploy && !showPlugins && (
+            loading ? (
+              <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", padding: "24px 0" }}>loading projects…</div>
+            ) : projects.length === 0 ? (
+              <div style={{ border: `1px dashed ${C.bd}`, borderRadius: "8px", padding: "40px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
+                no projects yet — use <span style={{ color: C.brand }}>Deploy</span> or <span style={{ color: C.brand }}>Plugins</span> in the sidebar
+              </div>
+            ) : (
+              projects.map(p => (
+                <ProjectCard key={p.name} project={p} token={token}
+                  onOperation={handleOperation}
+                  onRefresh={fetchProjects}
+                  onDeploy={handleInstalled}
+                  onStream={handleDeployStream}
+                  onRemoved={(name) => { setProjects(ps => ps.filter(x => x.name !== name)); if (activeLog?.project === name) setActiveLog(null); if (interactiveLog?.project === name) setInteractiveLog(null); }} />
+              ))
+            )
+          )}
+
+          {interactiveLog ? (
+            <InstallPane
+              token={token}
+              wsPath={interactiveLog.wsPath}
+              project={interactiveLog.project}
+              interactive={interactiveLog.interactive}
+              onExit={handleInstallExit}
+              onClose={() => setInteractiveLog(null)}
+            />
+          ) : (
+            <LogPane log={activeLog} onClose={() => { setActiveLog(null); if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } }} onAbort={handleAbort} />
+          )}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
-          <span style={{ color: healthColor, fontFamily: C.ff, fontSize: "10px", display: "flex", alignItems: "center", gap: "5px" }}>
-            <span style={{ fontSize: "7px" }}>●</span>api {health ?? "checking…"}
-          </span>
-          <Btn v="ghost" sm onClick={() => { checkHealth(); fetchProjects(); }}>↻ refresh</Btn>
-          <Btn v="ghost" sm onClick={() => setShowGitKey(true)} title="Get the server's GitHub SSH public key to add to GitHub for cloning private repos">🔑 git key</Btn>
-          <Btn v="ghost" sm onClick={onLogout}>logout</Btn>
-        </div>
-      </div>
-
-      {/* Content */}
-      <div style={{ maxWidth: 1260, margin: "0 auto", padding: "16px 20px" }}>
-        {/* Toolbar */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
-          <span style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", letterSpacing: "0.1em" }}>
-            PROJECTS ({projects.length})
-          </span>
-          <div style={{ display: "flex", gap: "8px" }}>
-            <Btn v="primary" onClick={() => { setShowPlugins(false); setShowDeploy(s => !s); }}>
-              {showDeploy ? "✕ cancel" : "+ deploy project"}
-            </Btn>
-            <Btn v="blue" onClick={() => { setShowDeploy(false); setShowPlugins(s => !s); }}>
-              {showPlugins ? "✕ cancel" : "+ add plugin"}
-            </Btn>
-          </div>
-        </div>
-
-        {showDeploy && (
-          <DeployForm token={token}
-            onDeployed={(data) => { setShowDeploy(false); handleInstalled(data); }}
-            onSynced={fetchProjects}
-            onCancel={() => setShowDeploy(false)} />
-        )}
-
-        {showPlugins && (
-          <PluginPanel token={token} onInstalled={handleInstalled} onCancel={() => setShowPlugins(false)} />
-        )}
-
-        {loading ? (
-          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", padding: "24px 0" }}>loading projects…</div>
-        ) : projects.length === 0 ? (
-          <div style={{ border: `1px dashed ${C.bd}`, borderRadius: "8px", padding: "40px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
-            no projects yet — deploy one above
-          </div>
-        ) : (
-          projects.map(p => (
-            <ProjectCard key={p.name} project={p} token={token}
-              onOperation={handleOperation}
-              onRefresh={fetchProjects}
-              onDeploy={handleInstalled}
-              onStream={handleDeployStream}
-              onRemoved={(name) => { setProjects(ps => ps.filter(x => x.name !== name)); if (activeLog?.project === name) setActiveLog(null); if (interactiveLog?.project === name) setInteractiveLog(null); }} />
-          ))
-        )}
-
-        {interactiveLog ? (
-          <InstallPane
-            token={token}
-            wsPath={interactiveLog.wsPath}
-            project={interactiveLog.project}
-            interactive={interactiveLog.interactive}
-            onExit={handleInstallExit}
-            onClose={() => setInteractiveLog(null)}
-          />
-        ) : (
-          <LogPane log={activeLog} onClose={() => { setActiveLog(null); if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } }} onAbort={handleAbort} />
-        )}
       </div>
 
       {showGitKey && <GitKeyModal token={token} onClose={() => setShowGitKey(false)} />}
@@ -1671,21 +1727,28 @@ export default function App() {
   return (
     <>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap');
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        html, body { background: #f4f4fb; }
-        body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; color: #1b1a3a; }
+        html, body { background: #111217; }
+        body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; color: #ccccdc; }
         ::-webkit-scrollbar { width: 8px; height: 8px; }
-        ::-webkit-scrollbar-track { background: #f1f0fa; }
-        ::-webkit-scrollbar-thumb { background: #d6d2e8; border-radius: 8px; }
-        ::-webkit-scrollbar-thumb:hover { background: #c2bdde; }
-        input::placeholder { color: #a6a3c0; }
-        input:focus { border-color: #673de6 !important; box-shadow: 0 0 0 3px rgba(103,61,230,.12); }
-        select option { background: #ffffff; color: #1b1a3a; }
+        ::-webkit-scrollbar-track { background: #181b1f; }
+        ::-webkit-scrollbar-thumb { background: #3d444b; border-radius: 8px; }
+        ::-webkit-scrollbar-thumb:hover { background: #4b5259; }
+        input::placeholder { color: #5b5e63; }
+        input:focus { border-color: #F55F3E !important; box-shadow: 0 0 0 3px rgba(245,95,62,.18); }
+        select option { background: #181b1f; color: #ccccdc; }
         a { transition: color .15s; }
-        a:hover { color: #673de6; }
+        a:hover { color: #F55F3E; }
         button { transition: background .12s, opacity .12s, box-shadow .12s; }
-        button:hover:not(:disabled) { filter: brightness(0.98); }
+        button:hover:not(:disabled) { filter: brightness(1.12); }
+        .fh-rail { transition: transform .2s ease; }
+        @media (max-width: 820px) {
+          .fh-rail { transform: translateX(-100%); }
+          .fh-rail.open { transform: translateX(0); box-shadow: 0 0 40px rgba(0,0,0,.6); }
+          .fh-main { margin-left: 0 !important; }
+          .fh-burger { display: inline-flex !important; }
+        }
       `}</style>
       <Dashboard token={token} onLogout={() => { localStorage.removeItem("freeholdy_token"); setToken(""); }} />
     </>

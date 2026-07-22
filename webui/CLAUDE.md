@@ -41,14 +41,25 @@ Things that require reading the whole file to understand:
 - **Auth is a token in `localStorage["freeholdy_token"]`.** `App` gates on its presence; `LoginScreen`
   validates by calling `/health` before storing. Logout clears the key. There is no refresh/expiry
   handling — a rejected request just shows an error, it does not force re-login.
-- **All styling is inline.** Colors come from the `C` object; there are no class names except the
-  one global `<style>` block in `App` (font import, scrollbar, resets, input focus ring). Match
-  this — pass `style` props, reuse `C`, do not write CSS.
-- **Light "Hostinger-style" theme.** `C` is a light palette: lavender-white surfaces (`bg/s1/s2/s3`),
-  a royal-purple brand/primary accent (`C.purple`), dark-navy text (`C.txt`), and a soft `C.shadow`
-  for cards. `C.ff` is the UI sans font (DM Sans); `C.mono` (JetBrains Mono) is **only** for
-  log/code output (LogPane, status/SSL output, the login token command). Green/amber/red/blue stay
-  reserved for status semantics (`SC`/`SI`/`Tag`), not branding.
+- **All styling is inline.** Colors come from the `C` object; the only class names are the
+  handful the one global `<style>` block in `App` needs for its responsive nav-rail media query
+  (`.fh-rail`, `.fh-main`, `.fh-burger`) plus the font import/scrollbar/reset/focus-ring rules.
+  Match this — pass `style` props, reuse `C`, do not write CSS beyond that block.
+- **Grafana-style dark theme.** `C` is a dark palette: near-black chrome (`bg #111217`, panels
+  `s1/s2/s3`), Grafana-orange brand/primary accent (`C.brand` — renamed from the old `C.purple`;
+  `C.brandH` is the hover orange), light text (`C.txt`), and translucent **tint tokens**
+  (`C.brandFill/brandBd`, `blueFill/blueBd`, `greenFill/greenBd`, `amberFill/amberBd`,
+  `redFill/redBd`) that variant buttons (`Btn`), chips, badges, and `Err`/`Ok` use so they read on
+  dark. `C.ff` is Inter; `C.mono` (Roboto Mono / JetBrains Mono) is **only** for log/code output
+  (LogPane, status/SSL output, the login token command). Green/amber/red stay reserved for status
+  semantics (`SC`/`SI`/`Tag`), blue for links — not branding.
+- **`Dashboard` layout is a fixed left nav rail + shifted main column.** A `<nav className="fh-rail">`
+  (220px, `C.s2`) holds the `freeholdy` brand + version badge, the `NavItem` entries (**Projects**
+  clears the panels, **Deploy**/**Plugins** toggle `showDeploy`/`showPlugins` with an orange active
+  state, **Git key** opens `GitKeyModal`), and a bottom **Refresh**/**Logout** footer. The content
+  sits in `.fh-main` (`margin-left:220px`) under a slim sticky top bar (section title + `api ●`
+  health dot + `DOMAIN`). Below 820px the rail becomes an off-canvas overlay toggled by `railOpen`
+  (the `.fh-burger` hamburger + a backdrop); the media query lives in the global `<style>` block.
 - **Container/job status is a fixed vocabulary** rendered by the `SC` (color) and `SI` (glyph)
   maps and the `<Tag>` component: `running | done | exited | aborted | error | no_image |
   not_found | no_job`. These mirror the server's synthesized states — keep the maps in sync if the
