@@ -42,21 +42,39 @@ Things that require reading the whole file to understand:
   validates by calling `/health` before storing. Logout clears the key. There is no refresh/expiry
   handling — a rejected request just shows an error, it does not force re-login.
 - **All styling is inline.** Colors come from the `C` object; the only class names are the
-  handful the one global `<style>` block in `App` needs for its responsive nav-rail media query
-  (`.fh-rail`, `.fh-main`, `.fh-burger`) plus the font import/scrollbar/reset/focus-ring rules.
-  Match this — pass `style` props, reuse `C`, do not write CSS beyond that block.
-- **Grafana-style dark theme.** `C` is a dark palette: near-black chrome (`bg #111217`, panels
-  `s1/s2/s3`), Grafana-orange brand/primary accent (`C.brand` — renamed from the old `C.purple`;
-  `C.brandH` is the hover orange), light text (`C.txt`), and translucent **tint tokens**
-  (`C.brandFill/brandBd`, `blueFill/blueBd`, `greenFill/greenBd`, `amberFill/amberBd`,
-  `redFill/redBd`) that variant buttons (`Btn`), chips, badges, and `Err`/`Ok` use so they read on
-  dark. `C.ff` is Inter; `C.mono` (Roboto Mono / JetBrains Mono) is **only** for log/code output
-  (LogPane, status/SSL output, the login token command). Green/amber/red stay reserved for status
-  semantics (`SC`/`SI`/`Tag`), blue for links — not branding.
+  handful the one global `<style>` block in `App` needs — the responsive nav-rail media query
+  (`.fh-rail`, `.fh-main`, `.fh-burger`), the `.fh-nav` / `.fh-active` nav-item hover rule
+  (`NavItem` can't express `:hover` inline), plus the font import/scrollbar/reset/focus-ring
+  rules. Match this — pass `style` props, reuse `C`, do not write CSS beyond that block.
+- **Dark blue-slate theme, with three separate accent roles.** `C` is a cool blue-slate palette:
+  chrome `bg #0F1421` with panels `s1/s2/s3` (`#161C2B`/`#1C2334`/`#242D40`), light text
+  (`C.txt #E9EDF5`), and translucent **tint tokens** (`C.moneyFill/moneyBd`, `blueFill/blueBd`,
+  `greenFill/greenBd`, `amberFill/amberBd`, `redFill/redBd`, `purpleFill/purpleBd`) that variant
+  buttons (`Btn`), chips, badges, and `Err`/`Ok` use so they read on dark. The accents do **not**
+  overlap:
+  - **`C.brand` coral `#FF6B4A` is identity only** — the nav-rail wordmark, the `LoginScreen`
+    wordmark, and the favicon in `index.html`. Nothing else may use it. (`C.brandFill/brandBd`
+    are kept in `C` for completeness but are currently unreferenced.)
+  - **`C.money` `#4EB06B` is primary action + active state** — the solid-filled `Btn v="primary"`
+    (dark `C.moneyInk` text: every deploy/install/submit button), the active `NavItem`, the
+    selected source segment in the `DeployForm`/`UploadModal` `tab()` helpers, and the selected
+    row in `PluginPanel`. Hover comes from the global `button:hover { filter: brightness(1.12) }`
+    rule, so `C.moneyH/moneyA` exist for completeness and may be unreferenced.
+  - **`C.blue` `#5B9EFF` is links, the focus ring, and informational chips** (`compose`, `custom`,
+    plugin mode chips).
+  - **`C.green` mint `#34D399` / `amber` / `red` stay reserved for status semantics** (`SC`/`SI`/
+    `Tag`, `Ok`, danger buttons). Mint and money green are deliberately distinct — mint never
+    fills a button, money never marks a status.
+
+  Titles, project names, and inline emphasis are plain `C.txt`. `C.ff` is Inter; `C.mono`
+  (JetBrains Mono / Roboto Mono, both fetched by the `@import`) is **only** for log/code output
+  (LogPane, ExecTerminal, status/SSL output, the login token command). Corner radii follow a
+  scale: buttons/inputs/segments/nav items `10px`, cards/panels/modals/log panes `14px`,
+  chips/badges/inline code `7px`, progress bars `999px`.
 - **`Dashboard` layout is a fixed left nav rail + shifted main column.** A `<nav className="fh-rail">`
   (220px, `C.s2`) holds the `freeholdy` brand + version badge, the `NavItem` entries (**Projects**
-  clears the panels, **Deploy**/**Plugins** toggle `showDeploy`/`showPlugins` with an orange active
-  state, **Git key** opens `GitKeyModal`), and a bottom **Refresh**/**Logout** footer. The content
+  clears the panels, **Deploy**/**Plugins** toggle `showDeploy`/`showPlugins` with a money-green
+  active state, **Git key** opens `GitKeyModal`), and a bottom **Refresh**/**Logout** footer. The content
   sits in `.fh-main` (`margin-left:220px`) under a slim sticky top bar (section title + `api ●`
   health dot + `DOMAIN`). Below 820px the rail becomes an off-canvas overlay toggled by `railOpen`
   (the `.fh-burger` hamburger + a backdrop); the media query lives in the global `<style>` block.
@@ -74,8 +92,9 @@ The UI assumes these endpoints and is the place this contract is exercised from 
 - `GET /plugins` — each item carries `name`, `description`, `about` (Markdown from the plugin's
   `ABOUT.md`, empty when none), `deploy_mode`, `container_port`, `has_install`, `type`. `PluginPanel`
   is a master-detail view: a ~25% name list on the left, a ~75% detail pane on the right that renders
-  `about` (falling back to `description`) via the tiny inline `Markdown` component, with a solid-green
-  **install** button (`Btn v="green"`) in the pane's top-right. `system`-type plugins are filtered out.
+  `about` (falling back to `description`) via the tiny inline `Markdown` component, with a solid
+  money-green **install** button (`Btn v="primary"`) in the pane's top-right. `system`-type plugins
+  are filtered out.
 - Upload (chunked): `POST /projects/{name}/upload/chunk` then `.../upload/complete`. **Auto-creates
   the project row if it doesn't exist yet** (no separate create call), reassembles + unzips the tree
   under the project dir, auto-detects a `Dockerfile`/`docker-compose.yml` in the root and provisions
