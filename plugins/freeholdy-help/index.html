@@ -160,6 +160,46 @@
       color: var(--muted);
       font-size: 0.9rem;
     }
+    /* Tables (API reference) */
+    .table-wrap {
+      overflow-x: auto;
+      margin: 0.9rem 0;
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+    }
+    table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+    th {
+      text-align: left;
+      color: var(--text);
+      font-weight: 600;
+      font-size: 0.8rem;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      padding: 0.55rem 0.9rem;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+      background: var(--panel);
+    }
+    td {
+      color: var(--muted);
+      padding: 0.4rem 0.9rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    tr:last-child td { border-bottom: none; }
+    td.method { color: var(--faint); font-family: 'Roboto Mono', ui-monospace, monospace; font-size: 0.8rem; white-space: nowrap; width: 1%; }
+    td.path { white-space: nowrap; width: 1%; padding-right: 1.5rem; }
+    td code { background: none; border: none; padding: 0; color: #d8d9da; }
+    tr.group td {
+      color: var(--faint);
+      font-size: 0.75rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      background: rgba(255, 255, 255, 0.02);
+      padding-top: 0.5rem;
+      padding-bottom: 0.5rem;
+    }
+
     footer {
       margin-top: 1rem;
       padding-top: 1.5rem;
@@ -194,6 +234,10 @@
     <a href="#deploy-plugins" class="sub">From plugins</a>
     <a href="#plugin-catalog">Plugin catalog</a>
     <a href="#versions-rollback">Versions &amp; rollback</a>
+    <a href="#api">API</a>
+    <a href="#api-endpoints" class="sub">Endpoints</a>
+    <a href="#api-streaming" class="sub">Streaming logs</a>
+    <a href="#api-tokens" class="sub">Tokens</a>
     <a href="#ai-integration">AI integration</a>
   </nav>
 
@@ -218,7 +262,7 @@
         <ul>
           <li><strong>CLI</strong> — <code>fhcli</code>, a small command-line client (used in the examples below).</li>
           <li><strong>Web UI</strong> — a control panel at <code>ui.&lt;your-domain&gt;</code> covering the same operations in the browser.</li>
-          <li><strong>REST API</strong> — everything above is a thin client over the API at <code>api.&lt;your-domain&gt;</code>, authenticated with a bearer token.</li>
+          <li><strong>REST API</strong> — everything above is a thin client over <a href="#api">the API</a> at <code>api.&lt;your-domain&gt;</code>, authenticated with a bearer token.</li>
         </ul>
       </section>
 
@@ -375,6 +419,134 @@ fhcli set-backup-limit myapp 3  # keep at most 3 archived versions</code></pre>
           Compose rollback restores the project's code snapshot and images, then brings the
           stack back up — but <strong>named-volume data is not rolled back</strong>. Databases
           keep their current contents.
+        </div>
+      </section>
+
+      <section id="api">
+        <h1>API</h1>
+        <p class="lead">
+          The CLI, the web UI, and the <code>fhdeploy</code> skill are all thin clients over one
+          REST API at <code>https://api.&lt;your-domain&gt;</code>. Anything they can do is
+          scriptable — from CI, a cron job, or your own dashboard.
+        </p>
+        <ul>
+          <li><strong>Auth</strong> — every endpoint takes <code>Authorization: Bearer &lt;token&gt;</code>, except <code>/health</code>, <code>/version</code>, and <code>/docs</code>.</li>
+          <li><strong>Interactive reference</strong> — the OpenAPI explorer is live at <code>https://api.&lt;your-domain&gt;/docs</code>, with every request and response schema.</li>
+          <li><strong>Long jobs return immediately</strong> — builds, deploys, rollbacks, and plugin installs respond with a <code>ws_path</code>; the log streams over that WebSocket.</li>
+        </ul>
+
+        <pre><code>TOKEN=your_token_here
+BASE=https://api.your_domain.com
+
+# Deploy a folder — auto-creates the project, detects the Dockerfile or
+# docker-compose.yml, builds, runs, and wires up nginx + SSL.
+curl -X POST "$BASE/projects/myapp/upload" \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "files=@./Dockerfile;filename=Dockerfile" \
+  -F "files=@./app.py;filename=app.py"
+
+# ...or deploy straight from git (idempotent: same name = redeploy).
+curl -X POST "$BASE/git/add" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"mysite","git_url":"https://github.com/owner/repo.git"}'
+
+curl "$BASE/projects/myapp/status" -H "Authorization: Bearer $TOKEN"</code></pre>
+
+        <div class="note">
+          The multipart <code>/upload</code> above is the simple path. <code>fhcli</code> and the
+          web UI use the chunked pair instead — <code>upload/chunk</code> +
+          <code>upload/complete</code>, 1 MiB pieces of a staged zip — which is what large folders
+          need to stay under nginx's request body limit.
+        </div>
+
+        <h2 id="api-endpoints">Endpoints</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Method</th><th>Path</th><th>What it does</th></tr>
+            </thead>
+            <tbody>
+              <tr class="group"><td colspan="3">System</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/health</code></td><td>Liveness check — no auth.</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/version</code></td><td>Server version — no auth.</td></tr>
+
+              <tr class="group"><td colspan="3">Projects &amp; deploys</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/projects/</code></td><td>Every project with its container / service status.</td></tr>
+              <tr><td class="method">DELETE</td><td class="path"><code>/projects/{name}</code></td><td>Full teardown — containers, images, versions, nginx config, files, DB row.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/upload</code></td><td>Multipart deploy. <strong>Auto-creates</strong> the project on first use.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/upload/chunk</code></td><td>One raw piece of a staged zip (<code>?upload_id=&amp;offset=</code>).</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/upload/complete</code></td><td>Unzip → detect manifest → provision → build + run.</td></tr>
+              <tr><td class="method">DELETE</td><td class="path"><code>/projects/{name}/upload/{id}</code></td><td>Abort a chunked upload and discard its staged data.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/git/add</code></td><td><code>{"name","git_url","branch"?}</code> — clone + deploy. Same name redeploys.</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/git/key</code></td><td>The server's GitHub SSH public key, for private repos (created on first call).</td></tr>
+
+              <tr class="group"><td colspan="3">Lifecycle — single container</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/status</code></td><td>Container state plus the last job's log.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/stop</code></td><td>Stop the running container.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/abort</code></td><td>Abort the docker job currently in flight.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/ssl</code></td><td>Re-run certbot for the project's domains.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/domain</code></td><td><code>{"custom_domain":"app.acme.com"}</code> — send <code>null</code> to revert to the subdomain.</td></tr>
+
+              <tr class="group"><td colspan="3">Lifecycle — compose stacks</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/compose/status</code></td><td>Stack state plus the last compose job's log.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/compose/down</code></td><td>Tear the stack down.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/compose/abort</code></td><td>Abort the compose job currently in flight.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/services/{svc}/domain</code></td><td>Custom domain for one service of the stack.</td></tr>
+
+              <tr class="group"><td colspan="3">Versions</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/versions</code></td><td>Active / inactive / archived versions with counts.</td></tr>
+              <tr><td class="method">PUT</td><td class="path"><code>/projects/{name}/backup-limit</code></td><td><code>{"limit":3}</code> — set the cap and prune right away.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/rollback</code></td><td><code>{"version":2}</code> — make an earlier version live; returns a <code>ws_path</code>.</td></tr>
+
+              <tr class="group"><td colspan="3">Plugins</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/plugins/</code></td><td>The plugin catalog, with descriptions and deploy modes.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/plugins/{plugin}/add</code></td><td><code>{"project_name":"mycloud"}</code> — install it; returns a <code>ws_path</code>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          There is no create endpoint and no separate build or start call — a deploy does all of
+          it, and re-deploying is how you ship an update.
+        </p>
+
+        <h2 id="api-streaming">Streaming logs</h2>
+        <p>
+          Browsers can't set an <code>Authorization</code> header on a WebSocket, so every
+          freeholdy socket opens the same way: your <strong>first frame must be</strong>
+          <code>{"type":"auth","token":"…"}</code>. The server replies <code>{"type":"ready"}</code>,
+          streams <code>{"type":"stdout","data":"…"}</code> frames, and finishes with
+          <code>{"type":"exit","code":N}</code>. Shell sockets also accept <code>stdin</code> and
+          <code>resize</code> frames from the client.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Socket</th><th>What it streams</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="path"><code>WS /projects/{name}/deploy</code></td><td>Build + run log — uploads, git deploys, and rollbacks all land here.</td></tr>
+              <tr><td class="path"><code>WS /projects/{name}/exec</code></td><td>Interactive shell in the container (<code>?cmd=</code> overrides the default shell).</td></tr>
+              <tr><td class="path"><code>WS /projects/{name}/services/{svc}/exec</code></td><td>Interactive shell in one compose service.</td></tr>
+              <tr><td class="path"><code>WS /plugins/{plugin}/install/{project}</code></td><td>Plugin install log — interactive plugins prompt over this same socket.</td></tr>
+              <tr><td class="path"><code>WS /git/deploy/{project}</code></td><td>Git deploy log (read-only).</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Close codes: <code>4401</code> auth failed, <code>4404</code> not found,
+          <code>4409</code> busy. Disconnecting never kills a build — the job keeps running on the
+          server, and reconnecting re-streams it.
+        </p>
+
+        <h2 id="api-tokens">Tokens</h2>
+        <p>Tokens are minted on the server, from the repo root with the venv active:</p>
+        <pre><code>python scripts/generate_token.py generate --name "ci"
+python scripts/generate_token.py list
+python scripts/generate_token.py revoke --id 3</code></pre>
+        <div class="note">
+          Tokens are stored as <strong>SHA-256 hashes</strong> — the plaintext is printed
+          <strong>once</strong>, at generation, and there is no recovery path. Lost a token?
+          Revoke it and mint a new one. (Your first token is the one the installer printed.)
         </div>
       </section>
 
