@@ -49,6 +49,18 @@ def validate_custom_domain(v: str) -> str:
 
 # ── Requests ──────────────────────────────────────────────────────────────────
 
+def validate_env_content(v: str) -> str:
+    """Reject .env text freeholdy could not turn into a KEY=value file docker can read.
+
+    Delegates to env_service.parse, which reports each problem with its line number."""
+    from app.services import env_service  # lazy: services import schemas
+
+    _, errors = env_service.parse(v or "")
+    if errors:
+        raise ValueError("invalid .env content:\n  - " + "\n  - ".join(errors))
+    return v
+
+
 class DeployMode(str, Enum):
     dockerfile = "dockerfile"   # single container, one Dockerfile (the default)
     compose = "compose"         # multi-container, one docker-compose.yml
@@ -130,6 +142,7 @@ class ContainerInfo(BaseModel):
     ssl_enabled: bool = False
     websocket: bool = False
     container_status: str = "not_found"   # running | exited | not_found | no_image | error
+    env_count: int = 0                    # variables in the project's stored .env file
 
 
 class ServiceInfo(BaseModel):
@@ -146,6 +159,7 @@ class ServiceInfo(BaseModel):
     ssl_enabled: bool = False
     websocket: bool = False
     container_status: str = "not_found"
+    env_count: int = 0                     # variables in this service's own .env file
 
 
 class ProjectResponse(BaseModel):
@@ -266,3 +280,27 @@ class RollbackResponse(BaseModel):
     message: str
     job: DockerJobStatusResponse
     ws_path: Optional[str] = None   # WS /projects/{name}/deploy — stream the rollback job
+
+
+class SetEnvRequest(BaseModel):
+    """The whole .env file, as text. Stored verbatim (comments and blank lines kept);
+    freeholdy renders the normalized KEY=value form when a container starts."""
+    content: str = ""
+
+    @field_validator("content")
+    @classmethod
+    def content_must_parse(cls, v: str) -> str:
+        return validate_env_content(v)
+
+
+class EnvResponse(BaseModel):
+    project: str
+    service: Optional[str] = None   # null = project-level (the container's env for dockerfile
+                                    # mode; the shared file for compose)
+    content: str = ""
+    keys: List[str] = []            # variable names only — never the values
+    updated_at: Optional[datetime] = None
+    applied: bool = True            # False → edited since the container last started;
+                                    # POST /projects/{name}/restart to apply
+    status: str = "ok"              # ok | error
+    message: str = ""

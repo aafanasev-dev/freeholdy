@@ -90,6 +90,15 @@ def _spawn(key: str, operation: str, cmd: list) -> DockerJob:
     return job
 
 
+def spawn_job(key: str, operation: str, cmd: list) -> str:
+    """Run `cmd` as a tracked background job under `key` and return the key.
+
+    The public seam onto `_spawn` for callers that build their own argv — deploy_service
+    does, for the compose invocations that need the image-pin override file."""
+    _spawn(key, operation, cmd)
+    return key
+
+
 def register_external_job(
     key: str,
     operation: str,
@@ -297,8 +306,11 @@ def start_container(
     local_port: int,
     container_port: int,
     job_key: str,
+    env_file: Optional[str] = None,
 ) -> DockerJob:
-    """Remove any stopped container then 'docker run' in the background."""
+    """Remove any stopped container then 'docker run' in the background.
+
+    `env_file` is the project's materialized env file (`env_service.materialize`)."""
     # Synchronous remove — fast, must complete before docker run.
     subprocess.run(
         ["docker", "rm", "-f", container_name],
@@ -310,6 +322,7 @@ def start_container(
         "--detach",
         "--name", container_name,
         "--restart", "unless-stopped",
+        *(["--env-file", env_file] if env_file and os.path.exists(env_file) else []),
         "-p", f"127.0.0.1:{local_port}:{container_port}",
         image_name,
     ]
@@ -331,6 +344,7 @@ def provision_from_plugin(
     container_name: str,
     local_port: int,
     container_port: int,
+    env_file: Optional[str] = None,
 ) -> DockerJob:
     """Background job that provisions a container from a plugin in one shot:
     optional install.sh → docker build → docker run. All steps stream to one log,
@@ -356,6 +370,7 @@ def provision_from_plugin(
         'echo "── docker run ──"',
         f"docker rm -f {q(container_name)} >/dev/null 2>&1 || true",
         f"docker run --detach --name {q(container_name)} --restart unless-stopped "
+        f"{f'--env-file {q(env_file)} ' if env_file and os.path.exists(env_file) else ''}"
         f"-p 127.0.0.1:{int(local_port)}:{int(container_port)} {q(image_name)}",
     ]
 
@@ -363,32 +378,59 @@ def provision_from_plugin(
     return _spawn(job_key, "provision", cmd)
 
 
-def _compose_cmd(project: str, project_dir: str, *args: str) -> list:
+def compose_env_flags(project_dir: str, env_file: Optional[str]) -> list:
+    """`--env-file` flags for a `docker compose` invocation, or [] when there is no env.
+
+    These control **interpolation** (`${VAR}` in the compose file), not what lands inside
+    the containers — injection is the `env_file:` entries the generated override carries.
+
+    Passing `--env-file` at all disables compose's automatic pickup of `{project_dir}/.env`,
+    and that file is load-bearing: every compose plugin's install.sh writes its generated
+    secrets there for `${VAR}` substitution. So when a project-level env file exists, the
+    project's own `.env` is passed first and the freeholdy file second (later wins), and
+    when there is none the argv stays exactly as it was before this feature. Repeated
+    `--env-file` needs Docker Compose >= 2.24.
+    """
+    if not env_file or not os.path.exists(env_file):
+        return []
+    flags = []
+    dotenv = os.path.join(project_dir, ".env")
+    if os.path.exists(dotenv):
+        flags += ["--env-file", dotenv]
+    return flags + ["--env-file", env_file]
+
+
+def _compose_cmd(project: str, project_dir: str, *args: str,
+                 env_file: Optional[str] = None) -> list:
     """Build a `docker compose` invocation pinned to a project's two compose files."""
     return [
         "docker", "compose",
         "-p", project,
+        *compose_env_flags(project_dir, env_file),
         "-f", os.path.join(project_dir, "docker-compose.yml"),
         "-f", os.path.join(project_dir, "docker-compose.override.yml"),
         *args,
     ]
 
 
-def compose_build(project: str, project_dir: str, job_key: str) -> DockerJob:
+def compose_build(project: str, project_dir: str, job_key: str,
+                  env_file: Optional[str] = None) -> DockerJob:
     """Start 'docker compose build' in the background. Poll get_job(job_key)."""
-    cmd = _compose_cmd(project, project_dir, "build", "--progress=plain")
+    cmd = _compose_cmd(project, project_dir, "build", "--progress=plain", env_file=env_file)
     return _spawn(job_key, "compose_build", cmd)
 
 
-def compose_up(project: str, project_dir: str, job_key: str) -> DockerJob:
+def compose_up(project: str, project_dir: str, job_key: str,
+               env_file: Optional[str] = None) -> DockerJob:
     """Start 'docker compose up -d' in the background (builds images as needed)."""
-    cmd = _compose_cmd(project, project_dir, "up", "-d")
+    cmd = _compose_cmd(project, project_dir, "up", "-d", env_file=env_file)
     return _spawn(job_key, "compose_up", cmd)
 
 
-def compose_down(project: str, project_dir: str, job_key: str) -> DockerJob:
+def compose_down(project: str, project_dir: str, job_key: str,
+                 env_file: Optional[str] = None) -> DockerJob:
     """Start 'docker compose down' in the background."""
-    cmd = _compose_cmd(project, project_dir, "down")
+    cmd = _compose_cmd(project, project_dir, "down", env_file=env_file)
     return _spawn(job_key, "compose_down", cmd)
 
 

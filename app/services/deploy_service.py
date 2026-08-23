@@ -46,7 +46,7 @@ from fastapi import HTTPException
 from app.config import settings
 from app.models.database import SessionLocal
 from app.models.orm import Project, ProjectVersion
-from app.services import docker_service, nginx_service, compose_service
+from app.services import docker_service, nginx_service, compose_service, env_service
 
 
 def deploy_job_key(name: str) -> str:
@@ -63,6 +63,13 @@ def version_names(name: str, n: int) -> tuple[str, str]:
 
 # ── Build/run + rollback scripts ────────────────────────────────────────────────
 
+def _env_flag(env_file: Optional[str]) -> str:
+    """`--env-file <path> ` for a `docker run` command line, or "" when there is no env."""
+    if not env_file or not os.path.exists(env_file):
+        return ""
+    return f"--env-file {shlex.quote(env_file)} "
+
+
 def _deploy_script(
     project_dir: str,
     install_script: Optional[str],
@@ -71,9 +78,14 @@ def _deploy_script(
     container_name: str,
     local_port: int,
     container_port: int,
+    env_file: Optional[str] = None,
 ) -> list:
     """optional install.sh → docker build → docker run, as one bash job (mirrors
-    docker_service.provision_from_plugin, but with version-scoped names)."""
+    docker_service.provision_from_plugin, but with version-scoped names).
+
+    `env_file` is the project's materialized env file (`env_service.materialize`); when
+    present it is passed to `docker run --env-file` so the container starts with the
+    variables stored in the DB. None → the command is exactly what it was before."""
     q = shlex.quote
     dockerfile = os.path.join(project_dir, "Dockerfile")
     lines = ["set -e"]
@@ -89,6 +101,7 @@ def _deploy_script(
         f'echo "── docker run {container_name} ──"',
         f"docker rm -f {q(container_name)} >/dev/null 2>&1 || true",
         f"docker run --detach --name {q(container_name)} --restart unless-stopped "
+        f"{_env_flag(env_file)}"
         f"-p 127.0.0.1:{int(local_port)}:{int(container_port)} {q(image_name)}",
     ]
     return ["bash", "-c", "\n".join(lines)]
@@ -100,20 +113,26 @@ def _rollback_script(
     container_name: str,
     local_port: int,
     container_port: int,
+    env_file: Optional[str] = None,
 ) -> list:
-    """Bring a rollback target's container up: `docker start` a stopped inactive container,
-    or `docker run` a fresh one from an archived image (its container was removed)."""
+    """Bring a rollback target's container up by recreating it from its retained image.
+
+    Both tiers take the same path. An `inactive` version's container is merely stopped and
+    could be `docker start`ed, but a stopped container's environment is frozen at the
+    moment it was created — restarting it that way would silently ignore any env edited
+    since. Recreating costs only the container's writable layer (which an `archived`
+    rollback already discards) and keeps one rule true everywhere: a container start uses
+    the current environment."""
     q = shlex.quote
-    if target_status == "inactive":
-        lines = ["set -e", f'echo "── starting {container_name} ──"', f"docker start {q(container_name)}"]
-    else:  # archived — recreate from the retained image
-        lines = [
-            "set -e",
-            f'echo "── recreating {container_name} from {image_name} ──"',
-            f"docker rm -f {q(container_name)} >/dev/null 2>&1 || true",
-            f"docker run --detach --name {q(container_name)} --restart unless-stopped "
-            f"-p 127.0.0.1:{int(local_port)}:{int(container_port)} {q(image_name)}",
-        ]
+    what = "restarting" if target_status == "inactive" else "recreating"
+    lines = [
+        "set -e",
+        f'echo "── {what} {container_name} from {image_name} ──"',
+        f"docker rm -f {q(container_name)} >/dev/null 2>&1 || true",
+        f"docker run --detach --name {q(container_name)} --restart unless-stopped "
+        f"{_env_flag(env_file)}"
+        f"-p 127.0.0.1:{int(local_port)}:{int(container_port)} {q(image_name)}",
+    ]
     return ["bash", "-c", "\n".join(lines)]
 
 
@@ -266,6 +285,9 @@ def bluegreen_deploy(project_id: int, install_script: Optional[str] = None,
         green_port = project.local_port if first else _next_port(db, set())
         project_dir = os.path.abspath(compose_service.project_dir(name))
         container_port = project.container_port
+        # Write the DB-stored env to disk so the new container starts with it.
+        env_service.materialize(db, project)
+        env_file = env_service.project_env_file(db, project)
     finally:
         db.close()
 
@@ -273,6 +295,7 @@ def bluegreen_deploy(project_id: int, install_script: Optional[str] = None,
     cmd = _deploy_script(
         project_dir, install_script, plugin_dir,
         image_name, container_name, green_port, container_port,
+        env_file=env_file,
     )
 
     def promote(log: Callable[[str], None]) -> None:
@@ -304,10 +327,10 @@ def bluegreen_deploy(project_id: int, install_script: Optional[str] = None,
 
 
 def rollback_to_version(project_id: int, version: int) -> str:
-    """Make an existing inactive/archived version active again: bring its container up
-    (`docker start` for inactive, `docker run` from the retained image for archived), switch
-    nginx to it, and re-shuffle statuses (does NOT bump version_counter). Streams over the
-    same `WS /projects/{name}/deploy`."""
+    """Make an existing inactive/archived version active again: recreate its container from
+    the retained image (with the project's current environment), switch nginx to it, and
+    re-shuffle statuses (does NOT bump version_counter). Streams over the same
+    `WS /projects/{name}/deploy`."""
     from app.routers.projects import _next_port  # lazy
 
     db = SessionLocal()
@@ -326,11 +349,14 @@ def rollback_to_version(project_id: int, version: int) -> str:
         else:
             new_port = _next_port(db, set())
             target_port = new_port
+        env_service.materialize(db, project)
+        env_file = env_service.project_env_file(db, project)
     finally:
         db.close()
 
     job_key = deploy_job_key(name)
-    cmd = _rollback_script(target_status, image_name, container_name, target_port, container_port)
+    cmd = _rollback_script(target_status, image_name, container_name, target_port,
+                           container_port, env_file=env_file)
 
     def promote(log: Callable[[str], None]) -> None:
         db2 = SessionLocal()
@@ -385,11 +411,17 @@ def compose_snapshot_dir(project: str, n: int) -> str:
     return os.path.join(compose_versions_root(project), f"v{n}")
 
 
-def _compose_files_cmd(name: str, project_dir: str, *args: str, pins: bool = False) -> list:
+def _compose_files_cmd(name: str, project_dir: str, *args: str, pins: bool = False,
+                       env_file: Optional[str] = None) -> list:
     """A `docker compose` invocation on the project's compose + override files, optionally
-    adding the generated image-pin override so `up` runs exactly the retained v{N} tags."""
+    adding the generated image-pin override so `up` runs exactly the retained v{N} tags.
+
+    `env_file` is the project-level materialized env file; it feeds `${VAR}` interpolation
+    (see `docker_service.compose_env_flags` for why the project's own `.env` tags along).
+    Injection into the containers is separate — the override carries `env_file:` entries."""
     cmd = [
         "docker", "compose", "-p", name,
+        *docker_service.compose_env_flags(project_dir, env_file),
         "-f", os.path.join(project_dir, "docker-compose.yml"),
         "-f", os.path.join(project_dir, "docker-compose.override.yml"),
     ]
@@ -428,14 +460,15 @@ def _run_phase(job_key: str, log_path: str, cmd: list) -> int:
         return proc.wait()
 
 
-def _resolve_compose_services(name: str, project_dir: str) -> dict:
+def _resolve_compose_services(name: str, project_dir: str,
+                              env_file: Optional[str] = None) -> dict:
     """Resolve the stack's services via `docker compose config`: service → {image, build}.
 
     `image` is the tag the service will run after build/pull: the (env-substituted)
     `image:` from the compose files, or compose v2's default `{project}-{service}` build
     tag when only `build:` is given. Raises RuntimeError on a config failure."""
     result = subprocess.run(
-        _compose_files_cmd(name, project_dir, "config", "--format", "json"),
+        _compose_files_cmd(name, project_dir, "config", "--format", "json", env_file=env_file),
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -569,6 +602,10 @@ def compose_bluegreen_deploy(project_id: int) -> str:
         n = project.version_counter + 1
         prev = next((v for v in project.versions if v.status == "active"), None)
         prev_version = prev.version if prev else None
+        # Write the DB-stored env to disk before anything reads the compose files —
+        # `docker compose config` (step 1 of the job) resolves ${VAR} from it.
+        env_service.materialize(db, project)
+        env_file = env_service.project_env_file(db, project)
     finally:
         db.close()
 
@@ -580,14 +617,15 @@ def compose_bluegreen_deploy(project_id: int) -> str:
     )
     threading.Thread(
         target=_compose_deploy_job,
-        args=(project_id, name, n, prev_version, project_dir, job_key, log_path),
+        args=(project_id, name, n, prev_version, project_dir, job_key, log_path, env_file),
         daemon=True,
     ).start()
     return job_key
 
 
 def _compose_deploy_job(project_id: int, name: str, n: int, prev_version: Optional[int],
-                        project_dir: str, job_key: str, log_path: str) -> None:
+                        project_dir: str, job_key: str, log_path: str,
+                        env_file: Optional[str] = None) -> None:
     def log(msg: str) -> None:
         _append_log(log_path, msg)
 
@@ -603,11 +641,11 @@ def _compose_deploy_job(project_id: int, name: str, n: int, prev_version: Option
     try:
         # 1. Resolve the stack's services + target images (env-substituted).
         log(f"── resolving services for v{n} ──")
-        services = _resolve_compose_services(name, project_dir)
+        services = _resolve_compose_services(name, project_dir, env_file)
 
         # 2. Build — the old stack keeps serving through the long part.
         log("── docker compose build ──")
-        code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "build", "--progress=plain"))
+        code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "build", "--progress=plain", env_file=env_file))
         if _aborted(job_key) or code != 0:
             fail(code or 1, f"── build failed (exit {code}) — current version kept ──")
             return
@@ -638,12 +676,12 @@ def _compose_deploy_job(project_id: int, name: str, n: int, prev_version: Option
 
         # 5. Brief switchover: down the old stack, up the pinned new one.
         log("── switching: docker compose down ──")
-        code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "down"))
+        code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "down", env_file=env_file))
         if _aborted(job_key) or code != 0:
             fail(code or 1, f"── down failed (exit {code}) ──")
             return
         log(f"── switching: docker compose up (v{n}) ──")
-        code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "up", "-d", "--no-build", pins=True))
+        code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "up", "-d", "--no-build", pins=True, env_file=env_file))
         if _aborted(job_key) or code != 0:
             log(f"── up failed (exit {code}) ──")
             if prev_version is not None:
@@ -668,6 +706,22 @@ def _compose_deploy_job(project_id: int, name: str, n: int, prev_version: Option
         docker_service.finish_external_job(job_key, 0)
     except Exception as e:  # never leave the job stuck "running"
         fail(1, f"── deploy error: {e} ──")
+
+
+def compose_restart(name: str, project_dir: str, env_file: Optional[str] = None) -> str:
+    """Recreate a compose stack's containers on the images it already runs, so an edited
+    environment is picked up without rebuilding anything. Returns the job key.
+
+    `up -d --no-build` on the generated pin file, exactly like a deploy's switchover `up`:
+    compose recreates only the services whose resolved config changed (the `env_file:`
+    contents included) and leaves the rest running. Pinning matters — without it `up` would
+    re-resolve `image:`/`build:` from the compose file and could pull or build something
+    other than the version currently active. A stack deployed before pinning existed has no
+    pin file; there `--no-build` alone still guarantees no rebuild."""
+    pins = os.path.exists(os.path.join(project_dir, PIN_FILE))
+    cmd = _compose_files_cmd(name, project_dir, "up", "-d", "--no-build",
+                             pins=pins, env_file=env_file)
+    return docker_service.spawn_job(compose_job_key(name), "compose_up", cmd)
 
 
 def compose_rollback_to_version(project_id: int, version: int) -> str:
@@ -707,13 +761,26 @@ def _compose_rollback_job(project_id: int, name: str, version: int,
         log(msg)
         docker_service.finish_external_job(job_key, exit_code, aborted=_aborted(job_key))
 
+    def current_env_file() -> Optional[str]:
+        """(Re)materialize the project's env and return the project-level file. Env is not
+        rolled back with the code — the DB is always the source of truth — so this is read
+        fresh, and again after step 3 re-provisions the service rows."""
+        db = SessionLocal()
+        try:
+            project = db.query(Project).filter(Project.id == project_id).first()
+            env_service.materialize(db, project)
+            return env_service.project_env_file(db, project)
+        finally:
+            db.close()
+
     try:
         snap = compose_snapshot_dir(name, version)
+        env_file = current_env_file()
 
         # 1. Down the current stack (with the current files, while they're still on disk).
         if os.path.exists(compose_service.override_file_path(name)):
             log("── docker compose down (current version) ──")
-            code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "down"))
+            code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "down", env_file=env_file))
             if _aborted(job_key) or code != 0:
                 fail(code or 1, f"── down failed (exit {code}) — rollback stopped ──")
                 return
@@ -739,8 +806,10 @@ def _compose_rollback_job(project_id: int, name: str, version: int,
             db.close()
 
         # 4. Up on the retained v{version} tags (the snapshot carries its own pin file).
+        #    Re-provisioning rewrote the override, so pick the env paths up again.
+        env_file = current_env_file()
         log(f"── docker compose up (v{version}) ──")
-        code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "up", "-d", "--no-build", pins=True))
+        code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "up", "-d", "--no-build", pins=True, env_file=env_file))
         if _aborted(job_key) or code != 0:
             fail(code or 1, f"── up failed (exit {code}) ──")
             return

@@ -1372,6 +1372,150 @@ def set_domain(project: str, domain: str | None, service: str | None, clear: boo
         console.print("[bold green]✓ Done[/]")
 
 
+# ── environment variables ──────────────────────────────────────────────────────
+
+def _env_path(project: str, service: str | None) -> str:
+    return (f"/projects/{project}/services/{service}/env" if service
+            else f"/projects/{project}/env")
+
+
+def _env_scope(project: str, service: str | None) -> str:
+    return f"[cyan]{project}[/] · service [cyan]{service}[/]" if service else f"[cyan]{project}[/]"
+
+
+def _print_env_result(data: dict, project: str, service: str | None) -> None:
+    keys = data.get("keys", [])
+    console.print(f"[bold green]✓[/] {len(keys)} variable(s) stored for {_env_scope(project, service)}"
+                  + (f": [dim]{', '.join(keys)}[/]" if keys else ""))
+    if not data.get("applied", True):
+        console.print(f"[yellow]![/] Not live yet — apply with: [bold]fhcli restart {project}[/]")
+
+
+@cli.command("env-get")
+@click.argument("project")
+@click.option("--service", "-s", default=None,
+              help="For compose projects: read this service's own file instead of the shared one.")
+@click.option("--output", "-o", "output", default=None,
+              help="Write to this file instead of stdout.")
+def env_get(project: str, service: str | None, output: str | None):
+    """Download PROJECT's .env file.
+
+    Prints the file to stdout so it can be redirected, or writes it to --output.
+    Without --service you get the project-level file: for a single-container project
+    that is the container's environment, for a compose project the file shared by every
+    service.
+
+    \b
+    Examples:
+      fhcli env-get myapp                    # print to stdout
+      fhcli env-get myapp > .env             # save it
+      fhcli env-get myapp -o backup.env
+      fhcli env-get mystack -s db            # one compose service's own file
+    """
+    data = _get(_env_path(project, service))
+    content = data.get("content", "")
+    if output:
+        Path(output).write_text(content)
+        n = len(data.get("keys", []))
+        console.print(f"[green]✓[/] Wrote {n} variable(s) for {_env_scope(project, service)} to [bold]{output}[/]")
+        if not data.get("applied", True):
+            console.print(f"[yellow]![/] The stored file is newer than the running container — "
+                          f"apply with: [bold]fhcli restart {project}[/]")
+    else:
+        click.echo(content, nl=False)
+
+
+@cli.command("env-set")
+@click.argument("project")
+@click.argument("file", type=click.Path())
+@click.option("--service", "-s", default=None,
+              help="For compose projects: set this service's own file (wins over the shared one).")
+def env_set(project: str, file: str, service: str | None):
+    """Upload FILE as PROJECT's .env file (replaces the whole file).
+
+    FILE of "-" reads stdin. The file is stored only — a running container keeps its
+    current environment until it is next started, so follow up with `fhcli restart`
+    (which recreates the container from the image it already runs, with no rebuild).
+
+    \b
+    Examples:
+      fhcli env-set myapp .env
+      printf 'DEBUG=1\\n' | fhcli env-set myapp -
+      fhcli env-set mystack db.env -s db     # one compose service's own file
+    """
+    if file == "-":
+        content = sys.stdin.read()
+    else:
+        path = Path(file)
+        if not path.is_file():
+            console.print(f"[bold red]Error:[/] no such file: {file}")
+            sys.exit(1)
+        content = path.read_text()
+
+    data = _put(_env_path(project, service), json={"content": content})
+    _print_env_result(data, project, service)
+
+
+@cli.command("env-clear")
+@click.argument("project")
+@click.option("--service", "-s", default=None,
+              help="For compose projects: clear this service's own file.")
+def env_clear(project: str, service: str | None):
+    """Delete PROJECT's .env file.
+
+    Like env-set, this takes effect the next time the container starts.
+
+    \b
+    Examples:
+      fhcli env-clear myapp
+      fhcli env-clear mystack -s db
+    """
+    data = _delete(_env_path(project, service))
+    console.print(f"[green]✓[/] {data.get('message') or 'Environment cleared'} for {_env_scope(project, service)}")
+
+
+@cli.command("restart")
+@click.argument("project")
+@click.option(
+    "--follow/--no-follow",
+    default=True,
+    help="Wait for the operation to complete (default: on).",
+)
+def restart_project(project: str, follow: bool):
+    """Recreate PROJECT's container(s) so edited environment variables take effect.
+
+    Nothing is rebuilt — the containers are recreated from the images they already run,
+    which is what it takes for a new environment to be picked up (a container's env is
+    fixed when it is created). For a compose project only the services whose environment
+    actually changed are recreated.
+
+    \b
+    Examples:
+      fhcli restart myapp
+      fhcli restart mystack --no-follow
+    """
+    console.print(f"Restarting [cyan]{project}[/]…")
+    data = _post(f"/projects/{project}/restart")
+
+    if data.get("status") == "no_job":
+        console.print(f"[red]✗[/] {data.get('message', 'Unknown error')}")
+        sys.exit(1)
+
+    if not follow:
+        console.print(f"[green]✓[/] Restart issued. Check with: [bold]fhcli status {project}[/]")
+        return
+
+    # docker_service tags the job by operation: compose stacks run `compose_up`, and their
+    # job lives under the compose key, so they are polled on the compose status endpoint.
+    compose = str(data.get("operation") or "").startswith("compose")
+    status_path = (f"/projects/{project}/compose/status" if compose
+                   else f"/projects/{project}/status")
+    result = _poll_status_path(status_path)
+    _print_job_result(result, success_msg="Restarted", fail_msg="Restart failed")
+    if result["status"] != "done":
+        sys.exit(1)
+
+
 # ── entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

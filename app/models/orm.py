@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.models.database import Base
@@ -33,6 +33,7 @@ class Project(Base):
 
     services = relationship("ComposeService", back_populates="project", cascade="all, delete-orphan")
     versions = relationship("ProjectVersion", back_populates="project", cascade="all, delete-orphan")
+    env_files = relationship("ProjectEnvFile", back_populates="project", cascade="all, delete-orphan")
 
     @property
     def effective_domain(self) -> str | None:
@@ -93,6 +94,31 @@ class ProjectVersion(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     project = relationship("Project", back_populates="versions")
+
+
+class ProjectEnvFile(Base):
+    """A .env-format file for a project, stored in the DB (the source of truth).
+
+    `service_name == ""` is the project-level file: for a dockerfile project that IS the
+    container's environment; for a compose project it is the shared file applied to every
+    service. A non-empty `service_name` is that one compose service's own file, and its
+    values win over the project-level ones.
+
+    Content is kept verbatim as the user typed it (comments and blank lines included);
+    `env_service` re-renders a normalized KEY=value file under `{DATA_DIR}/env/{project}/`
+    at deploy/restart time. Nothing is written into PROJECTS_DIR — git redeploys and
+    compose rollbacks wipe that directory, and the plugin-owned `{project_dir}/.env`
+    (compose ${VAR} interpolation) must never be clobbered."""
+    __tablename__ = "project_env_files"
+    __table_args__ = (UniqueConstraint("project_id", "service_name"),)
+
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    service_name = Column(String, nullable=False, default="")   # "" = project-level
+    content = Column(Text, nullable=False, default="")
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    project = relationship("Project", back_populates="env_files")
 
 
 class Token(Base):

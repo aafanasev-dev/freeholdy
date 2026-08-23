@@ -116,6 +116,22 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   (`Dashboard.handleDeployStream`) to the shared `InstallPane`, exactly like a deploy. `mkApi` now also
   has a `put`.
 - Compose lifecycle: `.../compose/{down|abort}`, `GET .../compose/status` (no `/build` or `/up`)
+- **Environment variables** (both modes): `GET|PUT|DELETE /projects/{name}/env` for the project-level
+  `.env` file (a dockerfile project's container env; a compose stack's shared file) and
+  `GET|PUT|DELETE /projects/{name}/services/{service}/env` for one service's own file, whose values
+  override the shared ones. `EnvResponse` carries `{ project, service, content, keys, updated_at,
+  applied, status, message }`. Saving is **save-only** — the server never restarts anything, so
+  `applied: false` means the running container still has the old values; `EnvModal` then shows an
+  amber banner with a **restart now** button. `POST /projects/{name}/restart` recreates the
+  container(s) from the images they already run (no rebuild) and reports like `stop`/`down`, so it
+  flows through the normal `handleOperation` → `LogPane` polling (compose needs `kind: "compose"`).
+  `ContainerInfo`/`ServiceInfo` gained `env_count`, rendered as the count on the `env` button.
+  `EnvModal` uses the `TextArea` primitive (mono, `whiteSpace: "pre"`, resizable) added next to
+  `TextIn`; the global `<style>` block's placeholder/focus rules cover `input, textarea`.
+  A **PUT with malformed dotenv returns a FastAPI 422**, whose `detail` is a *list* of
+  `{loc, msg}` objects rather than a string — `mkApi`'s `unwrap` flattens that to newline-joined
+  `msg` text (and strips pydantic's `"Value error, "` prefix), so `e.message` never renders
+  `[object Object]`; `Err` is `white-space: pre-wrap` to keep the per-line breakdown readable.
 - **Exec is a WebSocket, not REST:** `WS /projects/{name}/exec` (dockerfile) and
   `WS /projects/{name}/services/{service}/exec` (compose) bridge an interactive `docker exec -it`
   shell. `ExecTerminal` renders an xterm.js terminal (`@xterm/xterm` + `@xterm/addon-fit`): auth
@@ -174,10 +190,16 @@ call sites in `UploadModal`/`DeployForm` (the source isn't in the deploy respons
 Two row components render the project table; a `pending` project (created, not yet uploaded) renders
 neither — `ProjectCard` shows an "awaiting upload" placeholder and a `pending` chip in the header:
 - `ContainerRow` — dockerfile mode, one row, drives the remaining project-level control endpoints
-  (`stop`, `ssl`, `domain`, `status`, `exec`). Build + run happen via the deploy/upload flow, not a button.
-- `ServiceRow` — compose mode (name/subdomain/port/ssl/status) plus a per-service **exec** button
-  (and the custom-domain button); the stack's **down** lives on the `ProjectCard` header (build + up
-  happen via the deploy/upload flow). The exec button opens an `ExecTerminal` for that service's container.
+  (`stop`, `ssl`, `domain`, `env`, `restart`, `status`, `exec`). Build + run happen via the
+  deploy/upload flow, not a button.
+- `ServiceRow` — compose mode (name/subdomain/port/ssl/status) plus a per-service **exec** and
+  **env** button (and the custom-domain button, exposed services only); the stack's **env**,
+  **restart** and **down** live on the `ProjectCard` header (build + up happen via the
+  deploy/upload flow). The exec button opens an `ExecTerminal` for that service's container.
+
+Note both rows render their modals as `<div>`s directly under `<tbody>` (`ContainerRow`) — React
+logs a `validateDOMNesting` warning for that. It predates the env work (`DomainModal`,
+`VersionsModal` and `ExecTerminal` all do it); `EnvModal` follows the same placement.
 
 Operation flow (`Dashboard` + `ContainerRow`):
 - Control buttons (`stop`, compose `down`) call the endpoint, then push an `activeLog` into the

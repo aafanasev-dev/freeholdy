@@ -443,17 +443,19 @@ freeholdy/
 │   ├── auth.py               # Bearer token hashing + middleware
 │   ├── models/
 │   │   ├── database.py       # SQLAlchemy + SQLite setup
-│   │   ├── orm.py            # DB models: Project, ComposeService, Token
+│   │   ├── orm.py            # DB models: Project, ComposeService, ProjectVersion, ProjectEnvFile, Token
 │   │   └── schemas.py        # Pydantic request/response models
 │   ├── routers/
 │   │   ├── projects.py       # GET/DELETE /projects + unified /upload (auto-create + autodetect)
 │   │   ├── container.py      # dockerfile lifecycle: build / start / stop / exec / ssl / status / abort
 │   │   ├── compose.py        # provision_compose + compose lifecycle: build / up / down / status / abort
-│   │   └── plugins.py        # list + add plugins
+│   │   ├── plugins.py        # list + add plugins
+│   │   └── env.py            # per-project / per-service environment variables
 │   ├── services/
 │   │   ├── docker_service.py # docker / docker compose subprocess wrapper
 │   │   ├── nginx_service.py  # config generation + certbot + reload
 │   │   ├── compose_service.py# compose file parsing + override generation
+│   │   ├── env_service.py    # .env parsing + materializing env files for docker
 │   │   ├── plugin_service.py # plugin discovery + staging
 │   │   └── scan.py           # WebSocket detection in Dockerfiles/compose
 │   └── templates/
@@ -466,7 +468,7 @@ freeholdy/
 ├── scripts/
 │   ├── generate_token.py     # Token management CLI
 │   └── cert-manager.sh       # Cron-based cert renewal
-├── data/                     # SQLite DB (gitignored)
+├── data/                     # SQLite DB, version snapshots, env files (gitignored)
 ├── projects/                 # per-project files for both modes (gitignored)
 ├── nginx_configs/            # Local config backups (gitignored)
 ├── install.sh                # Installer — auto-detects fresh VPS vs side-by-side

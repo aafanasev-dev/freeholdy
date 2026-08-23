@@ -55,10 +55,21 @@ const describeSelection = (srcKind, entries, rootName) =>
 const mkApi = (token) => {
   const h = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
   const hf = { Authorization: `Bearer ${token}` };
+  // FastAPI reports a plain string in `detail` for HTTPException, but a list of
+  // {loc, msg, …} objects for a 422 request-validation failure — flatten those to text
+  // so callers surfacing e.message never render "[object Object]".
+  const detailText = (d, status) => {
+    if (typeof d === "string" && d) return d;
+    if (Array.isArray(d) && d.length) {
+      // pydantic prefixes a custom validator's ValueError with "Value error, " — noise here.
+      return d.map(x => (x?.msg || JSON.stringify(x)).replace(/^Value error, /, "")).join("\n");
+    }
+    return `HTTP ${status}`;
+  };
   const unwrap = async (r) => {
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
-      throw new Error(e.detail || `HTTP ${r.status}`);
+      throw new Error(detailText(e.detail, r.status));
     }
     return r.json();
   };
@@ -183,8 +194,21 @@ const TextIn = ({ value, onChange, placeholder, type = "text", style: st = {} })
   />
 );
 
+const TextArea = ({ value, onChange, placeholder, rows = 14, style: st = {} }) => (
+  <textarea
+    value={value} placeholder={placeholder} rows={rows} spellCheck={false}
+    onChange={e => onChange(e.target.value)}
+    style={{
+      background: C.s2, border: `1px solid ${C.bdB}`, color: C.txt,
+      fontFamily: C.mono, fontSize: "11px", lineHeight: 1.65, padding: "10px 11px",
+      borderRadius: "10px", outline: "none", width: "100%", boxSizing: "border-box",
+      resize: "vertical", whiteSpace: "pre", overflowWrap: "normal", overflowX: "auto", ...st,
+    }}
+  />
+);
+
 const Err = ({ msg }) => msg ? (
-  <div style={{ color: C.red, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: C.redFill, border: `1px solid ${C.redBd}`, borderRadius: "10px" }}>
+  <div style={{ color: C.red, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: C.redFill, border: `1px solid ${C.redBd}`, borderRadius: "10px", whiteSpace: "pre-wrap" }}>
     ✗ {msg}
   </div>
 ) : null;
@@ -861,6 +885,103 @@ const DomainModal = ({ token, project, service = null, info, onClose, onDone }) 
   );
 };
 
+// ── Environment variables modal ─────────────────────────────────────────────────
+// Edits the .env file freeholdy stores for a project (or for one compose service, which
+// wins over the shared project-level file on a key collision). Saving is save-only: the
+// values reach the container the next time it starts, so when the server reports
+// applied === false the modal offers a restart, which recreates the container(s) from the
+// images they already run — no rebuild — and streams through the usual LogPane polling.
+const EnvModal = ({ token, project, service = null, compose = false, onClose, onRefresh, onRestart }) => {
+  const [content, setContent] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [applied, setApplied] = useState(true);
+  const [keys, setKeys] = useState([]);
+  const [busy, setBusy] = useState({});
+  const [error, setError] = useState("");
+  const [ok, setOk] = useState("");
+  const title = service ? `${project} → ${service}` : project;
+  const path = service
+    ? `/projects/${project}/services/${service}/env`
+    : `/projects/${project}/env`;
+
+  const absorb = (d) => { setContent(d.content || ""); setKeys(d.keys || []); setApplied(d.applied); };
+
+  const load = async () => {
+    try { absorb(await mkApi(token).get(path)); setLoaded(true); }
+    catch (e) { setError(e.message); setLoaded(true); }
+  };
+  useEffect(() => { load(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const run = async (key, fn) => {
+    setError(""); setOk("");
+    setBusy(b => ({ ...b, [key]: true }));
+    try {
+      const d = await fn();
+      absorb(d);
+      setOk(d.message || "saved");
+      onRefresh && onRefresh();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(b => ({ ...b, [key]: false })); }
+  };
+
+  const save  = () => run("save",  () => mkApi(token).put(path, { content }));
+  const clear = () => run("clear", () => mkApi(token).del(path));
+
+  return (
+    <Modal onClose={onClose} width={660}>
+      <ModalHeader title={`ENVIRONMENT — ${title}`} color={C.blue} onClose={onClose} />
+      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "12px", lineHeight: "1.6" }}>
+        {service
+          ? <>this service&apos;s own variables — they override the project-level ones</>
+          : compose
+            ? <>shared by every service in this stack — a service&apos;s own file wins on a clash</>
+            : <>passed to this project&apos;s container</>}
+        {keys.length > 0 && <span style={{ color: C.dim }}> · {keys.length} variable(s)</span>}
+      </div>
+
+      <Field label="DOTENV FILE" style={{ marginBottom: "8px" }}>
+        <TextArea
+          value={content} onChange={setContent}
+          placeholder={loaded ? "KEY=value\n# comments and blank lines are kept" : "loading…"}
+        />
+      </Field>
+      <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", marginBottom: "12px" }}>
+        One <code style={{ fontFamily: C.mono }}>KEY=value</code> per line. Values are passed to the
+        container exactly as written — no quoting needed, and they must stay on one line.
+      </div>
+
+      {!applied && (
+        <div style={{
+          color: C.amber, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px",
+          background: C.amberFill, border: `1px solid ${C.amberBd}`, borderRadius: "10px",
+          marginBottom: "12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px",
+        }}>
+          <span>⚠ saved, but the running container still has the old values</span>
+          {onRestart && (
+            <Btn sm v="amber" busy={busy.restart} onClick={async () => {
+              setBusy(b => ({ ...b, restart: true }));
+              try { await onRestart(); onClose(); }
+              finally { setBusy(b => ({ ...b, restart: false })); }
+            }}>restart now</Btn>
+          )}
+        </div>
+      )}
+      {ok && <div style={{ marginBottom: "12px" }}><Ok msg={ok} /></div>}
+      {error && <Err msg={error} />}
+
+      <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", marginTop: "12px" }}>
+        <div>
+          {keys.length > 0 && <Btn v="amber" onClick={clear} busy={busy.clear}>clear</Btn>}
+        </div>
+        <div style={{ display: "flex", gap: "8px" }}>
+          <Btn v="ghost" onClick={onClose} disabled={busy.save}>close</Btn>
+          <Btn v="primary" onClick={save} busy={busy.save}>save</Btn>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
 // ── Versions modal (blue/green backups) ─────────────────────────────────────────
 // Lists a project's deployed versions (dockerfile: active / inactive / archived; compose:
 // active / archived — a compose switchover downs the previous stack), lets the user set the
@@ -909,6 +1030,7 @@ const VersionsModal = ({ token, project, onClose, onStream, onRefresh }) => {
   };
 
   const counts = data?.counts || {};
+
   const TH = ({ children, right, center }) => (
     <th style={{ padding: "4px 10px", textAlign: right ? "right" : center ? "center" : "left", color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.1em", fontWeight: 400, whiteSpace: "nowrap" }}>{children}</th>
   );
@@ -1034,6 +1156,10 @@ const ContainerRow = ({ project, info, token, onOperation, onRefresh, onStream }
             <Btn sm v="amber" onClick={() => setModal({ type: "exec" })} disabled={!isRunning} title="Exec command in container">exec</Btn>
             <Btn sm onClick={() => act("ssl")} busy={busy.ssl} title="Issue/renew SSL cert">ssl</Btn>
             <Btn sm v="blue" onClick={() => setModal({ type: "domain" })} title="Set or clear a custom domain">domain</Btn>
+            <Btn sm v="blue" onClick={() => setModal({ type: "env" })} title="Edit environment variables">
+              env{info.env_count > 0 ? ` ${info.env_count}` : ""}
+            </Btn>
+            <Btn sm v="amber" onClick={() => act("restart")} busy={busy.restart} title="Recreate the container so env changes take effect (no rebuild)">restart</Btn>
             <Btn sm v="purple" onClick={() => setModal({ type: "versions" })} title="View versions, roll back, set backup limit">versions</Btn>
             <Btn sm v="ghost" onClick={() => act("status")} busy={busy.status} title="View job status & logs">status</Btn>
           </div>
@@ -1044,13 +1170,14 @@ const ContainerRow = ({ project, info, token, onOperation, onRefresh, onStream }
       {modal?.type === "status"     && <StatusModal data={modal.data} project={project} onClose={() => setModal(null)} />}
       {modal?.type === "ssl"        && <SslModal data={modal.data} project={project} onClose={() => setModal(null)} />}
       {modal?.type === "domain"     && <DomainModal token={token} project={project} info={info} onClose={() => setModal(null)} onDone={onRefresh} />}
+      {modal?.type === "env"        && <EnvModal token={token} project={project} onClose={() => setModal(null)} onRefresh={onRefresh} onRestart={() => act("restart")} />}
       {modal?.type === "versions"   && <VersionsModal token={token} project={project} onClose={() => setModal(null)} onStream={onStream} onRefresh={onRefresh} />}
     </>
   );
 };
 
 // ── Service row (compose mode: per-service exec + custom domain; stack lifecycle is on the card) ──
-const ServiceRow = ({ project, info, token, onOperation, onRefresh }) => {
+const ServiceRow = ({ project, info, token, onOperation, onRefresh, onRestart }) => {
   const [modal, setModal] = useState(null);
   const isRunning = info.container_status === "running";
 
@@ -1063,9 +1190,13 @@ const ServiceRow = ({ project, info, token, onOperation, onRefresh }) => {
           {info.exposed !== false && (
             <Btn sm v="blue" onClick={() => setModal("domain")} title="Set or clear a custom domain">domain</Btn>
           )}
+          <Btn sm v="blue" onClick={() => setModal("env")} title="Edit this service's environment variables">
+            env{info.env_count > 0 ? ` ${info.env_count}` : ""}
+          </Btn>
         </div>
         {modal === "exec"   && <ExecTerminal token={token} project={project} service={info.name} label={`${project} → ${info.name}`} onClose={() => setModal(null)} />}
         {modal === "domain" && <DomainModal token={token} project={project} service={info.name} info={info} onClose={() => setModal(null)} onDone={onRefresh} />}
+        {modal === "env"    && <EnvModal token={token} project={project} service={info.name} onClose={() => setModal(null)} onRefresh={onRefresh} onRestart={onRestart} />}
       </td>
     </tr>
   );
@@ -1078,6 +1209,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
   const [busy, setBusy] = useState({});
   const [uploadModal, setUploadModal] = useState(false);
   const [versionsModal, setVersionsModal] = useState(false);
+  const [envModal, setEnvModal] = useState(false);
   const isCompose = project.deploy_mode === "compose";
   const isPending = project.deploy_mode !== "compose" && project.deploy_mode !== "dockerfile";
   const isPlugin = project.type === "plugin";
@@ -1102,6 +1234,25 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
       onOperation({ project: project.name, kind: "compose", operation: `compose_${action}`, status: "error", logs: e.message });
     } finally {
       setBusy(b => ({ ...b, [action]: false }));
+    }
+  };
+
+  // Recreate the project's container(s) from the images they already run — how an edited
+  // environment goes live. Compose stacks report on the compose status endpoint, so the
+  // LogPane needs kind: "compose" for them.
+  const restart = async () => {
+    setBusy(b => ({ ...b, restart: true }));
+    try {
+      const data = await mkApi(token).post(`/projects/${project.name}/restart`);
+      onOperation({
+        project: project.name, kind: isCompose ? "compose" : undefined,
+        operation: data.operation || "restart", status: data.status,
+        logs: data.logs || data.message || "",
+      });
+    } catch (e) {
+      onOperation({ project: project.name, kind: isCompose ? "compose" : undefined, operation: "restart", status: "error", logs: e.message });
+    } finally {
+      setBusy(b => ({ ...b, restart: false }));
     }
   };
 
@@ -1136,6 +1287,12 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
           <div style={{ display: "flex", gap: "6px" }}>
             <Btn sm v="primary" onClick={() => setUploadModal(true)} title="Upload files or a folder — auto-detects Dockerfile / docker-compose.yml, provisions, and deploys">{isPending ? "upload" : "deploy"}</Btn>
             {isCompose && (
+              <Btn sm v="blue" onClick={() => setEnvModal(true)} title="Edit the environment variables shared by every service">env</Btn>
+            )}
+            {isCompose && (
+              <Btn sm v="amber" onClick={restart} busy={busy.restart} title="Recreate the stack's containers so env changes take effect (no rebuild)">restart</Btn>
+            )}
+            {isCompose && (
               <Btn sm v="purple" onClick={() => setVersionsModal(true)} title="View versions, roll back, set backup limit">versions</Btn>
             )}
             {isCompose && (
@@ -1163,7 +1320,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
             </thead>
             <tbody>
               {isCompose
-                ? (project.services || []).map(s => <ServiceRow key={s.name} project={project.name} info={s} token={token} onOperation={onOperation} onRefresh={onRefresh} />)
+                ? (project.services || []).map(s => <ServiceRow key={s.name} project={project.name} info={s} token={token} onOperation={onOperation} onRefresh={onRefresh} onRestart={restart} />)
                 : (project.container
                     ? <ContainerRow project={project.name} info={project.container} token={token} onOperation={onOperation} onRefresh={onRefresh} onStream={onStream} />
                     : null)}
@@ -1175,6 +1332,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
 
       {uploadModal && <UploadModal token={token} project={project.name} onClose={() => setUploadModal(false)} onUploaded={() => onRefresh && onRefresh()} onDeploy={onDeploy} />}
       {versionsModal && <VersionsModal token={token} project={project.name} onClose={() => setVersionsModal(false)} onStream={onStream} onRefresh={onRefresh} />}
+      {envModal && <EnvModal token={token} project={project.name} compose onClose={() => setEnvModal(false)} onRefresh={onRefresh} onRestart={restart} />}
       {confirm && <ConfirmModal message={`Delete "${project.name}"? This stops containers, removes images and nginx config.`} onConfirm={remove} onCancel={() => setConfirm(false)} loading={removing} />}
     </>
   );
@@ -1745,8 +1903,8 @@ export default function App() {
         ::-webkit-scrollbar-track { background: #1C2334; }
         ::-webkit-scrollbar-thumb { background: #3D4964; border-radius: 8px; }
         ::-webkit-scrollbar-thumb:hover { background: #4E5C7D; }
-        input::placeholder { color: #657089; }
-        input:focus { border-color: #5B9EFF !important; box-shadow: 0 0 0 3px rgba(91,158,255,.35); }
+        input::placeholder, textarea::placeholder { color: #657089; }
+        input:focus, textarea:focus { border-color: #5B9EFF !important; box-shadow: 0 0 0 3px rgba(91,158,255,.35); }
         select option { background: #161C2B; color: #E9EDF5; }
         a { transition: color .15s; }
         a:hover { color: #5B9EFF; }

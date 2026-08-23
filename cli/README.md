@@ -40,6 +40,10 @@ alias fhcli="$(pwd)/venv/bin/python $(pwd)/fhcli.py"
 | `fhcli plugin-add PLUGIN PROJECT` | Create a project from a plugin, then build + run it |
 | `fhcli deploy NAME SOURCE [--branch B] [--dest DIR] [--no-follow]` | **Deploy a project** — auto-creates it if new, redeploys if it exists. `SOURCE` is a local file/folder (zipped + streamed in 1 MiB chunks) **or** a git clone URL (cloned server-side). Either way the server auto-detects Dockerfile/compose, provisions nginx + SSL, then builds + runs it (deploy log streams live). `--branch` is git-only; `--dest` is local-upload-only. |
 | `fhcli stop PROJECT` | Stop the container |
+| `fhcli restart PROJECT [--no-follow]` | Recreate the container(s) from the images they already run — no rebuild. How edited environment variables take effect |
+| `fhcli env-get PROJECT [-s SERVICE] [-o FILE]` | Download the project's (or one compose service's) `.env` file — prints to stdout, or writes `FILE` |
+| `fhcli env-set PROJECT FILE [-s SERVICE]` | Upload `FILE` as that `.env` file (`-` reads stdin). Saved only — run `restart` to apply |
+| `fhcli env-clear PROJECT [-s SERVICE]` | Delete that `.env` file |
 | `fhcli exec PROJECT "COMMAND"` | Run a command inside the container |
 | `fhcli ssl PROJECT` | Issue / retry the SSL certificate |
 | `fhcli compose-down PROJECT` | `docker compose down` |
@@ -93,6 +97,40 @@ fhcli compose-status myapp
 # Tear the stack down
 fhcli compose-down myapp
 ```
+
+## Environment variables
+
+freeholdy stores a `.env`-format file per project in its database and passes those
+variables to the container when it starts. A compose project also gets one file per
+service, whose values override the shared project-level ones.
+
+Editing is **save-only**: `env-set` stores the file and returns. Nothing is rebuilt and
+the running container keeps its current environment until `restart` recreates it from the
+image it is already running (a container's environment is fixed when it is created, so
+this is what it takes). `env-get` warns when the stored file is ahead of what is running.
+
+```bash
+# Round-trip a project's environment
+fhcli env-get myapp > .env
+$EDITOR .env
+fhcli env-set myapp .env
+fhcli restart myapp            # now the container has them
+
+# Straight from stdin
+printf 'DEBUG=1\nLOG_LEVEL=info\n' | fhcli env-set myapp -
+
+# Compose: a shared file plus per-service overrides
+fhcli env-set mystack shared.env          # every service gets these
+fhcli env-set mystack db.env -s db        # only `db`, and these win on a key clash
+fhcli restart mystack                     # only services whose env changed are recreated
+
+fhcli env-clear mystack -s db
+```
+
+The file is ordinary dotenv: `KEY=value` per line, `#` comments and blank lines kept,
+surrounding quotes stripped. Values are passed through verbatim (no shell expansion) and
+must stay on one line. This is separate from any `.env` a plugin writes into the project
+directory for compose `${VAR}` interpolation — freeholdy never touches that file.
 
 ## Install from a plugin
 
