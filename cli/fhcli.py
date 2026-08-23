@@ -62,6 +62,9 @@ BASE_DOMAIN = os.getenv("BASE_DOMAIN", "").strip()
 BASE_URL    = f"https://api.{BASE_DOMAIN}".rstrip("/") if BASE_DOMAIN else ""
 
 console = Console()
+# Status/summary lines that must not pollute a redirect of a command's real output
+# (`fhcli logs app > app.log`) go here instead of `console`.
+err_console = Console(stderr=True)
 
 _POLL_INTERVAL = 0.75   # seconds between status polls
 CHUNK_SIZE = 1024 * 1024   # 1 MiB pieces — stays under nginx's 1 MB default body limit
@@ -811,12 +814,16 @@ def _collect_files(path: str, dest: str) -> list[tuple[str, str]]:
     return pairs
 
 
-def _chunked_upload(project: str, file_pairs: list[tuple[str, str]]) -> dict:
+def _chunked_upload(project: str, file_pairs: list[tuple[str, str]],
+                    env: str | None = None) -> dict:
     """Zip the files, send the archive in CHUNK_SIZE pieces with a progress bar, and ask
     the server to reassemble + unzip + provision. Returns the completion response dict.
 
     Each (local_path, rel_path) pair's rel_path becomes the zip entry name, so the server
-    rebuilds the same tree (the dest prefix from `_collect_files` is already baked in)."""
+    rebuilds the same tree (the dest prefix from `_collect_files` is already baked in).
+
+    `env` is dotenv text stored before provisioning, so the first container start already
+    has those variables."""
     upload_id = uuid.uuid4().hex
     tmp = tempfile.NamedTemporaryFile(prefix="fhcli-upload-", suffix=".zip", delete=False)
     tmp.close()
@@ -850,10 +857,10 @@ def _chunked_upload(project: str, file_pairs: list[tuple[str, str]]) -> dict:
                     progress.update(task, advance=len(chunk))
 
         with console.status("Reassembling + provisioning (certbot may run if a manifest is detected)…"):
-            return _post(
-                f"/projects/{project}/upload/complete",
-                json={"upload_id": upload_id, "total_size": total},
-            )
+            body = {"upload_id": upload_id, "total_size": total}
+            if env:
+                body["env"] = env
+            return _post(f"/projects/{project}/upload/complete", json=body)
     finally:
         os.unlink(tmp.name)
 
@@ -887,11 +894,15 @@ def _print_git_summary(data: dict) -> None:
     console.print(table)
 
 
-def _deploy_git(name: str, git_url: str, branch: str | None, follow: bool) -> None:
+def _deploy_git(name: str, git_url: str, branch: str | None, follow: bool,
+                env: str | None = None) -> None:
     """Deploy from a git repo: POST /git/add (clone + provision + build/run), then stream."""
     console.print(f"Cloning [cyan]{git_url}[/] into project [bold cyan]{name}[/]…")
+    body = {"name": name, "git_url": git_url, "branch": branch}
+    if env:
+        body["env"] = env
     with console.status("Cloning + provisioning (certbot runs during deploy)…"):
-        data = _post("/git/add", json={"name": name, "git_url": git_url, "branch": branch})
+        data = _post("/git/add", json=body)
     _print_git_summary(data)
 
     ws_path = data.get("ws_path") or f"/git/deploy/{name}"
@@ -912,7 +923,8 @@ def _deploy_git(name: str, git_url: str, branch: str | None, follow: bool) -> No
     console.print("\n[green]✓[/] Project deployed and running")
 
 
-def _deploy_path(project: str, path: str, dest: str, follow: bool) -> None:
+def _deploy_path(project: str, path: str, dest: str, follow: bool,
+                 env: str | None = None) -> None:
     """Deploy from a local file/folder: chunk-upload (provision + build/run), then stream."""
     file_pairs = _collect_files(path, dest)
     if not file_pairs:
@@ -920,7 +932,7 @@ def _deploy_path(project: str, path: str, dest: str, follow: bool) -> None:
         return
 
     console.print(f"Uploading [bold]{len(file_pairs)}[/] file(s) → [cyan]{project}[/]…")
-    data = _chunked_upload(project, file_pairs)
+    data = _chunked_upload(project, file_pairs, env)
     _report_upload(data)
 
     ws_path = data.get("ws_path")
@@ -957,7 +969,11 @@ def _deploy_path(project: str, path: str, dest: str, follow: bool) -> None:
     default=True,
     help="Stream the build + run log live when a manifest is provisioned (default: on).",
 )
-def deploy(name: str, source: str, branch: str | None, dest: str, follow: bool):
+@click.option("--env", "env_file", type=click.Path(), default=None, metavar="FILE",
+              help="dotenv file to store before the first container start "
+                   "(\"-\" reads stdin). Compose: shared by every service.")
+def deploy(name: str, source: str, branch: str | None, dest: str, follow: bool,
+           env_file: str | None):
     """Deploy a project from a local file/folder or a git repo. Creates it if new, redeploys
     if it already exists (a fresh blue/green version).
 
@@ -973,6 +989,9 @@ def deploy(name: str, source: str, branch: str | None, dest: str, follow: bool):
     separate create step. A local upload with no manifest is a plain file sync (nothing is
     built).
 
+    With --env, the file's variables are stored *before* the project is provisioned, so the
+    very first container this deploy starts already has them — no restart needed.
+
     \b
     Examples:
       fhcli deploy myapp ./myapp                              # a project folder
@@ -980,11 +999,13 @@ def deploy(name: str, source: str, branch: str | None, dest: str, follow: bool):
       fhcli deploy myapp ./assets --dest static               # into a sub-directory
       fhcli deploy myapp https://github.com/owner/repo.git    # from a git repo
       fhcli deploy myapp git@github.com:owner/repo.git -b dev # a private repo + branch
+      fhcli deploy myapp ./myapp --env prod.env               # env set before first start
     """
     _validate_project_name(name)
+    env = _read_env_file(env_file) if env_file else None
 
     if _looks_like_git_url(source):
-        _deploy_git(name, source, branch, follow)
+        _deploy_git(name, source, branch, follow, env)
         return
 
     if not os.path.exists(source):
@@ -993,7 +1014,7 @@ def deploy(name: str, source: str, branch: str | None, dest: str, follow: bool):
             f"clone URL (https://…, ssh://…, or git@host:path)."
         )
         sys.exit(1)
-    _deploy_path(name, source, dest, follow)
+    _deploy_path(name, source, dest, follow, env)
 
 
 # Build + run is launched automatically by `fhcli deploy` (the server streams it back over
@@ -1179,6 +1200,55 @@ def exec_command(project: str, command: str, service: str | None):
     code = asyncio.run(_exec_session(ws_path))
     if code != 0:
         sys.exit(code)
+
+
+# ── logs ───────────────────────────────────────────────────────────────────────
+
+@cli.command("logs")
+@click.argument("project")
+@click.option("--tail", "-n", default=200, show_default=True, metavar="N",
+              help="How many trailing lines to fetch.")
+@click.option("--service", "-s", default=None,
+              help="For compose projects: one service instead of the whole stack.")
+@click.option("--output", "-o", "output", default=None,
+              help="Write to this file instead of stdout.")
+def logs(project: str, tail: int, service: str | None, output: str | None):
+    """Show the last N lines PROJECT's container printed.
+
+    This is the container's own stdout/stderr — what the app logged — unlike
+    `fhcli status`, which shows the log of the last build/run/stop operation. For a compose
+    project you get the whole stack interleaved and service-prefixed; pass --service for one
+    service's container.
+
+    A snapshot, not a live follow: the log goes to stdout (so it pipes and redirects
+    cleanly) and the summary line to stderr.
+
+    \b
+    Examples:
+      fhcli logs myapp                       # last 200 lines
+      fhcli logs myapp -n 50
+      fhcli logs myapp | grep -i error
+      fhcli logs myapp -n 1000 > myapp.log   # only log lines land in the file
+      fhcli logs mystack -s db               # one compose service
+    """
+    path = (f"/projects/{project}/services/{service}/logs" if service
+            else f"/projects/{project}/logs")
+    data = _get(f"{path}?tail={tail}")
+    content = data.get("content", "")
+    scope = f"[cyan]{project}[/] · service [cyan]{service}[/]" if service else f"[cyan]{project}[/]"
+
+    if output:
+        Path(output).write_text(content)
+        console.print(f"[green]✓[/] Wrote {data.get('lines', 0)} line(s) from {scope} to [bold]{output}[/]")
+        return
+
+    click.echo(content, nl=False)
+    if not content:
+        err_console.print(f"[dim](no output logged by {scope} yet)[/]")
+    elif data.get("lines", 0) < tail:
+        err_console.print(f"[dim]── {data.get('lines', 0)} line(s) — the whole log[/]")
+    else:
+        err_console.print(f"[dim]── last {data.get('lines', 0)} line(s)[/]")
 
 
 # ── status ─────────────────────────────────────────────────────────────────────
@@ -1374,6 +1444,18 @@ def set_domain(project: str, domain: str | None, service: str | None, clear: boo
 
 # ── environment variables ──────────────────────────────────────────────────────
 
+def _read_env_file(file: str) -> str:
+    """Read dotenv text from a path, or from stdin when `file` is "-". Exits on a bad path.
+    Shared by `env-set` and `deploy --env`."""
+    if file == "-":
+        return sys.stdin.read()
+    path = Path(file)
+    if not path.is_file():
+        console.print(f"[bold red]Error:[/] no such file: {file}")
+        sys.exit(1)
+    return path.read_text()
+
+
 def _env_path(project: str, service: str | None) -> str:
     return (f"/projects/{project}/services/{service}/env" if service
             else f"/projects/{project}/env")
@@ -1443,15 +1525,7 @@ def env_set(project: str, file: str, service: str | None):
       printf 'DEBUG=1\\n' | fhcli env-set myapp -
       fhcli env-set mystack db.env -s db     # one compose service's own file
     """
-    if file == "-":
-        content = sys.stdin.read()
-    else:
-        path = Path(file)
-        if not path.is_file():
-            console.print(f"[bold red]Error:[/] no such file: {file}")
-            sys.exit(1)
-        content = path.read_text()
-
+    content = _read_env_file(file)
     data = _put(_env_path(project, service), json={"content": content})
     _print_env_result(data, project, service)
 

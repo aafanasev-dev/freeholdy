@@ -15,6 +15,9 @@ import threading
 from dataclasses import dataclass
 from typing import Optional
 
+# How long a synchronous log tail may take before we give up on docker.
+LOGS_TIMEOUT = 30
+
 # ---------------------------------------------------------------------------
 # Job tracking
 # ---------------------------------------------------------------------------
@@ -208,6 +211,32 @@ def get_container_status(container_name: str) -> str:
             return "not_found"
         return "error"
     return result.stdout.strip() or "not_found"
+
+
+def get_container_logs(container_name: str, tail: int) -> tuple:
+    """Return the last `tail` lines a container printed: (success, output).
+
+    A read-only snapshot (`docker logs --tail N`), not a follow — it spawns no DockerJob,
+    so tailing can never collide with a build/deploy tracked under the same job key.
+    Docker sends the container's stdout to our stdout and its stderr to our stderr; both
+    are the container's output, so they are concatenated the way a terminal shows them.
+    On a missing container the message is "not_found" (same vocabulary as
+    get_container_status), which the router turns into a 404."""
+    try:
+        result = subprocess.run(
+            ["docker", "logs", "--tail", str(tail), container_name],
+            capture_output=True,
+            text=True,
+            timeout=LOGS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"docker logs timed out after {LOGS_TIMEOUT}s"
+    if result.returncode != 0:
+        stderr = result.stderr.lower()
+        if "no such container" in stderr or "no such object" in stderr:
+            return False, "not_found"
+        return False, result.stderr.strip()
+    return True, result.stdout + result.stderr
 
 
 def image_exists(image_name: str) -> bool:
@@ -432,6 +461,22 @@ def compose_down(project: str, project_dir: str, job_key: str,
     """Start 'docker compose down' in the background."""
     cmd = _compose_cmd(project, project_dir, "down", env_file=env_file)
     return _spawn(job_key, "compose_down", cmd)
+
+
+def compose_logs(project: str, project_dir: str, tail: int,
+                 env_file: Optional[str] = None) -> tuple:
+    """Return the last `tail` lines of every service in the stack, interleaved and
+    service-prefixed: (success, output). Synchronous read-only snapshot, like
+    get_container_logs — no DockerJob is spawned."""
+    cmd = _compose_cmd(project, project_dir, "logs", "--tail", str(tail), "--no-color",
+                       env_file=env_file)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=LOGS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, f"docker compose logs timed out after {LOGS_TIMEOUT}s"
+    if result.returncode != 0:
+        return False, result.stderr.strip()
+    return True, result.stdout + result.stderr
 
 
 def stop_container_sync(container_name: str) -> tuple:

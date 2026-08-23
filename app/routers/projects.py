@@ -10,7 +10,6 @@ from fastapi import (
     HTTPException,
     UploadFile,
     File,
-    Body,
     Request,
     WebSocket,
     WebSocketDisconnect,
@@ -24,6 +23,7 @@ from app.models.schemas import (
     ProjectResponse,
     ProjectDeleteResponse,
     UploadResponse,
+    UploadCompleteRequest,
     DockerJobStatusResponse,
     ProjectType,
     validate_project_slug,
@@ -229,6 +229,31 @@ def _get_or_create_project(db: Session, name: str) -> Project:
     db.commit()
     db.refresh(project)
     return project
+
+
+def apply_deploy_env(db: Session, project: Project, env: str | None) -> bool:
+    """Store dotenv text supplied with a deploy request. Returns whether anything was stored.
+
+    A deploy is one call that creates the row, provisions, and launches the build, so there
+    is no window for a separate `PUT /projects/{name}/env` before the first container is
+    created. Calling this early is what makes those values reach that **first** start:
+    it must run *before* `_autoprovision` (compose materializes env there, writing the
+    `env_file:` entries into the generated override) and *before* `launch_deploy`
+    (`bluegreen_deploy` materializes inside its own session).
+
+    Blank or omitted text leaves any stored env untouched, so redeploying with an empty env
+    box never silently wipes a project's environment; clearing is DELETE .../env.
+
+    Flushes; the **caller commits** (same convention as `_get_or_create_project`). That is
+    what lets git deploy roll the env back together with the project row it also created
+    when a clone or provision fails, instead of leaving an orphan `pending` project holding
+    an env file.
+
+    Shared by the chunked upload (`upload_complete`) and git deploy (`routers/git.py`)."""
+    if not (env or "").strip():
+        return False
+    env_service.set_content(db, project, env)
+    return True
 
 
 def _teardown_compose(project: Project, details: list[str], errors: list[str]) -> None:
@@ -742,22 +767,29 @@ async def upload_chunk(
 )
 async def upload_complete(
     project_name: str,
-    upload_id: str = Body(..., embed=True),
-    total_size: int | None = Body(None, embed=True),
+    request: UploadCompleteRequest,
     db: Session = Depends(get_db),
     _=Depends(require_auth),
 ):
     """Finalize a chunked upload: validate the staged zip, extract every member under the
     project dir (guarded against zip-slip by `_safe_join`), provision, and clean up. Creates
-    the project row if it does not exist yet (deploy auto-creates)."""
-    zip_path = _staging_zip_path(project_name, upload_id)
+    the project row if it does not exist yet (deploy auto-creates).
+
+    An optional `env` (dotenv text) is stored before provisioning, so the first container
+    this deploy starts already has those variables."""
+    zip_path = _staging_zip_path(project_name, request.upload_id)
     if not os.path.isfile(zip_path):
         raise HTTPException(status_code=404, detail="No staged upload for this upload_id")
-    if total_size is not None and os.path.getsize(zip_path) != total_size:
+    if request.total_size is not None and os.path.getsize(zip_path) != request.total_size:
         os.remove(zip_path)
         raise HTTPException(status_code=400, detail="Staged upload is incomplete (size mismatch)")
 
     project = _get_or_create_project(db, project_name)
+    # Before _autoprovision + launch_deploy, so the first container start already has it.
+    # Committed here rather than left to the provisioning commit, because a manifest-less
+    # deploy (a plain file sync) never reaches one and `get_db` does not commit on close.
+    if apply_deploy_env(db, project, request.env):
+        db.commit()
     base_dir = _project_files_dir(project)
     os.makedirs(base_dir, exist_ok=True)
 

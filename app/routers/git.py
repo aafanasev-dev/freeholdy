@@ -18,6 +18,7 @@ from app.services import docker_service, compose_service, git_service
 from app.routers.projects import (
     project_response,
     _autoprovision,
+    apply_deploy_env,
     launch_deploy,
     deploy_stream_session,
 )
@@ -56,6 +57,12 @@ def add_git_project(
         project = Project(name=name, type=ProjectType.user.value, deploy_mode="pending")
         db.add(project)
         db.flush()
+
+    # Store any env supplied with the deploy before provisioning, so the first container
+    # start already has it (provision_compose bakes env_file: entries into the override).
+    # Flush only — the provisioning commit persists it on success, and the rollbacks below
+    # discard it along with the project row on failure.
+    apply_deploy_env(db, project, request.env)
 
     project_dir = os.path.abspath(compose_service.project_dir(name))
     # git clone needs a clean target; clear the existing tree (a prior deploy or a stale dir

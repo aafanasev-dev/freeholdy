@@ -38,7 +38,7 @@ alias fhcli="$(pwd)/venv/bin/python $(pwd)/fhcli.py"
 | `fhcli projects` | List all projects (incl. `system`) with live container status + type |
 | `fhcli plugins` | List available plugins in the catalog (incl. system plugins) |
 | `fhcli plugin-add PLUGIN PROJECT` | Create a project from a plugin, then build + run it |
-| `fhcli deploy NAME SOURCE [--branch B] [--dest DIR] [--no-follow]` | **Deploy a project** — auto-creates it if new, redeploys if it exists. `SOURCE` is a local file/folder (zipped + streamed in 1 MiB chunks) **or** a git clone URL (cloned server-side). Either way the server auto-detects Dockerfile/compose, provisions nginx + SSL, then builds + runs it (deploy log streams live). `--branch` is git-only; `--dest` is local-upload-only. |
+| `fhcli deploy NAME SOURCE [--branch B] [--dest DIR] [--env FILE] [--no-follow]` | **Deploy a project** — auto-creates it if new, redeploys if it exists. `SOURCE` is a local file/folder (zipped + streamed in 1 MiB chunks) **or** a git clone URL (cloned server-side). Either way the server auto-detects Dockerfile/compose, provisions nginx + SSL, then builds + runs it (deploy log streams live). `--branch` is git-only; `--dest` is local-upload-only; `--env FILE` stores variables **before the first container start**. |
 | `fhcli stop PROJECT` | Stop the container |
 | `fhcli restart PROJECT [--no-follow]` | Recreate the container(s) from the images they already run — no rebuild. How edited environment variables take effect |
 | `fhcli env-get PROJECT [-s SERVICE] [-o FILE]` | Download the project's (or one compose service's) `.env` file — prints to stdout, or writes `FILE` |
@@ -48,7 +48,8 @@ alias fhcli="$(pwd)/venv/bin/python $(pwd)/fhcli.py"
 | `fhcli ssl PROJECT` | Issue / retry the SSL certificate |
 | `fhcli compose-down PROJECT` | `docker compose down` |
 | `fhcli compose-status PROJECT` | Last compose operation's status + logs |
-| `fhcli status PROJECT [--follow]` | Status + logs of the last docker op |
+| `fhcli logs PROJECT [-n N] [-s SERVICE] [-o FILE]` | Last `N` lines the **container** printed (default 200). Compose: the whole stack, or one service with `-s`. Log to stdout, summary to stderr |
+| `fhcli status PROJECT [--follow]` | Status + logs of the last docker **operation** (build/run/stop) |
 | `fhcli abort PROJECT` | Abort the running docker op |
 | `fhcli remove PROJECT [--yes]` | Delete the project (containers, images, nginx, DB row) |
 
@@ -109,8 +110,15 @@ the running container keeps its current environment until `restart` recreates it
 image it is already running (a container's environment is fixed when it is created, so
 this is what it takes). `env-get` warns when the stored file is ahead of what is running.
 
+The exception is a **brand-new project**: `env-set` cannot reach a container that does not
+exist yet, so pass `deploy --env` to have the variables stored before the first container is
+ever created — useful when the app needs config to boot at all.
+
 ```bash
-# Round-trip a project's environment
+# Set the environment as part of the very first deploy — no restart needed
+fhcli deploy myapp ./myapp --env prod.env
+
+# Round-trip an existing project's environment
 fhcli env-get myapp > .env
 $EDITOR .env
 fhcli env-set myapp .env

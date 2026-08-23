@@ -100,7 +100,7 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   under the project dir, auto-detects a `Dockerfile`/`docker-compose.yml` in the root and provisions
   (compose wins), then **auto-launches build + run and returns a `ws_path`** — the same unified deploy
   path git/plugins use. Returns `{ status, message, count, files, deploy_mode, provisioned, project,
-  ws_path, job }`. The shared `chunkedDeploy(api, project, entries, onProgress)` helper implements the
+  ws_path, job }`. The shared `chunkedDeploy(api, project, entries, onProgress, env)` helper implements the
   zip → chunk → complete round-trip; both `UploadModal` (per-card redeploy) and `DeployForm` (new
   project) call it. A provisioned response is handed to `handleInstalled` → `InstallPane` to stream the
   deploy log live (a no-manifest sync has no `ws_path` and just shows its result). Re-upload to redeploy.
@@ -132,6 +132,15 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   `{loc, msg}` objects rather than a string — `mkApi`'s `unwrap` flattens that to newline-joined
   `msg` text (and strips pydantic's `"Value error, "` prefix), so `e.message` never renders
   `[object Object]`; `Err` is `white-space: pre-wrap` to keep the per-line breakdown readable.
+- **Container logs** (both modes): `GET /projects/{name}/logs?tail=N` returns the last `N` lines the
+  **container** printed (compose: the whole stack, interleaved), and
+  `GET /projects/{name}/services/{service}/logs?tail=N` does one service. `LogsResponse` carries
+  `{ project, service, container, tail, lines, content, status, message }`. Distinct from
+  `/status`, which is the last build/run **job**'s log. A **logs** button sits on `ContainerRow`,
+  on `ServiceRow`, and on the `ProjectCard` header for compose (stack-wide); all three open the
+  shared `LogsModal`, which has a line-count input + **fetch** button and pins its mono pane to the
+  bottom after each fetch. It is a snapshot, not a follow — no socket, re-fetch to refresh. `tail`
+  is bounded server-side (1…10000 → 422 outside), and a container that no longer exists is a 404.
 - **Exec is a WebSocket, not REST:** `WS /projects/{name}/exec` (dockerfile) and
   `WS /projects/{name}/services/{service}/exec` (compose) bridge an interactive `docker exec -it`
   shell. `ExecTerminal` renders an xterm.js terminal (`@xterm/xterm` + `@xterm/addon-fit`): auth
@@ -141,7 +150,7 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   connects to `WS /plugins/{plugin}/install/{project}` and `InstallPane` streams the build log live
   (interactive plugins also drive `install.sh` via an input row). The `exit` frame reports the build
   result — no `/status` polling during install.
-- **Git deploy:** `POST /git/add` (body `{ name, git_url, branch? }`) auto-creates-or-reuses the row
+- **Git deploy:** `POST /git/add` (body `{ name, git_url, branch?, env? }`) auto-creates-or-reuses the row
   (idempotent: new name creates, existing name redeploys), clones a repo, auto-detects a
   Dockerfile/compose, provisions nginx + SSL, then builds + runs it. Same response shape as
   `/plugins/{name}/add` (`{ project, job, ws_path }`); the build streams over
@@ -156,8 +165,16 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   the user here, surfaced in `DeployForm`'s `<Err>` (git tab).
 
 `DeployForm` is the single new-project entry point (toolbar **+ deploy project** button, `showDeploy`
-state), alongside **+ add plugin**. It takes a project name plus a **files/folder ⇄ git URL** toggle:
-the files tab calls `chunkedDeploy`, the git tab posts `/git/add`; a provisioned response is handed to
+state), alongside **+ add plugin**. It takes a project name plus a **files/folder ⇄ git URL** toggle,
+and a collapsed **environment variables (optional)** disclosure (`showEnv`) holding a `TextArea` of
+dotenv text. That text rides along in the deploy request (`env` in the `/upload/complete` body or in
+`/git/add`), and the server stores it **before provisioning + launching**, so the *first* container
+this deploy starts already has the variables — `PUT .../env` is save-only and cannot reach a
+container that does not exist yet. Blank/omitted leaves any stored env untouched (a redeploy never
+wipes it), and malformed dotenv comes back as the same line-numbered 422 `EnvModal` surfaces. Env is
+deliberately **never** written to `localStorage["freeholdy_deploy_history"]` — those are secrets.
+`UploadModal` has no env field: those projects already exist and carry an **env** button + restart.
+The files tab calls `chunkedDeploy`, the git tab posts `/git/add`; a provisioned response is handed to
 `onDeployed` (= `handleInstalled`) to stream in the `InstallPane`, a manifest-less file sync calls
 `onSynced` (= `fetchProjects`). It replaces the former `CreateForm` (which posted the now-removed
 `POST /projects`) and `GitProjectForm`.
@@ -190,11 +207,11 @@ call sites in `UploadModal`/`DeployForm` (the source isn't in the deploy respons
 Two row components render the project table; a `pending` project (created, not yet uploaded) renders
 neither — `ProjectCard` shows an "awaiting upload" placeholder and a `pending` chip in the header:
 - `ContainerRow` — dockerfile mode, one row, drives the remaining project-level control endpoints
-  (`stop`, `ssl`, `domain`, `env`, `restart`, `status`, `exec`). Build + run happen via the
-  deploy/upload flow, not a button.
-- `ServiceRow` — compose mode (name/subdomain/port/ssl/status) plus a per-service **exec** and
-  **env** button (and the custom-domain button, exposed services only); the stack's **env**,
-  **restart** and **down** live on the `ProjectCard` header (build + up happen via the
+  (`stop`, `ssl`, `domain`, `env`, `restart`, `versions`, `logs`, `status`, `exec`). Build + run
+  happen via the deploy/upload flow, not a button.
+- `ServiceRow` — compose mode (name/subdomain/port/ssl/status) plus a per-service **exec**, **env**
+  and **logs** button (and the custom-domain button, exposed services only); the stack's **env**,
+  **restart**, **logs** and **down** live on the `ProjectCard` header (build + up happen via the
   deploy/upload flow). The exec button opens an `ExecTerminal` for that service's container.
 
 Note both rows render their modals as `<div>`s directly under `<tbody>` (`ContainerRow`) — React
