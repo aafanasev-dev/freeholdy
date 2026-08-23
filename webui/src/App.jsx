@@ -207,6 +207,45 @@ const TextArea = ({ value, onChange, placeholder, rows = 14, style: st = {} }) =
   />
 );
 
+// The deploy-time environment field, shared by DeployForm (new project) and UploadModal
+// (redeploy). Collapsible, but its header reads as a Field label rather than a footnote —
+// `count` is how many variables the project already has stored (null for a new project),
+// and `hint` is the caller's copy, since the two forms differ on what a blank box means.
+const EnvDisclosure = ({ value, onChange, open, onToggle, count = null, loading = false, hint }) => (
+  <div>
+    <button onClick={onToggle} style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px",
+      width: "100%", padding: "3px 0", background: "transparent", border: "none",
+      cursor: "pointer", textAlign: "left",
+    }}>
+      <span style={{ color: C.muted, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.1em" }}>
+        <span style={{ color: C.dim, marginRight: "6px" }}>{open ? "▾" : "▸"}</span>
+        ENVIRONMENT VARIABLES
+        {!open && value.trim() && <span style={{ color: C.green, marginLeft: "6px" }}>✓</span>}
+      </span>
+      {loading ? (
+        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>loading…</span>
+      ) : count > 0 ? (
+        <span style={{
+          color: C.blue, fontFamily: C.ff, fontSize: "10px", padding: "1px 7px",
+          background: C.blueFill, border: `1px solid ${C.blueBd}`, borderRadius: "7px",
+        }}>{count} stored</span>
+      ) : (
+        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>optional</span>
+      )}
+    </button>
+    {open && (
+      <div style={{ marginTop: "8px" }}>
+        <TextArea rows={8} value={value} onChange={onChange}
+                  placeholder={loading ? "loading…" : "KEY=value\n# comments and blank lines are kept"} />
+        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", marginTop: "5px" }}>
+          One <code style={{ fontFamily: C.mono }}>KEY=value</code> per line, each on one line. {hint}
+        </div>
+      </div>
+    )}
+  </div>
+);
+
 const Err = ({ msg }) => msg ? (
   <div style={{ color: C.red, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: C.redFill, border: `1px solid ${C.redBd}`, borderRadius: "10px", whiteSpace: "pre-wrap" }}>
     ✗ {msg}
@@ -638,7 +677,34 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState(null);   // { sent, total } in bytes
+  const [env, setEnv] = useState("");               // dotenv text, replaces the stored file
+  const [showEnv, setShowEnv] = useState(false);
+  const [envKeys, setEnvKeys] = useState([]);
+  const [envLoading, setEnvLoading] = useState(true);
+  const envTouched = useRef(false);
   const dirRef = useRef();
+
+  // Prefill with what the project already has stored, so this is an *update* surface and
+  // not just an "add": the deploy replaces the project-level file with whatever is in the
+  // box. Auto-expand when there is something to see. The touched/cancelled guards keep a
+  // slow response from clobbering text the user typed meanwhile; a failure just leaves the
+  // box blank, which the server reads as "leave the stored env alone".
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await mkApi(token).get(`/projects/${project}/env`);
+        if (cancelled || envTouched.current) return;
+        setEnv(d.content || "");
+        setEnvKeys(d.keys || []);
+        if ((d.keys || []).length) setShowEnv(true);
+      } catch { /* no env to prefill — deploying without one still works */ }
+      finally { if (!cancelled) setEnvLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [token, project]);
+
+  const editEnv = (v) => { envTouched.current = true; setEnv(v); };
 
   // React drops the non-standard directory attributes, so set them on mount / mode switch.
   useEffect(() => {
@@ -664,7 +730,7 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
       if (mode === "git") {
         if (!gitUrl.trim()) { setBusy(false); return setError("Git URL is required"); }
         // Same idempotent get-or-create-then-redeploy path as DeployForm's git tab.
-        const data = await mkApi(token).post("/git/add", { name: project, git_url: gitUrl.trim(), branch: branch.trim() || null });
+        const data = await mkApi(token).post("/git/add", { name: project, git_url: gitUrl.trim(), branch: branch.trim() || null, env: env.trim() || null });
         saveProjectDeploy(project, { srcKind: "git", gitUrl: gitUrl.trim(), branch: branch.trim(), label: gitUrl.trim() });
         onDeploy && onDeploy(data);   // git always provisions → stream the build in InstallPane
         onClose();
@@ -673,7 +739,7 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
       // Files: zip the selection, stream it to the server in 1 MiB chunks (progress bar),
       // then reassemble + unzip + provision. Mirrors `fhcli deploy` (local path).
       if (!entries.length) { setBusy(false); return setError("Select a file or folder first"); }
-      const data = await chunkedDeploy(mkApi(token), project, entries, setProgress);
+      const data = await chunkedDeploy(mkApi(token), project, entries, setProgress, env.trim() || null);
       saveProjectDeploy(project, { srcKind, gitUrl: "", branch: "", label: describeSelection(srcKind, entries, rootName) });
       // When a manifest is provisioned the server auto-launches build + run and returns a
       // ws_path; hand off to the InstallPane to stream the deploy live (same as git/plugin
@@ -758,6 +824,19 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
           </Field>
         </div>
       )}
+
+      <div style={{ marginBottom: "12px" }}>
+        <EnvDisclosure
+          value={env} onChange={editEnv} open={showEnv} onToggle={() => setShowEnv(v => !v)}
+          count={envKeys.length} loading={envLoading}
+          hint={<>
+            Edits <span style={{ color: C.txt }}>replace</span> the stored file and take
+            effect with this deploy — no restart needed. Emptying the box does
+            <span style={{ color: C.txt }}> not</span> delete them; use the card&apos;s{" "}
+            <span style={{ color: C.txt }}>env</span> button → clear for that.
+          </>}
+        />
+      </div>
 
       {result && (
         <>
@@ -1545,24 +1624,14 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
           </>
         )}
 
-        <div>
-          <Btn v="ghost" sm onClick={() => setShowEnv(v => !v)}
-               title="Set environment variables before the first container start">
-            {showEnv ? "▾" : "▸"} environment variables{!showEnv && env.trim() ? " ✓" : ""} (optional)
-          </Btn>
-          {showEnv && (
-            <div style={{ marginTop: "8px" }}>
-              <TextArea rows={8} value={env} onChange={setEnv}
-                        placeholder={"KEY=value\n# comments and blank lines are kept"} />
-              <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", marginTop: "5px" }}>
-                One <code style={{ fontFamily: C.mono }}>KEY=value</code> per line, each on one line.
-                Stored <span style={{ color: C.txt }}>before the first container start</span>, so the app
-                has them on boot — no restart needed. For a compose stack these are shared by every
-                service; per-service files come later from the <span style={{ color: C.txt }}>env</span> button.
-              </div>
-            </div>
-          )}
-        </div>
+        <EnvDisclosure
+          value={env} onChange={setEnv} open={showEnv} onToggle={() => setShowEnv(v => !v)}
+          hint={<>
+            Stored <span style={{ color: C.txt }}>before the first container start</span>, so the app
+            has them on boot — no restart needed. For a compose stack these are shared by every
+            service; per-service files come later from the <span style={{ color: C.txt }}>env</span> button.
+          </>}
+        />
 
         <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px" }}>
           The server scans the {mode === "git" ? "cloned repo" : "uploaded"} root for a

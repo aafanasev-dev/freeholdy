@@ -23,7 +23,7 @@ behind nginx (`ui.your_domain.com`); see `README.md`.
 
 ## Architecture
 
-**The entire application is one file: `src/App.jsx` (~930 lines).** `main.jsx` only mounts it.
+**The entire application is one file: `src/App.jsx` (~2060 lines).** `main.jsx` only mounts it.
 There is no router, no component directory, and no CSS files. When adding UI, add it to `App.jsx`
 following the existing `// ── Section ──` comment dividers and component conventions below — do not
 introduce new files or a styling library unless asked.
@@ -166,14 +166,23 @@ The UI assumes these endpoints and is the place this contract is exercised from 
 
 `DeployForm` is the single new-project entry point (toolbar **+ deploy project** button, `showDeploy`
 state), alongside **+ add plugin**. It takes a project name plus a **files/folder ⇄ git URL** toggle,
-and a collapsed **environment variables (optional)** disclosure (`showEnv`) holding a `TextArea` of
-dotenv text. That text rides along in the deploy request (`env` in the `/upload/complete` body or in
-`/git/add`), and the server stores it **before provisioning + launching**, so the *first* container
-this deploy starts already has the variables — `PUT .../env` is save-only and cannot reach a
-container that does not exist yet. Blank/omitted leaves any stored env untouched (a redeploy never
-wipes it), and malformed dotenv comes back as the same line-numbered 422 `EnvModal` surfaces. Env is
-deliberately **never** written to `localStorage["freeholdy_deploy_history"]` — those are secrets.
-`UploadModal` has no env field: those projects already exist and carry an **env** button + restart.
+and an **`EnvDisclosure`** (`showEnv`) — the shared collapsible env field defined next to `TextArea`,
+whose header is a Field-style label row (caret + `ENVIRONMENT VARIABLES` + a `{n} stored` chip or
+`optional`) rather than a ghost button. That text rides along in the deploy request (`env` in the
+`/upload/complete` body or in `/git/add`), and the server stores it **before provisioning +
+launching**, so the *first* container this deploy starts already has the variables — `PUT .../env` is
+save-only and cannot reach a container that does not exist yet. Blank/omitted leaves any stored env
+untouched (a redeploy never wipes it), and malformed dotenv comes back as the same line-numbered 422
+`EnvModal` surfaces. Env is deliberately **never** written to
+`localStorage["freeholdy_deploy_history"]` — those are secrets.
+`UploadModal` renders the same `EnvDisclosure`, but **prefilled**: on open it fetches
+`GET /projects/{name}/env` and loads the stored dotenv into the box, auto-expanding when the project
+has variables, so a redeploy is a genuine *update* surface (an `envTouched` ref keeps the late
+response from clobbering typing; a failed fetch just leaves it blank). Deploying **replaces** the
+project-level file with the box's contents and the new container starts with them, so unlike the
+card's save-only **env** button no restart is needed — but emptying the box does *not* delete the
+stored file (that stays `DELETE .../env`, the modal's **clear**), which is what makes a redeploy that
+ignores the field a no-op.
 The files tab calls `chunkedDeploy`, the git tab posts `/git/add`; a provisioned response is handed to
 `onDeployed` (= `handleInstalled`) to stream in the `InstallPane`, a manifest-less file sync calls
 `onSynced` (= `fetchProjects`). It replaces the former `CreateForm` (which posted the now-removed
