@@ -853,7 +853,8 @@ fi
 # ── 9b. Database migration (upgrades only) ──────────────────────────────────────
 # No migrations framework: init_db() builds the full schema for a fresh DB, but an
 # existing DB predating the blue/green versioning feature needs new columns + the
-# project_versions table. migrate_db.sh self-checks and is a no-op on a fresh install.
+# project_versions table, and one predating environment variables needs project_env_files.
+# migrate_db.sh self-checks and is a no-op on a fresh install.
 section "Database migration"
 if [[ -x "${APP_DIR}/migrate_db.sh" ]]; then
     as_user bash "${APP_DIR}/migrate_db.sh" "${APP_DIR}/data/freeholdy.db" \

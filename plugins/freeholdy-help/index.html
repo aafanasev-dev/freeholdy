@@ -189,7 +189,7 @@
     tr:last-child td { border-bottom: none; }
     td.method { color: var(--faint); font-family: 'Roboto Mono', ui-monospace, monospace; font-size: 0.8rem; white-space: nowrap; width: 1%; }
     td.path { white-space: nowrap; width: 1%; padding-right: 1.5rem; }
-    td code { background: none; border: none; padding: 0; color: #d8d9da; }
+    td code { background: none; border: none; padding: 0; color: #d8d9da; white-space: nowrap; }
     tr.group td {
       color: var(--faint);
       font-size: 0.75rem;
@@ -234,10 +234,16 @@
     <a href="#deploy-plugins" class="sub">From plugins</a>
     <a href="#plugin-catalog">Plugin catalog</a>
     <a href="#versions-rollback">Versions &amp; rollback</a>
+    <a href="#env-vars">Environment variables</a>
+    <a href="#env-scopes" class="sub">Scopes</a>
+    <a href="#env-apply" class="sub">Applying changes</a>
+    <a href="#env-first-start" class="sub">The first start</a>
+    <a href="#logs-shell">Logs &amp; shell</a>
     <a href="#api">API</a>
     <a href="#api-endpoints" class="sub">Endpoints</a>
     <a href="#api-streaming" class="sub">Streaming logs</a>
     <a href="#api-tokens" class="sub">Tokens</a>
+    <a href="#cli">CLI reference</a>
     <a href="#ai-integration">AI integration</a>
   </nav>
 
@@ -326,6 +332,10 @@ cp .env.example .env   # set TOKEN and BASE_DOMAIN</code></pre>
           subdomain per exposed service (<code>{service}.myapp.your_domain.com</code>). Re-run
           the command to redeploy.
         </p>
+        <p>
+          Add <code>--env .env</code> to store the project's
+          <a href="#env-vars">environment variables</a> before the container first starts.
+        </p>
 
         <h2 id="deploy-git">From git</h2>
         <pre><code>fhcli deploy mysite https://github.com/owner/repo.git
@@ -402,24 +412,155 @@ fhcli plugin-add nextcloud mycloud  # install one as project "mycloud"</code></p
 
       <section id="versions-rollback">
         <h1>Versions &amp; rollback</h1>
-        <p>
-          Every deploy is <strong>blue/green versioned</strong>: the new version is built and
-          verified running <em>before</em> traffic switches to it, so a failed build never takes
-          the live site down. Previous versions are kept for rollback.
+        <p class="lead">
+          Every deploy creates a <strong>new version</strong>, and the previous ones are kept so you
+          can go back. The new version is built and verified <em>before</em> traffic moves to it, so
+          a failed build never takes the live site down.
         </p>
         <pre><code>fhcli versions myapp            # list versions: active / inactive / archived
 fhcli rollback myapp 2          # make version 2 live again
 fhcli set-backup-limit myapp 3  # keep at most 3 archived versions</code></pre>
+
+        <h2>How a deploy switches over</h2>
+        <p>
+          <strong>Single-container projects are true blue/green.</strong> Version <code>N</code> is
+          built as its own image and started in its own container on its own local port, next to the
+          one still serving. Only once the build succeeds <em>and</em> the new container is confirmed
+          running does nginx get re-pointed at the new port — a one-line change and a reload. If the
+          build fails, nothing was touched.
+        </p>
+        <p>
+          <strong>Compose stacks are build-first with a brief switch.</strong> Running two copies of a
+          stack side by side isn't possible in general — services bind host ports themselves, some use
+          host networking, and named volumes are shared. So freeholdy builds and pulls
+          <em>while the old stack keeps serving</em>, tags every resulting image as version
+          <code>N</code>, and only then does a short <code>down</code> + <code>up</code>. The images
+          are already on disk, so the gap is seconds. A failed build or pull never reaches that point.
+        </p>
+
+        <h2>What the three states mean</h2>
         <ul>
           <li><strong>active</strong> — the running version nginx points at.</li>
-          <li><strong>inactive</strong> — the previous version, kept as a stopped container for instant rollback (Dockerfile projects only).</li>
-          <li><strong>archived</strong> — older versions with their image retained, capped by the backup limit (default 5, oldest pruned first).</li>
+          <li><strong>inactive</strong> — the version you just replaced, kept as a stopped container
+            for an instant rollback. <em>Single-container projects only</em> — bringing a compose
+            stack down removes its containers, so compose versions go straight to archived.</li>
+          <li><strong>archived</strong> — older versions whose images (and, for compose, a snapshot of
+            the project files) are retained, but whose containers are gone and whose ports are freed.
+            Capped by the backup limit — default <strong>5</strong>, oldest pruned first after a
+            successful deploy.</li>
         </ul>
+
+        <h2>What a rollback restores</h2>
+        <p>
+          A rollback puts back <strong>code and images</strong>. For a single-container project the
+          container is <em>recreated</em> from that version's image rather than just restarted — which
+          is what lets a rollback pick up the project's current
+          <a href="#env-vars">environment variables</a>. For a compose stack, freeholdy restores the
+          snapshot of the project files, re-wires nginx (custom domains and plugin subdomains are
+          preserved), and brings the stack up on the retained version tags.
+        </p>
+        <p>
+          Rollbacks stream their log over the same channel as a deploy, so
+          <code>fhcli rollback</code> shows you exactly what is happening.
+        </p>
         <div class="note">
-          Compose rollback restores the project's code snapshot and images, then brings the
-          stack back up — but <strong>named-volume data is not rolled back</strong>. Databases
-          keep their current contents.
+          Rolling back does <strong>not</strong> roll back your data — named volumes keep their
+          current contents, so databases and uploads stay where they are. Treat rollback as
+          "ship the old code again", not as a restore point.
         </div>
+      </section>
+
+      <section id="env-vars">
+        <h1>Environment variables</h1>
+        <p class="lead">
+          freeholdy stores a <code>.env</code> file per project on the server and injects it every
+          time a container is created. Nothing is baked into the image, and the values live outside
+          the project directory — so a git redeploy or a rollback can't wipe them.
+        </p>
+
+        <h2 id="env-scopes">Scopes</h2>
+        <p>
+          Each project has a <strong>project-level</strong> file. For a single-container project that
+          file <em>is</em> the container's environment. For a compose stack it is shared by every
+          service — and each service may additionally have <strong>its own</strong> file, whose values
+          win over the shared ones.
+        </p>
+        <pre><code>fhcli env-set myapp .env               # the project-level file
+fhcli env-set mystack db.env -s db     # one service (wins over the shared file)
+
+fhcli env-get myapp                    # print it
+fhcli env-get myapp &gt; .env             # …or save it
+fhcli env-clear myapp                  # delete it</code></pre>
+        <p>
+          The format is ordinary dotenv — comments, blank lines, an <code>export </code> prefix, and
+          single- or double-quoted values are all accepted, and the file is stored exactly as you
+          wrote it. A malformed key or a value split across lines is <strong>rejected with the line
+          number</strong>, rather than quietly producing a container with a broken environment.
+        </p>
+
+        <h2 id="env-apply">Applying changes</h2>
+        <div class="note">
+          Setting variables is <strong>save-only</strong>. A running container keeps the environment
+          it was created with — that is a Docker fact, not a freeholdy choice — so a new
+          <code>.env</code> does nothing until the container is recreated.
+        </div>
+        <pre><code>fhcli restart myapp</code></pre>
+        <p>
+          <code>restart</code> recreates the container(s) from the images they are already running:
+          <strong>no rebuild</strong>, no new version, just a fresh container with the current
+          environment. For a compose project only the services whose environment actually changed are
+          recreated. Until you do it, freeholdy reports the stored file as <em>not applied</em> —
+          the CLI prints a hint and the web UI shows a "restart to apply" banner.
+        </p>
+
+        <h2 id="env-first-start">The first start</h2>
+        <p>
+          Because setting variables never starts anything, a project that is deployed <em>before</em>
+          its <code>.env</code> exists boots without one. To have the values in place for the very
+          first container, send them along with the deploy:
+        </p>
+        <pre><code>fhcli deploy myapp ./myapp --env .env
+fhcli deploy mysite https://github.com/owner/repo.git --env .env
+cat .env | fhcli deploy myapp ./myapp --env -</code></pre>
+        <p>
+          The web UI's deploy form has the same box. Leaving it <strong>blank</strong> on a redeploy
+          keeps whatever is already stored — it never silently wipes a project's environment.
+          Clearing is always explicit (<code>fhcli env-clear</code>).
+        </p>
+        <p>
+          freeholdy never hands your values back out in listings: the project list carries only a
+          <em>count</em>, and reading a file is a deliberate, separate request.
+        </p>
+      </section>
+
+      <section id="logs-shell">
+        <h1>Logs &amp; shell</h1>
+
+        <h2>Container logs</h2>
+        <pre><code>fhcli logs myapp                # last 200 lines
+fhcli logs myapp -n 50
+fhcli logs mystack -s api       # one compose service
+fhcli logs myapp | grep -i error</code></pre>
+        <p>
+          This is what your <strong>app</strong> printed — the container's own stdout and stderr. For
+          a compose project you get the whole stack interleaved and prefixed with the service name;
+          <code>-s</code> narrows it to one service. It's a snapshot rather than a live follow, and it
+          goes to stdout, so it pipes and redirects cleanly.
+        </p>
+        <p>
+          Not to be confused with <code>fhcli status myapp</code>, which shows the log of the last
+          <strong>freeholdy operation</strong> — the build, the run, the stop. When a deploy fails,
+          read <code>status</code>; when the app misbehaves after starting, read <code>logs</code>.
+        </p>
+
+        <h2>Interactive shell</h2>
+        <pre><code>fhcli exec myapp                        # a shell in the container
+fhcli exec myapp "python manage.py shell"
+fhcli exec mystack -s api               # one compose service</code></pre>
+        <p>
+          A real terminal over a WebSocket — a full TTY, so editors, colours, and interactive prompts
+          all work as they would over SSH. The web UI offers the same shell in the browser.
+        </p>
       </section>
 
       <section id="api">
@@ -475,14 +616,15 @@ curl "$BASE/projects/myapp/status" -H "Authorization: Bearer $TOKEN"</code></pre
               <tr><td class="method">DELETE</td><td class="path"><code>/projects/{name}</code></td><td>Full teardown — containers, images, versions, nginx config, files, DB row.</td></tr>
               <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/upload</code></td><td>Multipart deploy. <strong>Auto-creates</strong> the project on first use.</td></tr>
               <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/upload/chunk</code></td><td>One raw piece of a staged zip (<code>?upload_id=&amp;offset=</code>).</td></tr>
-              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/upload/complete</code></td><td>Unzip → detect manifest → provision → build + run.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/upload/complete</code></td><td>Unzip → detect manifest → provision → build + run. Optional <code>env</code> (dotenv text) is stored first, so it reaches the first start.</td></tr>
               <tr><td class="method">DELETE</td><td class="path"><code>/projects/{name}/upload/{id}</code></td><td>Abort a chunked upload and discard its staged data.</td></tr>
-              <tr><td class="method">POST</td><td class="path"><code>/git/add</code></td><td><code>{"name","git_url","branch"?}</code> — clone + deploy. Same name redeploys.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/git/add</code></td><td><code>{"name","git_url","branch"?,"env"?}</code> — clone + deploy. Same name redeploys.</td></tr>
               <tr><td class="method">GET</td><td class="path"><code>/git/key</code></td><td>The server's GitHub SSH public key, for private repos (created on first call).</td></tr>
 
               <tr class="group"><td colspan="3">Lifecycle — single container</td></tr>
               <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/status</code></td><td>Container state plus the last job's log.</td></tr>
               <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/stop</code></td><td>Stop the running container.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/restart</code></td><td>Recreate the container(s) from their current images — no rebuild. Works for both modes; this is what applies edited environment variables.</td></tr>
               <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/abort</code></td><td>Abort the docker job currently in flight.</td></tr>
               <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/ssl</code></td><td>Re-run certbot for the project's domains.</td></tr>
               <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/domain</code></td><td><code>{"custom_domain":"app.acme.com"}</code> — send <code>null</code> to revert to the subdomain.</td></tr>
@@ -497,6 +639,18 @@ curl "$BASE/projects/myapp/status" -H "Authorization: Bearer $TOKEN"</code></pre
               <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/versions</code></td><td>Active / inactive / archived versions with counts.</td></tr>
               <tr><td class="method">PUT</td><td class="path"><code>/projects/{name}/backup-limit</code></td><td><code>{"limit":3}</code> — set the cap and prune right away.</td></tr>
               <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/rollback</code></td><td><code>{"version":2}</code> — make an earlier version live; returns a <code>ws_path</code>.</td></tr>
+
+              <tr class="group"><td colspan="3">Environment variables</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/env</code></td><td>The stored file: <code>content</code>, the <code>keys</code> in it, and <code>applied</code> (false → restart to apply).</td></tr>
+              <tr><td class="method">PUT</td><td class="path"><code>/projects/{name}/env</code></td><td><code>{"content":"KEY=value\n…"}</code> — replaces the whole file. Stores only; 422 names the bad line.</td></tr>
+              <tr><td class="method">DELETE</td><td class="path"><code>/projects/{name}/env</code></td><td>Delete the file. Also takes effect on the next start.</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/services/{svc}/env</code></td><td>One compose service's own file.</td></tr>
+              <tr><td class="method">PUT</td><td class="path"><code>/projects/{name}/services/{svc}/env</code></td><td>Set it — its values win over the project-level file.</td></tr>
+              <tr><td class="method">DELETE</td><td class="path"><code>/projects/{name}/services/{svc}/env</code></td><td>Delete it; the shared file still applies.</td></tr>
+
+              <tr class="group"><td colspan="3">Container logs</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/logs?tail=N</code></td><td>The last N lines the container printed (compose: the whole stack, interleaved). Default 200.</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/services/{svc}/logs</code></td><td>The same for one compose service.</td></tr>
 
               <tr class="group"><td colspan="3">Plugins</td></tr>
               <tr><td class="method">GET</td><td class="path"><code>/plugins/</code></td><td>The plugin catalog, with descriptions and deploy modes.</td></tr>
@@ -547,6 +701,57 @@ python scripts/generate_token.py revoke --id 3</code></pre>
           Tokens are stored as <strong>SHA-256 hashes</strong> — the plaintext is printed
           <strong>once</strong>, at generation, and there is no recovery path. Lost a token?
           Revoke it and mint a new one. (Your first token is the one the installer printed.)
+        </div>
+      </section>
+
+      <section id="cli">
+        <h1>CLI reference</h1>
+        <p class="lead">
+          Every <code>fhcli</code> command, and what it maps to. Any of them takes
+          <code>--help</code> for its full options and examples.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Command</th><th>What it does</th></tr>
+            </thead>
+            <tbody>
+              <tr class="group"><td colspan="2">Getting around</td></tr>
+              <tr><td class="path"><code>health</code></td><td>Check the server is up and the token works.</td></tr>
+              <tr><td class="path"><code>projects</code></td><td>List every project with its status and endpoints.</td></tr>
+              <tr><td class="path"><code>status PROJECT</code></td><td>Container state plus the log of the last freeholdy operation.</td></tr>
+
+              <tr class="group"><td colspan="2">Deploying</td></tr>
+              <tr><td class="path"><code>deploy NAME SOURCE</code></td><td>Deploy a folder or a git URL. Creates the project if new, redeploys if not. <code>--env</code>, <code>--branch</code>, <code>--dest</code>.</td></tr>
+              <tr><td class="path"><code>plugins</code></td><td>List the plugin catalog.</td></tr>
+              <tr><td class="path"><code>plugin-add PLUGIN PROJECT</code></td><td>Install a plugin as a project; interactive plugins prompt right here.</td></tr>
+              <tr><td class="path"><code>get-git-key</code></td><td>Print the server's SSH public key, for cloning private repos.</td></tr>
+
+              <tr class="group"><td colspan="2">Running</td></tr>
+              <tr><td class="path"><code>logs PROJECT</code></td><td>What the container printed. <code>-n</code> lines, <code>-s</code> one compose service.</td></tr>
+              <tr><td class="path"><code>exec PROJECT [CMD]</code></td><td>Interactive shell (or one command) inside the container.</td></tr>
+              <tr><td class="path"><code>restart PROJECT</code></td><td>Recreate the container(s) — no rebuild. Applies environment changes.</td></tr>
+              <tr><td class="path"><code>stop PROJECT</code></td><td>Stop the container.</td></tr>
+              <tr><td class="path"><code>abort PROJECT</code></td><td>Abort the build or deploy currently in flight.</td></tr>
+              <tr><td class="path"><code>compose-status PROJECT</code></td><td>Stack state plus the last compose operation's log.</td></tr>
+              <tr><td class="path"><code>compose-down PROJECT</code></td><td>Bring a compose stack down.</td></tr>
+
+              <tr class="group"><td colspan="2">Environment</td></tr>
+              <tr><td class="path"><code>env-get PROJECT</code></td><td>Print (or <code>-o</code> save) the stored <code>.env</code>. <code>-s</code> for one service.</td></tr>
+              <tr><td class="path"><code>env-set PROJECT FILE</code></td><td>Upload it (<code>-</code> reads stdin). Saved only — follow with <code>restart</code>.</td></tr>
+              <tr><td class="path"><code>env-clear PROJECT</code></td><td>Delete it.</td></tr>
+
+              <tr class="group"><td colspan="2">Versions</td></tr>
+              <tr><td class="path"><code>versions PROJECT</code></td><td>List the versions and their states.</td></tr>
+              <tr><td class="path"><code>rollback PROJECT N</code></td><td>Make version N live again.</td></tr>
+              <tr><td class="path"><code>set-backup-limit PROJECT N</code></td><td>Cap the archived versions and prune now.</td></tr>
+
+              <tr class="group"><td colspan="2">Domains &amp; teardown</td></tr>
+              <tr><td class="path"><code>ssl PROJECT</code></td><td>Re-run certbot for the project's domains.</td></tr>
+              <tr><td class="path"><code>domain PROJECT [DOMAIN]</code></td><td>Point a custom domain at it; <code>--clear</code> reverts to the subdomain.</td></tr>
+              <tr><td class="path"><code>remove NAME</code></td><td>Full teardown — containers, images, versions, nginx config, files.</td></tr>
+            </tbody>
+          </table>
         </div>
       </section>
 

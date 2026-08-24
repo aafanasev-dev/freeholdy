@@ -10,12 +10,11 @@ from fastapi import (
     HTTPException,
     UploadFile,
     File,
-    Body,
     Request,
     WebSocket,
     WebSocketDisconnect,
 )
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 from typing import List
 
 from app.models.database import get_db, SessionLocal
@@ -24,6 +23,7 @@ from app.models.schemas import (
     ProjectResponse,
     ProjectDeleteResponse,
     UploadResponse,
+    UploadCompleteRequest,
     DockerJobStatusResponse,
     ProjectType,
     validate_project_slug,
@@ -34,6 +34,7 @@ from app.services import (
     docker_service,
     nginx_service,
     compose_service,
+    env_service,
     scan,
     interactive_service,
     ws_session,
@@ -88,6 +89,14 @@ def _container_status(container_name: str | None, image_name: str | None) -> str
     return status
 
 
+def _env_count(project: Project, service: str | None = None) -> int:
+    """How many variables the project's (or one service's) stored env file defines — a
+    cheap badge for clients, without echoing any values."""
+    scope = service or env_service.PROJECT_SCOPE
+    row = next((e for e in project.env_files if e.service_name == scope), None)
+    return len(env_service.keys(row.content)) if row else 0
+
+
 def _container_info(project: Project) -> dict:
     return {
         "subdomain": project.effective_domain,
@@ -99,6 +108,7 @@ def _container_info(project: Project) -> dict:
         "ssl_enabled": bool(project.ssl_enabled),
         "websocket": bool(project.websocket),
         "container_status": _container_status(project.container_name, project.image_name),
+        "env_count": _env_count(project),
     }
 
 
@@ -114,6 +124,7 @@ def _service_info(svc: ComposeService) -> dict:
         "ssl_enabled": bool(svc.ssl_enabled),
         "websocket": bool(svc.websocket),
         "container_status": _container_status(svc.container_name, None),
+        "env_count": _env_count(svc.project, svc.name),
     }
 
 
@@ -220,6 +231,31 @@ def _get_or_create_project(db: Session, name: str) -> Project:
     return project
 
 
+def apply_deploy_env(db: Session, project: Project, env: str | None) -> bool:
+    """Store dotenv text supplied with a deploy request. Returns whether anything was stored.
+
+    A deploy is one call that creates the row, provisions, and launches the build, so there
+    is no window for a separate `PUT /projects/{name}/env` before the first container is
+    created. Calling this early is what makes those values reach that **first** start:
+    it must run *before* `_autoprovision` (compose materializes env there, writing the
+    `env_file:` entries into the generated override) and *before* `launch_deploy`
+    (`bluegreen_deploy` materializes inside its own session).
+
+    Blank or omitted text leaves any stored env untouched, so redeploying with an empty env
+    box never silently wipes a project's environment; clearing is DELETE .../env.
+
+    Flushes; the **caller commits** (same convention as `_get_or_create_project`). That is
+    what lets git deploy roll the env back together with the project row it also created
+    when a clone or provision fails, instead of leaving an orphan `pending` project holding
+    an env file.
+
+    Shared by the chunked upload (`upload_complete`) and git deploy (`routers/git.py`)."""
+    if not (env or "").strip():
+        return False
+    env_service.set_content(db, project, env)
+    return True
+
+
 def _teardown_compose(project: Project, details: list[str], errors: list[str]) -> None:
     """Stop+remove a compose stack's containers/images and drop its on-disk directory."""
     name = project.name
@@ -227,9 +263,14 @@ def _teardown_compose(project: Project, details: list[str], errors: list[str]) -
     cdir = os.path.abspath(compose_service.project_dir(name))
 
     # Preferred path: let docker compose tear the whole stack down (containers, networks, images).
+    # The env file is passed so ${VAR} interpolation resolves the same way it did on `up` —
+    # otherwise a compose file referencing a stored variable could fail to render here.
     if os.path.exists(compose_service.override_file_path(name)):
         result = subprocess.run(
-            docker_service._compose_cmd(name, cdir, "down", "--rmi", "all"),
+            docker_service._compose_cmd(
+                name, cdir, "down", "--rmi", "all",
+                env_file=env_service.project_env_file(object_session(project), project),
+            ),
             capture_output=True, text=True,
         )
         details.append(f"docker compose down ({'ok' if result.returncode == 0 else 'warning'})")
@@ -257,6 +298,8 @@ def _teardown_compose(project: Project, details: list[str], errors: list[str]) -
     if os.path.isdir(cdir):
         shutil.rmtree(cdir, ignore_errors=True)
         details.append(f"Compose directory '{cdir}' removed")
+
+    env_service.remove_project(name)  # DB rows cascade off Project
 
 
 def _teardown_dockerfile(project: Project, details: list[str], errors: list[str]) -> None:
@@ -300,6 +343,8 @@ def _teardown_dockerfile(project: Project, details: list[str], errors: list[str]
     if os.path.isdir(pdir):
         shutil.rmtree(pdir, ignore_errors=True)
         details.append(f"Project directory '{pdir}' removed")
+
+    env_service.remove_project(project.name)  # DB rows cascade off Project
 
 
 def _teardown_nginx(project_name: str, details: list[str], errors: list[str]) -> None:
@@ -527,6 +572,72 @@ def launch_deploy(project: Project) -> str:
     return deploy_service.bluegreen_deploy(project.id)
 
 
+def launch_restart(db: Session, project: Project) -> tuple[str, str]:
+    """Recreate the project's container(s) from the images they already run, so the current
+    environment (and nothing else) is picked up. Returns `(job_key, message)`.
+
+    This is how an edited env file goes live: env is baked into a container when it is
+    created, so it cannot change under a running one, and `docker start` on a stopped
+    container reuses the environment frozen at creation. Recreating from the existing image
+    avoids a rebuild entirely — no build context is read, no new version is cut, and the
+    blue/green version rows are untouched.
+
+    dockerfile → `docker rm -f` + `docker run` the active version's image on its current
+    port, under the stable deploy job key so `/status`, `/abort` and `WS /{name}/deploy`
+    keep working. compose → `up -d --no-build`, which recreates exactly the services whose
+    `env_file` content changed, under the `compose:{name}` key used by `/compose/status`.
+    """
+    from app.services import deploy_service  # lazy: deploy_service imports _next_port from here
+
+    env_files = env_service.materialize(db, project)
+    env_file = env_service.project_env_file(db, project)
+    project_dir = os.path.abspath(compose_service.project_dir(project.name))
+
+    if project.deploy_mode == "compose":
+        # The override is where a compose service's env is wired in, so regenerate it from
+        # the service rows before `up` — otherwise a stack deployed before the env was
+        # edited would come back with the old `env_file:` list (or none at all). Only the
+        # override is rewritten: ports, subdomains and nginx are left exactly as provisioned.
+        compose_service.write_override(
+            project.name,
+            [{"name": s.name, "exposed": bool(s.exposed),
+              "local_port": s.local_port, "container_port": s.container_port}
+             for s in project.services],
+            env_files,
+        )
+        job_key = deploy_service.compose_restart(project.name, project_dir, env_file=env_file)
+        return job_key, f"Recreating the '{project.name}' stack — poll /compose/status"
+
+    if not project.container_name or not project.image_name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Project '{project.name}' has no container yet — deploy it first",
+        )
+    job_key = deploy_service.deploy_job_key(project.name)
+    docker_service.start_container(
+        project.container_name, project.image_name,
+        project.local_port, project.container_port, job_key, env_file=env_file,
+    )
+    return job_key, f"Recreating container '{project.container_name}' — poll /status"
+
+
+@router.post("/{project_name}/restart", response_model=DockerJobStatusResponse,
+             summary="Recreate the project's container(s) from their existing images "
+                     "(no rebuild) so edited environment variables take effect")
+def restart_project(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
+    project = db.query(Project).filter(Project.name == project_name).first()
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+    if project.deploy_mode not in ("dockerfile", "compose"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Project '{project_name}' has no deploy yet (deploy_mode="
+                   f"{project.deploy_mode}) — nothing to restart",
+        )
+    job_key, message = launch_restart(db, project)
+    return _deploy_job_response(job_key, message)
+
+
 def deploy_job_key(project: Project) -> str:
     """The job_key a deploy WebSocket reconnects to — mirrors `launch_deploy` without
     launching anything (compose → `compose:{name}`, dockerfile → the stable base key)."""
@@ -656,22 +767,29 @@ async def upload_chunk(
 )
 async def upload_complete(
     project_name: str,
-    upload_id: str = Body(..., embed=True),
-    total_size: int | None = Body(None, embed=True),
+    request: UploadCompleteRequest,
     db: Session = Depends(get_db),
     _=Depends(require_auth),
 ):
     """Finalize a chunked upload: validate the staged zip, extract every member under the
     project dir (guarded against zip-slip by `_safe_join`), provision, and clean up. Creates
-    the project row if it does not exist yet (deploy auto-creates)."""
-    zip_path = _staging_zip_path(project_name, upload_id)
+    the project row if it does not exist yet (deploy auto-creates).
+
+    An optional `env` (dotenv text) is stored before provisioning, so the first container
+    this deploy starts already has those variables."""
+    zip_path = _staging_zip_path(project_name, request.upload_id)
     if not os.path.isfile(zip_path):
         raise HTTPException(status_code=404, detail="No staged upload for this upload_id")
-    if total_size is not None and os.path.getsize(zip_path) != total_size:
+    if request.total_size is not None and os.path.getsize(zip_path) != request.total_size:
         os.remove(zip_path)
         raise HTTPException(status_code=400, detail="Staged upload is incomplete (size mismatch)")
 
     project = _get_or_create_project(db, project_name)
+    # Before _autoprovision + launch_deploy, so the first container start already has it.
+    # Committed here rather than left to the provisioning commit, because a manifest-less
+    # deploy (a plain file sync) never reaches one and `get_db` does not commit on close.
+    if apply_deploy_env(db, project, request.env):
+        db.commit()
     base_dir = _project_files_dir(project)
     os.makedirs(base_dir, exist_ok=True)
 

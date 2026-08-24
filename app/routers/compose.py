@@ -20,7 +20,7 @@ from app.models.orm import Project, ComposeService
 from app.models.schemas import DockerJobStatusResponse, SetDomainRequest, ProjectResponse
 from app.auth import require_auth
 from app.config import settings
-from app.services import docker_service, nginx_service, compose_service, interactive_service, ws_session
+from app.services import docker_service, nginx_service, compose_service, env_service, interactive_service, ws_session
 from app.routers.projects import _next_port, assert_domain_available, project_response
 
 router = APIRouter()
@@ -152,8 +152,11 @@ def provision_compose(
 
     db.flush()
 
-    # Persist the compose file + generated override.
-    compose_path, _ = compose_service.write_files(project_name, compose_text, services)
+    # Persist the compose file + generated override. The override carries an `env_file:`
+    # entry per service pointing at the materialized copies of the DB-stored env files
+    # (see env_service) — shared project-level file first, the service's own second.
+    env_files = env_service.materialize(db, project)
+    compose_path, _ = compose_service.write_files(project_name, compose_text, services, env_files)
     project.compose_path = compose_path
 
     # nginx + SSL for the exposed services.
@@ -290,9 +293,11 @@ def _require_compose_files(project_name: str):
     summary="docker compose down — returns immediately, poll /compose/status",
 )
 def compose_down(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
-    _get_compose_project(project_name, db)
+    project = _get_compose_project(project_name, db)
     _require_compose_files(project_name)
-    docker_service.compose_down(project_name, _abs_project_dir(project_name), _job_key(project_name))
+    # Pass the env file so ${VAR} interpolation resolves the same way it did on `up`.
+    docker_service.compose_down(project_name, _abs_project_dir(project_name), _job_key(project_name),
+                                env_file=env_service.project_env_file(db, project))
     return _job_response(project_name, "compose down started — poll /compose/status")
 
 

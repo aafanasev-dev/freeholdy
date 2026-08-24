@@ -55,10 +55,21 @@ const describeSelection = (srcKind, entries, rootName) =>
 const mkApi = (token) => {
   const h = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
   const hf = { Authorization: `Bearer ${token}` };
+  // FastAPI reports a plain string in `detail` for HTTPException, but a list of
+  // {loc, msg, …} objects for a 422 request-validation failure — flatten those to text
+  // so callers surfacing e.message never render "[object Object]".
+  const detailText = (d, status) => {
+    if (typeof d === "string" && d) return d;
+    if (Array.isArray(d) && d.length) {
+      // pydantic prefixes a custom validator's ValueError with "Value error, " — noise here.
+      return d.map(x => (x?.msg || JSON.stringify(x)).replace(/^Value error, /, "")).join("\n");
+    }
+    return `HTTP ${status}`;
+  };
   const unwrap = async (r) => {
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
-      throw new Error(e.detail || `HTTP ${r.status}`);
+      throw new Error(detailText(e.detail, r.status));
     }
     return r.json();
   };
@@ -183,8 +194,60 @@ const TextIn = ({ value, onChange, placeholder, type = "text", style: st = {} })
   />
 );
 
+const TextArea = ({ value, onChange, placeholder, rows = 14, style: st = {} }) => (
+  <textarea
+    value={value} placeholder={placeholder} rows={rows} spellCheck={false}
+    onChange={e => onChange(e.target.value)}
+    style={{
+      background: C.s2, border: `1px solid ${C.bdB}`, color: C.txt,
+      fontFamily: C.mono, fontSize: "11px", lineHeight: 1.65, padding: "10px 11px",
+      borderRadius: "10px", outline: "none", width: "100%", boxSizing: "border-box",
+      resize: "vertical", whiteSpace: "pre", overflowWrap: "normal", overflowX: "auto", ...st,
+    }}
+  />
+);
+
+// The deploy-time environment field, shared by DeployForm (new project) and UploadModal
+// (redeploy). Collapsible, but its header reads as a Field label rather than a footnote —
+// `count` is how many variables the project already has stored (null for a new project),
+// and `hint` is the caller's copy, since the two forms differ on what a blank box means.
+const EnvDisclosure = ({ value, onChange, open, onToggle, count = null, loading = false, hint }) => (
+  <div>
+    <button onClick={onToggle} style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px",
+      width: "100%", padding: "3px 0", background: "transparent", border: "none",
+      cursor: "pointer", textAlign: "left",
+    }}>
+      <span style={{ color: C.muted, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.1em" }}>
+        <span style={{ color: C.dim, marginRight: "6px" }}>{open ? "▾" : "▸"}</span>
+        ENVIRONMENT VARIABLES
+        {!open && value.trim() && <span style={{ color: C.green, marginLeft: "6px" }}>✓</span>}
+      </span>
+      {loading ? (
+        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>loading…</span>
+      ) : count > 0 ? (
+        <span style={{
+          color: C.blue, fontFamily: C.ff, fontSize: "10px", padding: "1px 7px",
+          background: C.blueFill, border: `1px solid ${C.blueBd}`, borderRadius: "7px",
+        }}>{count} stored</span>
+      ) : (
+        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>optional</span>
+      )}
+    </button>
+    {open && (
+      <div style={{ marginTop: "8px" }}>
+        <TextArea rows={8} value={value} onChange={onChange}
+                  placeholder={loading ? "loading…" : "KEY=value\n# comments and blank lines are kept"} />
+        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", marginTop: "5px" }}>
+          One <code style={{ fontFamily: C.mono }}>KEY=value</code> per line, each on one line. {hint}
+        </div>
+      </div>
+    )}
+  </div>
+);
+
 const Err = ({ msg }) => msg ? (
-  <div style={{ color: C.red, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: C.redFill, border: `1px solid ${C.redBd}`, borderRadius: "10px" }}>
+  <div style={{ color: C.red, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: C.redFill, border: `1px solid ${C.redBd}`, borderRadius: "10px", whiteSpace: "pre-wrap" }}>
     ✗ {msg}
   </div>
 ) : null;
@@ -580,7 +643,9 @@ const stripRoot = (p) => p.split("/").slice(1).join("/") || p;
 // unzip + provision. Returns the `/upload/complete` response. The project is created
 // server-side if it doesn't exist yet (deploy auto-creates). Shared by UploadModal (per-card
 // redeploy) and DeployForm (new project). Mirrors `fhcli deploy` with a local path.
-const chunkedDeploy = async (api, project, entries, onProgress) => {
+// `env` (optional dotenv text) is stored server-side before provisioning, so the first
+// container this deploy starts already has those variables — see DeployForm.
+const chunkedDeploy = async (api, project, entries, onProgress, env = null) => {
   const fileMap = {};
   for (const { file, rel } of entries) fileMap[rel] = new Uint8Array(await file.arrayBuffer());
   const zipped = await new Promise((resolve, reject) =>
@@ -595,7 +660,9 @@ const chunkedDeploy = async (api, project, entries, onProgress) => {
                   zipped.subarray(offset, end));
     onProgress && onProgress({ sent: end, total });
   }
-  return api.post(`/projects/${project}/upload/complete`, { upload_id: uploadId, total_size: total });
+  const body = { upload_id: uploadId, total_size: total };
+  if (env) body.env = env;
+  return api.post(`/projects/${project}/upload/complete`, body);
 };
 
 const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
@@ -610,7 +677,34 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState(null);   // { sent, total } in bytes
+  const [env, setEnv] = useState("");               // dotenv text, replaces the stored file
+  const [showEnv, setShowEnv] = useState(false);
+  const [envKeys, setEnvKeys] = useState([]);
+  const [envLoading, setEnvLoading] = useState(true);
+  const envTouched = useRef(false);
   const dirRef = useRef();
+
+  // Prefill with what the project already has stored, so this is an *update* surface and
+  // not just an "add": the deploy replaces the project-level file with whatever is in the
+  // box. Auto-expand when there is something to see. The touched/cancelled guards keep a
+  // slow response from clobbering text the user typed meanwhile; a failure just leaves the
+  // box blank, which the server reads as "leave the stored env alone".
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await mkApi(token).get(`/projects/${project}/env`);
+        if (cancelled || envTouched.current) return;
+        setEnv(d.content || "");
+        setEnvKeys(d.keys || []);
+        if ((d.keys || []).length) setShowEnv(true);
+      } catch { /* no env to prefill — deploying without one still works */ }
+      finally { if (!cancelled) setEnvLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [token, project]);
+
+  const editEnv = (v) => { envTouched.current = true; setEnv(v); };
 
   // React drops the non-standard directory attributes, so set them on mount / mode switch.
   useEffect(() => {
@@ -636,7 +730,7 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
       if (mode === "git") {
         if (!gitUrl.trim()) { setBusy(false); return setError("Git URL is required"); }
         // Same idempotent get-or-create-then-redeploy path as DeployForm's git tab.
-        const data = await mkApi(token).post("/git/add", { name: project, git_url: gitUrl.trim(), branch: branch.trim() || null });
+        const data = await mkApi(token).post("/git/add", { name: project, git_url: gitUrl.trim(), branch: branch.trim() || null, env: env.trim() || null });
         saveProjectDeploy(project, { srcKind: "git", gitUrl: gitUrl.trim(), branch: branch.trim(), label: gitUrl.trim() });
         onDeploy && onDeploy(data);   // git always provisions → stream the build in InstallPane
         onClose();
@@ -645,7 +739,7 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
       // Files: zip the selection, stream it to the server in 1 MiB chunks (progress bar),
       // then reassemble + unzip + provision. Mirrors `fhcli deploy` (local path).
       if (!entries.length) { setBusy(false); return setError("Select a file or folder first"); }
-      const data = await chunkedDeploy(mkApi(token), project, entries, setProgress);
+      const data = await chunkedDeploy(mkApi(token), project, entries, setProgress, env.trim() || null);
       saveProjectDeploy(project, { srcKind, gitUrl: "", branch: "", label: describeSelection(srcKind, entries, rootName) });
       // When a manifest is provisioned the server auto-launches build + run and returns a
       // ws_path; hand off to the InstallPane to stream the deploy live (same as git/plugin
@@ -731,6 +825,19 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
         </div>
       )}
 
+      <div style={{ marginBottom: "12px" }}>
+        <EnvDisclosure
+          value={env} onChange={editEnv} open={showEnv} onToggle={() => setShowEnv(v => !v)}
+          count={envKeys.length} loading={envLoading}
+          hint={<>
+            Edits <span style={{ color: C.txt }}>replace</span> the stored file and take
+            effect with this deploy — no restart needed. Emptying the box does
+            <span style={{ color: C.txt }}> not</span> delete them; use the card&apos;s{" "}
+            <span style={{ color: C.txt }}>env</span> button → clear for that.
+          </>}
+        />
+      </div>
+
       {result && (
         <>
           <Ok msg={result.message} />
@@ -773,6 +880,72 @@ const StatusModal = ({ data, project, onClose }) => (
     </div>
   </Modal>
 );
+
+// ── Logs modal ────────────────────────────────────────────────────────────────
+// Tails the *container's* own stdout/stderr (GET /projects/{name}/logs), unlike StatusModal
+// which shows the last build/run job's log. The user picks how many trailing lines to pull;
+// a compose project with no service tails the whole stack. Snapshot, not a live follow —
+// hence the refresh button rather than a socket.
+const LogsModal = ({ token, project, service = null, onClose }) => {
+  const [tail, setTail] = useState("200");
+  const [content, setContent] = useState("");
+  const [lines, setLines] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
+  const paneRef = useRef();
+  const title = service ? `${project} → ${service}` : project;
+  const path = service
+    ? `/projects/${project}/services/${service}/logs`
+    : `/projects/${project}/logs`;
+
+  const fetchLogs = async () => {
+    const n = parseInt(tail, 10);
+    if (!n || n < 1) return setError("Enter how many lines to fetch (1 or more)");
+    setError(""); setLoading(true);
+    try {
+      const d = await mkApi(token).get(`${path}?tail=${n}`);
+      setContent(d.content || ""); setLines(d.lines || 0);
+    } catch (e) { setError(e.message); setContent(""); setLines(0); }
+    finally { setLoading(false); setLoaded(true); }
+  };
+  useEffect(() => { fetchLogs(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
+  // Newest lines are the point — pin the pane to the bottom after every fetch.
+  useEffect(() => { if (paneRef.current) paneRef.current.scrollTop = paneRef.current.scrollHeight; }, [content]);
+
+  return (
+    <Modal onClose={onClose} width={760}>
+      <ModalHeader title={`LOGS — ${title}`} color={C.muted} onClose={onClose} />
+      <div style={{ display: "flex", alignItems: "flex-end", gap: "8px", marginBottom: "12px" }}>
+        <Field label="LAST N LINES" style={{ width: "140px" }}>
+          <TextIn type="number" value={tail} onChange={setTail} placeholder="200" />
+        </Field>
+        <Btn v="primary" onClick={fetchLogs} busy={loading}>fetch</Btn>
+        <div style={{ flex: 1 }} />
+        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", paddingBottom: "9px" }}>
+          {service ? "this service's container" : "the container's own output"}
+        </span>
+      </div>
+
+      <div ref={paneRef} style={{
+        background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px",
+        fontFamily: C.mono, fontSize: "11px", color: C.txt, lineHeight: "1.65",
+        whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: "50vh", minHeight: "180px",
+        overflow: "auto",
+      }}>
+        {content || <span style={{ color: C.dim }}>{loaded && !error ? "(nothing logged yet)" : "loading…"}</span>}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", marginTop: "12px" }}>
+        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>
+          {content ? `${lines} line(s)` : ""}
+        </span>
+        <Btn v="ghost" onClick={onClose}>close</Btn>
+      </div>
+      {error && <div style={{ marginTop: "12px" }}><Err msg={error} /></div>}
+    </Modal>
+  );
+};
 
 // ── SSL modal ─────────────────────────────────────────────────────────────────
 const SslModal = ({ data, project, onClose }) => (
@@ -861,6 +1034,103 @@ const DomainModal = ({ token, project, service = null, info, onClose, onDone }) 
   );
 };
 
+// ── Environment variables modal ─────────────────────────────────────────────────
+// Edits the .env file freeholdy stores for a project (or for one compose service, which
+// wins over the shared project-level file on a key collision). Saving is save-only: the
+// values reach the container the next time it starts, so when the server reports
+// applied === false the modal offers a restart, which recreates the container(s) from the
+// images they already run — no rebuild — and streams through the usual LogPane polling.
+const EnvModal = ({ token, project, service = null, compose = false, onClose, onRefresh, onRestart }) => {
+  const [content, setContent] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [applied, setApplied] = useState(true);
+  const [keys, setKeys] = useState([]);
+  const [busy, setBusy] = useState({});
+  const [error, setError] = useState("");
+  const [ok, setOk] = useState("");
+  const title = service ? `${project} → ${service}` : project;
+  const path = service
+    ? `/projects/${project}/services/${service}/env`
+    : `/projects/${project}/env`;
+
+  const absorb = (d) => { setContent(d.content || ""); setKeys(d.keys || []); setApplied(d.applied); };
+
+  const load = async () => {
+    try { absorb(await mkApi(token).get(path)); setLoaded(true); }
+    catch (e) { setError(e.message); setLoaded(true); }
+  };
+  useEffect(() => { load(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const run = async (key, fn) => {
+    setError(""); setOk("");
+    setBusy(b => ({ ...b, [key]: true }));
+    try {
+      const d = await fn();
+      absorb(d);
+      setOk(d.message || "saved");
+      onRefresh && onRefresh();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(b => ({ ...b, [key]: false })); }
+  };
+
+  const save  = () => run("save",  () => mkApi(token).put(path, { content }));
+  const clear = () => run("clear", () => mkApi(token).del(path));
+
+  return (
+    <Modal onClose={onClose} width={660}>
+      <ModalHeader title={`ENVIRONMENT — ${title}`} color={C.blue} onClose={onClose} />
+      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "12px", lineHeight: "1.6" }}>
+        {service
+          ? <>this service&apos;s own variables — they override the project-level ones</>
+          : compose
+            ? <>shared by every service in this stack — a service&apos;s own file wins on a clash</>
+            : <>passed to this project&apos;s container</>}
+        {keys.length > 0 && <span style={{ color: C.dim }}> · {keys.length} variable(s)</span>}
+      </div>
+
+      <Field label="DOTENV FILE" style={{ marginBottom: "8px" }}>
+        <TextArea
+          value={content} onChange={setContent}
+          placeholder={loaded ? "KEY=value\n# comments and blank lines are kept" : "loading…"}
+        />
+      </Field>
+      <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", marginBottom: "12px" }}>
+        One <code style={{ fontFamily: C.mono }}>KEY=value</code> per line. Values are passed to the
+        container exactly as written — no quoting needed, and they must stay on one line.
+      </div>
+
+      {!applied && (
+        <div style={{
+          color: C.amber, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px",
+          background: C.amberFill, border: `1px solid ${C.amberBd}`, borderRadius: "10px",
+          marginBottom: "12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px",
+        }}>
+          <span>⚠ saved, but the running container still has the old values</span>
+          {onRestart && (
+            <Btn sm v="amber" busy={busy.restart} onClick={async () => {
+              setBusy(b => ({ ...b, restart: true }));
+              try { await onRestart(); onClose(); }
+              finally { setBusy(b => ({ ...b, restart: false })); }
+            }}>restart now</Btn>
+          )}
+        </div>
+      )}
+      {ok && <div style={{ marginBottom: "12px" }}><Ok msg={ok} /></div>}
+      {error && <Err msg={error} />}
+
+      <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", marginTop: "12px" }}>
+        <div>
+          {keys.length > 0 && <Btn v="amber" onClick={clear} busy={busy.clear}>clear</Btn>}
+        </div>
+        <div style={{ display: "flex", gap: "8px" }}>
+          <Btn v="ghost" onClick={onClose} disabled={busy.save}>close</Btn>
+          <Btn v="primary" onClick={save} busy={busy.save}>save</Btn>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
 // ── Versions modal (blue/green backups) ─────────────────────────────────────────
 // Lists a project's deployed versions (dockerfile: active / inactive / archived; compose:
 // active / archived — a compose switchover downs the previous stack), lets the user set the
@@ -909,6 +1179,7 @@ const VersionsModal = ({ token, project, onClose, onStream, onRefresh }) => {
   };
 
   const counts = data?.counts || {};
+
   const TH = ({ children, right, center }) => (
     <th style={{ padding: "4px 10px", textAlign: right ? "right" : center ? "center" : "left", color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.1em", fontWeight: 400, whiteSpace: "nowrap" }}>{children}</th>
   );
@@ -1034,23 +1305,30 @@ const ContainerRow = ({ project, info, token, onOperation, onRefresh, onStream }
             <Btn sm v="amber" onClick={() => setModal({ type: "exec" })} disabled={!isRunning} title="Exec command in container">exec</Btn>
             <Btn sm onClick={() => act("ssl")} busy={busy.ssl} title="Issue/renew SSL cert">ssl</Btn>
             <Btn sm v="blue" onClick={() => setModal({ type: "domain" })} title="Set or clear a custom domain">domain</Btn>
+            <Btn sm v="blue" onClick={() => setModal({ type: "env" })} title="Edit environment variables">
+              env{info.env_count > 0 ? ` ${info.env_count}` : ""}
+            </Btn>
+            <Btn sm v="amber" onClick={() => act("restart")} busy={busy.restart} title="Recreate the container so env changes take effect (no rebuild)">restart</Btn>
             <Btn sm v="purple" onClick={() => setModal({ type: "versions" })} title="View versions, roll back, set backup limit">versions</Btn>
+            <Btn sm v="ghost" onClick={() => setModal({ type: "logs" })} title="Read the container's own output">logs</Btn>
             <Btn sm v="ghost" onClick={() => act("status")} busy={busy.status} title="View job status & logs">status</Btn>
           </div>
         </td>
       </tr>
 
       {modal?.type === "exec"       && <ExecTerminal token={token} project={project} label={project} onClose={() => setModal(null)} />}
+      {modal?.type === "logs"       && <LogsModal token={token} project={project} onClose={() => setModal(null)} />}
       {modal?.type === "status"     && <StatusModal data={modal.data} project={project} onClose={() => setModal(null)} />}
       {modal?.type === "ssl"        && <SslModal data={modal.data} project={project} onClose={() => setModal(null)} />}
       {modal?.type === "domain"     && <DomainModal token={token} project={project} info={info} onClose={() => setModal(null)} onDone={onRefresh} />}
+      {modal?.type === "env"        && <EnvModal token={token} project={project} onClose={() => setModal(null)} onRefresh={onRefresh} onRestart={() => act("restart")} />}
       {modal?.type === "versions"   && <VersionsModal token={token} project={project} onClose={() => setModal(null)} onStream={onStream} onRefresh={onRefresh} />}
     </>
   );
 };
 
 // ── Service row (compose mode: per-service exec + custom domain; stack lifecycle is on the card) ──
-const ServiceRow = ({ project, info, token, onOperation, onRefresh }) => {
+const ServiceRow = ({ project, info, token, onOperation, onRefresh, onRestart }) => {
   const [modal, setModal] = useState(null);
   const isRunning = info.container_status === "running";
 
@@ -1063,9 +1341,15 @@ const ServiceRow = ({ project, info, token, onOperation, onRefresh }) => {
           {info.exposed !== false && (
             <Btn sm v="blue" onClick={() => setModal("domain")} title="Set or clear a custom domain">domain</Btn>
           )}
+          <Btn sm v="blue" onClick={() => setModal("env")} title="Edit this service's environment variables">
+            env{info.env_count > 0 ? ` ${info.env_count}` : ""}
+          </Btn>
+          <Btn sm v="ghost" onClick={() => setModal("logs")} title="Read this service's container output">logs</Btn>
         </div>
         {modal === "exec"   && <ExecTerminal token={token} project={project} service={info.name} label={`${project} → ${info.name}`} onClose={() => setModal(null)} />}
+        {modal === "logs"   && <LogsModal token={token} project={project} service={info.name} onClose={() => setModal(null)} />}
         {modal === "domain" && <DomainModal token={token} project={project} service={info.name} info={info} onClose={() => setModal(null)} onDone={onRefresh} />}
+        {modal === "env"    && <EnvModal token={token} project={project} service={info.name} onClose={() => setModal(null)} onRefresh={onRefresh} onRestart={onRestart} />}
       </td>
     </tr>
   );
@@ -1078,6 +1362,8 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
   const [busy, setBusy] = useState({});
   const [uploadModal, setUploadModal] = useState(false);
   const [versionsModal, setVersionsModal] = useState(false);
+  const [envModal, setEnvModal] = useState(false);
+  const [logsModal, setLogsModal] = useState(false);
   const isCompose = project.deploy_mode === "compose";
   const isPending = project.deploy_mode !== "compose" && project.deploy_mode !== "dockerfile";
   const isPlugin = project.type === "plugin";
@@ -1102,6 +1388,25 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
       onOperation({ project: project.name, kind: "compose", operation: `compose_${action}`, status: "error", logs: e.message });
     } finally {
       setBusy(b => ({ ...b, [action]: false }));
+    }
+  };
+
+  // Recreate the project's container(s) from the images they already run — how an edited
+  // environment goes live. Compose stacks report on the compose status endpoint, so the
+  // LogPane needs kind: "compose" for them.
+  const restart = async () => {
+    setBusy(b => ({ ...b, restart: true }));
+    try {
+      const data = await mkApi(token).post(`/projects/${project.name}/restart`);
+      onOperation({
+        project: project.name, kind: isCompose ? "compose" : undefined,
+        operation: data.operation || "restart", status: data.status,
+        logs: data.logs || data.message || "",
+      });
+    } catch (e) {
+      onOperation({ project: project.name, kind: isCompose ? "compose" : undefined, operation: "restart", status: "error", logs: e.message });
+    } finally {
+      setBusy(b => ({ ...b, restart: false }));
     }
   };
 
@@ -1136,7 +1441,16 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
           <div style={{ display: "flex", gap: "6px" }}>
             <Btn sm v="primary" onClick={() => setUploadModal(true)} title="Upload files or a folder — auto-detects Dockerfile / docker-compose.yml, provisions, and deploys">{isPending ? "upload" : "deploy"}</Btn>
             {isCompose && (
+              <Btn sm v="blue" onClick={() => setEnvModal(true)} title="Edit the environment variables shared by every service">env</Btn>
+            )}
+            {isCompose && (
+              <Btn sm v="amber" onClick={restart} busy={busy.restart} title="Recreate the stack's containers so env changes take effect (no rebuild)">restart</Btn>
+            )}
+            {isCompose && (
               <Btn sm v="purple" onClick={() => setVersionsModal(true)} title="View versions, roll back, set backup limit">versions</Btn>
+            )}
+            {isCompose && (
+              <Btn sm v="ghost" onClick={() => setLogsModal(true)} title="Read the whole stack's output (every service, interleaved)">logs</Btn>
             )}
             {isCompose && (
               <Btn sm v="danger" onClick={() => composeAct("down")} busy={busy.down} title="docker compose down">down</Btn>
@@ -1163,7 +1477,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
             </thead>
             <tbody>
               {isCompose
-                ? (project.services || []).map(s => <ServiceRow key={s.name} project={project.name} info={s} token={token} onOperation={onOperation} onRefresh={onRefresh} />)
+                ? (project.services || []).map(s => <ServiceRow key={s.name} project={project.name} info={s} token={token} onOperation={onOperation} onRefresh={onRefresh} onRestart={restart} />)
                 : (project.container
                     ? <ContainerRow project={project.name} info={project.container} token={token} onOperation={onOperation} onRefresh={onRefresh} onStream={onStream} />
                     : null)}
@@ -1175,6 +1489,8 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
 
       {uploadModal && <UploadModal token={token} project={project.name} onClose={() => setUploadModal(false)} onUploaded={() => onRefresh && onRefresh()} onDeploy={onDeploy} />}
       {versionsModal && <VersionsModal token={token} project={project.name} onClose={() => setVersionsModal(false)} onStream={onStream} onRefresh={onRefresh} />}
+      {envModal && <EnvModal token={token} project={project.name} compose onClose={() => setEnvModal(false)} onRefresh={onRefresh} onRestart={restart} />}
+      {logsModal && <LogsModal token={token} project={project.name} onClose={() => setLogsModal(false)} />}
       {confirm && <ConfirmModal message={`Delete "${project.name}"? This stops containers, removes images and nginx config.`} onConfirm={remove} onCancel={() => setConfirm(false)} loading={removing} />}
     </>
   );
@@ -1194,6 +1510,8 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
   const [rootName, setRootName] = useState("");      // top folder name of a folder pick
   const [gitUrl, setGitUrl] = useState("");
   const [branch, setBranch] = useState("");
+  const [env, setEnv] = useState("");           // dotenv text, stored before the first start
+  const [showEnv, setShowEnv] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState(null);
@@ -1222,12 +1540,12 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
       const api = mkApi(token);
       if (mode === "git") {
         if (!gitUrl.trim()) { setBusy(false); return setError("Git URL is required"); }
-        const data = await api.post("/git/add", { name: name.trim(), git_url: gitUrl.trim(), branch: branch.trim() || null });
+        const data = await api.post("/git/add", { name: name.trim(), git_url: gitUrl.trim(), branch: branch.trim() || null, env: env.trim() || null });
         saveProjectDeploy(name.trim(), { srcKind: "git", gitUrl: gitUrl.trim(), branch: branch.trim(), label: gitUrl.trim() });
         onDeployed(data);   // git always provisions (or 400s) → stream the build
       } else {
         if (!entries.length) { setBusy(false); return setError("Select a file or folder first"); }
-        const data = await chunkedDeploy(api, name.trim(), entries, setProgress);
+        const data = await chunkedDeploy(api, name.trim(), entries, setProgress, env.trim() || null);
         saveProjectDeploy(name.trim(), { srcKind, gitUrl: "", branch: "", label: describeSelection(srcKind, entries, rootName) });
         if (data.provisioned && data.ws_path) { onDeployed(data); return; }
         setResult(data); onSynced && onSynced();   // no manifest — plain file sync, nothing built
@@ -1305,6 +1623,15 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
             </Field>
           </>
         )}
+
+        <EnvDisclosure
+          value={env} onChange={setEnv} open={showEnv} onToggle={() => setShowEnv(v => !v)}
+          hint={<>
+            Stored <span style={{ color: C.txt }}>before the first container start</span>, so the app
+            has them on boot — no restart needed. For a compose stack these are shared by every
+            service; per-service files come later from the <span style={{ color: C.txt }}>env</span> button.
+          </>}
+        />
 
         <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px" }}>
           The server scans the {mode === "git" ? "cloned repo" : "uploaded"} root for a
@@ -1745,8 +2072,8 @@ export default function App() {
         ::-webkit-scrollbar-track { background: #1C2334; }
         ::-webkit-scrollbar-thumb { background: #3D4964; border-radius: 8px; }
         ::-webkit-scrollbar-thumb:hover { background: #4E5C7D; }
-        input::placeholder { color: #657089; }
-        input:focus { border-color: #5B9EFF !important; box-shadow: 0 0 0 3px rgba(91,158,255,.35); }
+        input::placeholder, textarea::placeholder { color: #657089; }
+        input:focus, textarea:focus { border-color: #5B9EFF !important; box-shadow: 0 0 0 3px rgba(91,158,255,.35); }
         select option { background: #161C2B; color: #E9EDF5; }
         a { transition: color .15s; }
         a:hover { color: #5B9EFF; }

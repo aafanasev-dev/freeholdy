@@ -16,6 +16,9 @@
 #      (compose versions leave them NULL; per-service tags are deterministic). Backfill of
 #      existing compose projects as active v1 happens at app startup (needs docker + YAML) —
 #      see app/services/deploy_service.backfill_compose_versions.
+#   4. environment variables — adds the project_env_files table holding one .env-format file
+#      per project (service_name = '') and per compose service. Nothing to backfill: a
+#      project with no row simply has no env, which is the pre-feature behaviour.
 #
 # Usage:
 #   ./migrate_db.sh [path/to/freeholdy.db]
@@ -65,12 +68,15 @@ fi
 
 # project_versions.image_name NOT NULL marks a pre-compose-versioning table (compose
 # versions need it nullable). A missing table is created nullable by the bluegreen step.
+has_env_files="$(sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='project_env_files';")"
+
 versions_notnull=""
 if [ -n "$has_versions" ]; then
     versions_notnull="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('project_versions') WHERE name='image_name' AND \"notnull\"=1;")"
 fi
 
-if [ -n "$bluegreen_done" ] && [ -n "$compose_done" ] && [ -z "$versions_notnull" ]; then
+if [ -n "$bluegreen_done" ] && [ -n "$compose_done" ] && [ -z "$versions_notnull" ] \
+   && [ -n "$has_env_files" ]; then
     echo "Database '$DB' is already up to date — nothing to migrate."
     exit 0
 fi
@@ -172,6 +178,21 @@ if [ -n "$versions_notnull" ]; then
       FROM project_versions;
     DROP TABLE project_versions;
     ALTER TABLE project_versions_new RENAME TO project_versions;"
+fi
+
+# project_env_files: one .env-format file per project (service_name = '') and per compose
+# service. Plain CREATE TABLE — no backfill, a project without a row just has no env.
+if [ -z "$has_env_files" ]; then
+    echo "  + project_env_files table"
+    SQL="$SQL
+    CREATE TABLE project_env_files (
+        id           INTEGER PRIMARY KEY,
+        project_id   INTEGER NOT NULL REFERENCES projects(id),
+        service_name VARCHAR NOT NULL DEFAULT '',
+        content      TEXT NOT NULL DEFAULT '',
+        updated_at   DATETIME
+    );
+    CREATE UNIQUE INDEX ux_project_env_files ON project_env_files (project_id, service_name);"
 fi
 
 SQL="$SQL COMMIT;"
