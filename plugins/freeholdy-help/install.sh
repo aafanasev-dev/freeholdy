@@ -10,4 +10,5 @@
 set -e
 
 cp "$PLUGIN_DIR/index.html" "$PROJECT_DIR/index.html"
-echo "Copied index.html into the build context"
+cp -r "$PLUGIN_DIR/assets" "$PROJECT_DIR/assets"
+echo "Copied index.html + assets/ into the build context"

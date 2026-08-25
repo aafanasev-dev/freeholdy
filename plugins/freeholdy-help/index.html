@@ -49,6 +49,24 @@
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
 
+    /* Screenshots of the web UI */
+    figure { margin: 1.1rem 0; }
+    figure img {
+      display: block;
+      /* The width/height attributes reserve layout space before the image loads;
+         `height: auto` keeps the aspect ratio once CSS takes over the width. */
+      width: 100%;
+      height: auto;
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      background: #0d0e12;
+    }
+    figcaption {
+      margin-top: 0.45rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
     /* Header */
     header {
       position: fixed;
@@ -270,6 +288,17 @@
           <li><strong>Web UI</strong> — a control panel at <code>ui.&lt;your-domain&gt;</code> covering the same operations in the browser.</li>
           <li><strong>REST API</strong> — everything above is a thin client over <a href="#api">the API</a> at <code>api.&lt;your-domain&gt;</code>, authenticated with a bearer token.</li>
         </ul>
+
+        <figure>
+          <img src="assets/webui-projects.jpg" width="1568" height="480"
+               alt="The web UI project list: one card per project, each showing its subdomain, loopback port, SSL state, container status, and per-project action buttons.">
+          <figcaption>
+            The web UI's project list. Each card is one project — a
+            <code>dockerfile</code> project has a single container row; a <code>compose</code>
+            project lists every service, with the internal ones marked
+            <code>unproxied</code> (no subdomain, no port of their own).
+          </figcaption>
+        </figure>
       </section>
 
       <section id="installation">
@@ -313,6 +342,19 @@ source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # set TOKEN and BASE_DOMAIN</code></pre>
         <p>Check it works with <code>./fhcli.py health</code>.</p>
+        <p>
+          The same token logs you into the web UI at <code>ui.&lt;your-domain&gt;</code> — it is
+          stored in the browser and sent as a bearer token on every request.
+        </p>
+
+        <figure>
+          <img src="assets/webui-login.jpg" width="700" height="420"
+               alt="The web UI login screen: a single API token field and a connect button.">
+          <figcaption>
+            The web UI asks for the same API token. It is validated against
+            <code>/health</code> before being stored.
+          </figcaption>
+        </figure>
       </section>
 
       <section id="deploying-apps">
@@ -332,6 +374,15 @@ cp .env.example .env   # set TOKEN and BASE_DOMAIN</code></pre>
           subdomain per exposed service (<code>{service}.myapp.your_domain.com</code>). Re-run
           the command to redeploy.
         </p>
+
+        <figure>
+          <img src="assets/webui-deploy-folder.jpg" width="1568" height="420"
+               alt="The web UI deploy form on the files / folder tab, with a project name typed in and the subdomain it will be served at shown below the field.">
+          <figcaption>
+            The same deploy from the browser: <strong>Deploy</strong> → <em>files / folder</em>.
+            The form shows the subdomain the project will land on before you upload anything.
+          </figcaption>
+        </figure>
         <p>
           Add <code>--env .env</code> to store the project's
           <a href="#env-vars">environment variables</a> before the container first starts.
@@ -350,6 +401,16 @@ fhcli deploy mysite git@github.com:owner/repo.git --branch dev</code></pre>
           then deploy over the <code>git@…</code> URL.
         </p>
 
+        <figure>
+          <img src="assets/webui-deploy-git.jpg" width="1568" height="430"
+               alt="The web UI deploy form on the git URL tab, with a repository URL filled in and an optional branch field below it.">
+          <figcaption>
+            The <em>git URL</em> tab of the same form. The branch is optional — leave it blank
+            for the repository's default branch. The <strong>Git key</strong> button in the
+            sidebar prints the server's public key for private repos.
+          </figcaption>
+        </figure>
+
         <h2 id="deploy-plugins">From plugins</h2>
         <pre><code>fhcli plugins                       # list available plugins
 fhcli plugin-add nextcloud mycloud  # install one as project "mycloud"</code></pre>
@@ -359,6 +420,26 @@ fhcli plugin-add nextcloud mycloud  # install one as project "mycloud"</code></p
           choose an admin account) before the build starts. If your terminal disconnects
           mid-install, re-running <code>plugin-add</code> resumes it.
         </p>
+
+        <figure>
+          <img src="assets/webui-plugins.jpg" width="1568" height="747"
+               alt="The web UI plugin catalog: a list of plugin names on the left, and the selected plugin's long-form description on the right with an install button.">
+          <figcaption>
+            The plugin catalog in the browser. Each entry shows its deploy mode and whether it
+            ships an <code>install.sh</code> or is <strong>interactive</strong>; the panel is the
+            plugin's own <code>ABOUT.md</code>.
+          </figcaption>
+        </figure>
+
+        <figure>
+          <img src="assets/webui-install-log.jpg" width="1568" height="747"
+               alt="The project list with a newly installed plugin project at the top, and a panel below it streaming the docker build log, ending with the line that the first version is now active.">
+          <figcaption>
+            Whichever route you take, the build log streams live over a WebSocket and ends by
+            naming the version that went active. The build keeps running server-side if you
+            close the page — reconnecting re-attaches to the same log.
+          </figcaption>
+        </figure>
       </section>
 
       <section id="plugin-catalog">
@@ -450,6 +531,15 @@ fhcli set-backup-limit myapp 3  # keep at most 3 archived versions</code></pre>
             successful deploy.</li>
         </ul>
 
+        <figure>
+          <img src="assets/webui-versions.jpg" width="740" height="400"
+               alt="The versions dialog for a project: three rows, v3 active and running, v2 inactive and exited, v1 archived, each older version offering a rollback button, plus an editable backup limit.">
+          <figcaption>
+            The versions dialog. The backup limit is editable here and prunes immediately;
+            every version that is not the current one offers a one-click rollback.
+          </figcaption>
+        </figure>
+
         <h2>What a rollback restores</h2>
         <p>
           A rollback puts back <strong>code and images</strong>. For a single-container project the
@@ -513,6 +603,16 @@ fhcli env-clear myapp                  # delete it</code></pre>
           the CLI prints a hint and the web UI shows a "restart to apply" banner.
         </p>
 
+        <figure>
+          <img src="assets/webui-env.jpg" width="740" height="600"
+               alt="The environment dialog for a project: a dotenv text area holding commented KEY=value lines, and an amber banner reading that the file is saved but the running container still has the old values, with a restart now button.">
+          <figcaption>
+            The environment dialog, showing the saved-but-not-applied state. The banner's
+            <strong>restart now</strong> button does exactly what <code>fhcli restart</code>
+            does — recreate the container, no rebuild.
+          </figcaption>
+        </figure>
+
         <h2 id="env-first-start">The first start</h2>
         <p>
           Because setting variables never starts anything, a project that is deployed <em>before</em>
@@ -527,6 +627,16 @@ cat .env | fhcli deploy myapp ./myapp --env -</code></pre>
           keeps whatever is already stored — it never silently wipes a project's environment.
           Clearing is always explicit (<code>fhcli env-clear</code>).
         </p>
+
+        <figure>
+          <img src="assets/webui-deploy-env.jpg" width="1568" height="600"
+               alt="The deploy form with its optional environment variables section expanded, holding a few KEY=value lines that will be stored before the first container start.">
+          <figcaption>
+            The deploy form's optional <em>environment variables</em> box. What you put here is
+            stored <strong>before</strong> the first container is created, which is the only way
+            to reach that very first start.
+          </figcaption>
+        </figure>
         <p>
           freeholdy never hands your values back out in listings: the project list carries only a
           <em>count</em>, and reading a file is a deliberate, separate request.
@@ -553,6 +663,15 @@ fhcli logs myapp | grep -i error</code></pre>
           read <code>status</code>; when the app misbehaves after starting, read <code>logs</code>.
         </p>
 
+        <figure>
+          <img src="assets/webui-logs.jpg" width="830" height="620"
+               alt="The logs dialog for a project, showing recent nginx access-log lines and a field for how many trailing lines to fetch.">
+          <figcaption>
+            The same snapshot in the browser — set how many trailing lines you want and fetch.
+            There is no follow mode in either client; fetch again for more.
+          </figcaption>
+        </figure>
+
         <h2>Interactive shell</h2>
         <pre><code>fhcli exec myapp                        # a shell in the container
 fhcli exec myapp "python manage.py shell"
@@ -561,6 +680,15 @@ fhcli exec mystack -s api               # one compose service</code></pre>
           A real terminal over a WebSocket — a full TTY, so editors, colours, and interactive prompts
           all work as they would over SSH. The web UI offers the same shell in the browser.
         </p>
+
+        <figure>
+          <img src="assets/webui-exec.jpg" width="844" height="590"
+               alt="The exec shell dialog: a terminal inside the browser running a few shell commands against the project's container.">
+          <figcaption>
+            The exec shell in the browser. For a compose project each service gets its own
+            <code>exec</code> button, so you land in that service's container.
+          </figcaption>
+        </figure>
       </section>
 
       <section id="api">

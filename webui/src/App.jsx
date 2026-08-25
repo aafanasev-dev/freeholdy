@@ -1784,7 +1784,7 @@ const LoginScreen = ({ onAuth }) => {
       <div style={{ width: 380, background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "36px", boxShadow: "0 12px 48px rgba(0,0,0,.5)" }}>
         <div style={{ marginBottom: "30px" }}>
           <div style={{ color: C.brand, fontFamily: C.ff, fontSize: "22px", fontWeight: 700, marginBottom: "6px" }}>freeholdy</div>
-          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", letterSpacing: "0.12em" }}>CLOUDOPEN.SPACE CONTROL PANEL</div>
+          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", letterSpacing: "0.12em" }}>{DOMAIN.toUpperCase()} CONTROL PANEL</div>
         </div>
 
         <Field label="API TOKEN" style={{ marginBottom: "10px" }}>
