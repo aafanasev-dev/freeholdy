@@ -11,6 +11,9 @@
 #                  curl -fsSL https://raw.githubusercontent.com/aafanasev-dev/freeholdy/main/install.sh | sudo bash
 #                (Use the raw.githubusercontent.com URL — the github.com blob
 #                 URL is an HTML page, not the script.)
+#                The one-liner always fetches this script from main, but the
+#                source it installs is the newest published release tag — pass
+#                -v to install something else.
 #
 #   COEXIST    — docker AND nginx are already present. The script treats them
 #                as prerequisites: it never installs, enables, starts, restarts,
@@ -38,6 +41,8 @@
 #   -u USER   service user to run freeholdy as (default: freeholdy / prompt)
 #   -y        assume "yes" to all confirmations (for non-interactive runs)
 #   -r        wipe install.log and re-run every step from the beginning
+#   -v REF    revision to clone: a release tag or "main" (default: the newest
+#             release tag). Only used when the script is not run from a checkout.
 #
 # Progress is recorded in install.log next to this script — re-running picks up
 # from where it left off and skips steps already marked DONE.
@@ -49,8 +54,12 @@ set -euo pipefail
 # Fallback clone (only used when the script is NOT run from a checkout). Uses the
 # public HTTPS URL so no SSH key or credentials are needed — this is the path the
 # piped one-liner takes. FUTURE: replace with a release-tarball download.
+# The clone takes the newest published *release tag*, not the default branch, so
+# the advertised one-liner never installs unreleased work in progress. Releases
+# are tagged "v_MAJOR_MINOR_PATCH" (v_1_0_0) — resolve_repo_ref() matches "v_*".
 REPO_URL="https://github.com/aafanasev-dev/freeholdy.git"
-REPO_BRANCH="main"
+REPO_REF=""                       # empty = auto-resolve the newest v_* tag (-v overrides)
+REPO_FALLBACK_REF="main"          # used when the repo has no release tags yet
 SERVICE_USER="freeholdy"          # default; override with -u or the prompt
 NGINX_GROUP="nginx-managers"
 SERVICE_FILE="/etc/systemd/system/freeholdy.service"
@@ -209,13 +218,27 @@ ensure_sites_bridge() {
     fi
 }
 
+# Newest release tag on the remote, or REPO_FALLBACK_REF when it can't be found
+# (no tags published yet, no network, or a git too old for ls-remote --sort).
+# Only called from step 6, once git is guaranteed to be installed.
+resolve_repo_ref() {
+    local out=""
+    out="$(git ls-remote --tags --refs --sort=-v:refname "$REPO_URL" 'v_*' 2>/dev/null | head -n1)" || true
+    if [[ -z "$out" ]]; then      # git < 2.18 has no ls-remote --sort
+        out="$(git ls-remote --tags --refs "$REPO_URL" 'v_*' 2>/dev/null | sort -V | tail -n1)" || true
+    fi
+    out="${out##*refs/tags/}"
+    printf '%s\n' "${out:-$REPO_FALLBACK_REF}"
+}
+
 # ── Argument parsing ────────────────────────────────────────────────────────────
 RESET=0; ASSUME_YES=0; U_OPT=""
-while getopts ":u:yr" opt; do
+while getopts ":u:yrv:" opt; do
     case "$opt" in
         u) SERVICE_USER="$OPTARG"; U_OPT="$OPTARG" ;;
         y) ASSUME_YES=1 ;;
         r) RESET=1 ;;
+        v) REPO_REF="$OPTARG" ;;
         *) ;;
     esac
 done
@@ -719,13 +742,21 @@ if [[ -f "${SCRIPT_DIR}/app/main.py" ]]; then
         ok "Source copied to $APP_DIR"
     fi
 elif [[ -d "${APP_DIR}/.git" ]]; then
-    info "Repo already present at ${APP_DIR} — pulling latest…"
-    git -c safe.directory="$APP_DIR" -C "$APP_DIR" pull --ff-only
-    ok "Repository updated at $APP_DIR"
+    # A repo cloned at a release tag sits on a detached HEAD, where pull --ff-only
+    # fails — and set -e would abort the whole install. Leave it to update.sh.
+    if git -c safe.directory="$APP_DIR" -C "$APP_DIR" symbolic-ref -q HEAD >/dev/null; then
+        info "Repo already present at ${APP_DIR} — pulling latest…"
+        git -c safe.directory="$APP_DIR" -C "$APP_DIR" pull --ff-only
+        ok "Repository updated at $APP_DIR"
+    else
+        info "Repo at ${APP_DIR} is pinned to $(git -c safe.directory="$APP_DIR" -C "$APP_DIR" describe --tags --always 2>/dev/null || echo 'a detached revision') — leaving it as is."
+        info "Use update.sh to move to another revision."
+    fi
 else
-    info "No local checkout found — cloning ${REPO_URL} (branch ${REPO_BRANCH})…"
-    git clone -b "$REPO_BRANCH" "$REPO_URL" "$APP_DIR"
-    ok "Repository cloned to $APP_DIR"
+    REPO_REF="${REPO_REF:-$(resolve_repo_ref)}"
+    info "No local checkout found — cloning ${REPO_URL} @ ${REPO_REF}…"
+    git clone -b "$REPO_REF" "$REPO_URL" "$APP_DIR"
+    ok "Repository cloned to $APP_DIR (${REPO_REF})"
 fi
 
 chown -R "$SERVICE_USER":"$SERVICE_USER" "$APP_DIR"
