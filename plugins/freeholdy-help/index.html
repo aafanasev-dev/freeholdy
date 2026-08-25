@@ -327,6 +327,12 @@
   <nav id="sidebar">
     <a href="#what-is-freeholdy">What is freeholdy</a>
     <a href="#installation">Installation</a>
+    <a href="#updating">Updating freeholdy</a>
+    <a href="#update-versions" class="sub">Picking a version</a>
+    <a href="#update-steps" class="sub">What it does</a>
+    <a href="#update-survives" class="sub">What survives</a>
+    <a href="#update-recovery" class="sub">If it fails</a>
+    <a href="#the-venv" class="sub">The Python environment</a>
     <a href="#deploying-apps">Deploying apps</a>
     <a href="#deploy-folder" class="sub">From a folder</a>
     <a href="#deploy-git" class="sub">From git</a>
@@ -404,7 +410,7 @@
         <ol>
           <li>Prompts for a service user (default <code>freeholdy</code>), your base domain, and a Let's Encrypt email.</li>
           <li>Sets up the service user with docker access and passwordless nginx/certbot sudo.</li>
-          <li>Runs <code>configure.sh</code> to build the Python venv (one venv serves the server and the CLI), writes <code>.env</code>, and picks a free local API port.</li>
+          <li>Runs <a href="#the-venv"><code>configure.sh</code></a> to build the Python venv (one venv serves the server and the CLI), writes <code>.env</code>, and picks a free local API port.</li>
           <li>Adds the <code>api.&lt;domain&gt;</code> nginx vhost, obtains its SSL certificate, and installs a nightly renewal cron.</li>
           <li>Installs and starts the <code>freeholdy</code> systemd service.</li>
           <li>Prints your first <strong>API token — shown once</strong>; save it.</li>
@@ -422,6 +428,10 @@
         </p>
         <pre><code>bash configure.sh              # builds ./venv (server + CLI deps)
 cp cli/.env.example cli/.env   # set TOKEN and BASE_DOMAIN</code></pre>
+        <p>
+          See <a href="#the-venv">The Python environment</a> for what
+          <code>configure.sh</code> does and its flags.
+        </p>
         <p>
           Check it works with <code>./cli/fhcli.py health</code> — no
           <code>source venv/bin/activate</code> needed, because <code>fhcli.py</code>
@@ -442,6 +452,124 @@ cp cli/.env.example cli/.env   # set TOKEN and BASE_DOMAIN</code></pre>
             <code>/health</code> before being stored.
           </figcaption>
         </figure>
+      </section>
+
+      <section id="updating">
+        <h1>Updating freeholdy</h1>
+        <p class="lead">
+          <code>install.sh</code> is a bootstrap, not an upgrader — it records finished steps in
+          <code>install.log</code> and skips them on a re-run, so running it again never pulls new
+          code. <code>update.sh</code> is the supported way to move an installed server to a newer
+          revision.
+        </p>
+        <pre><code>sudo bash update.sh</code></pre>
+
+        <h2 id="update-versions">Picking a version</h2>
+        <p>
+          It fetches from <code>origin</code> and lists what you can move to: the
+          <code>main</code> branch plus every release tag, each shown with the version it declares
+          in <code>version.json</code> and its latest commit. The revision you are currently on is
+          marked <strong>(current)</strong>.
+        </p>
+        <pre><code>   1) main               v0.11.4     0bcc32c   Updating help plugin (current)
+   2) v0.11.0            v0.11.0     2eb9030   Env variables handling
+
+  ?  Which version? [1]:</code></pre>
+        <p>
+          Use <code>-l</code> to see that list and exit without changing anything, or
+          <code>-v REF</code> to name a revision up front and skip the prompt. After you choose, it
+          prints exactly what it is about to do and asks once more —
+          <strong>nothing on the server changes until you confirm.</strong>
+        </p>
+
+        <h2 id="update-steps">What it does</h2>
+        <ol>
+          <li>
+            Removes the <code>webui</code> and <code>freeholdy-help</code> projects, if they are
+            installed. They are rebuilt in step 7 — that is how the new code reaches them.
+          </li>
+          <li>Stops the <code>freeholdy</code> service.</li>
+          <li>Hard-resets the checkout to the revision you chose.</li>
+          <li>Runs <a href="#the-venv"><code>configure.sh</code></a> to bring the Python environment up to date.</li>
+          <li>Backs up <code>data/freeholdy.db</code>, then runs <code>migrate_db.sh</code>.</li>
+          <li>Starts the service again and waits for <code>/health</code> to answer.</li>
+          <li>Re-adds the plugins it removed, waiting for each container build to finish.</li>
+        </ol>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Flag</th><th>What it does</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>-u USER</code></td><td>Service user. Defaults to the one read out of the systemd unit.</td></tr>
+              <tr><td><code>-v REF</code></td><td>Revision to update to — <code>main</code> or a tag name. Skips the prompt.</td></tr>
+              <tr><td><code>-y</code></td><td>Assume yes to every confirmation. Implies <code>-v main</code> when <code>-v</code> is absent.</td></tr>
+              <tr><td><code>-l</code></td><td>List the available versions and exit. Changes nothing.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="update-survives">What survives</h2>
+        <p>
+          Everything covered by <code>.gitignore</code> is kept — the reset never passes
+          <code>clean -x</code>. That means <code>.env</code>, <code>data/</code> (your database),
+          <code>projects/</code>, <code>dockerfiles/</code>, <code>compose/</code>,
+          <code>nginx_configs/</code>, <code>cli/.env</code> and <code>venv/</code> all stay as
+          they are. <strong>Your deployed projects and their containers are never touched</strong>
+          — only freeholdy itself is updated.
+        </p>
+        <p>
+          Existing API tokens keep working, so your web UI login link stays valid.
+          <code>update.sh</code> mints a temporary token for its own API calls and revokes it when
+          it exits, leaving no new credential behind.
+        </p>
+        <div class="note">
+          Local edits to <strong>tracked</strong> files are <strong>discarded</strong> — the update
+          runs <code>git reset --hard</code> and <code>git clean -fd</code>. If you have patched
+          anything inside the repo, commit it to your own branch first.
+        </div>
+
+        <h2 id="update-recovery">If it fails</h2>
+        <p>
+          Nothing is changed before you confirm, and any failure up to the moment the service stops
+          leaves the server exactly as it was. Past that point the script prints the path of the
+          database backup it took, the revision you were on, and the commands to put both back:
+        </p>
+        <pre><code>sudo -u freeholdy git -C /home/freeholdy/freeholdy reset --hard &lt;previous-rev&gt;
+cp &lt;backup&gt; /home/freeholdy/freeholdy/data/freeholdy.db
+sudo systemctl start freeholdy</code></pre>
+
+        <h2 id="the-venv">The Python environment</h2>
+        <p>
+          <code>configure.sh</code> owns the project's single virtualenv at
+          <code>venv/</code>. One environment serves both the API server and
+          <code>fhcli</code> — the CLI re-execs itself under <code>venv/bin/python</code>, so it
+          needs no <code>source venv/bin/activate</code>.
+        </p>
+        <pre><code>bash configure.sh</code></pre>
+        <p>
+          Re-running it is cheap: it stores a hash of <code>requirements.txt</code>
+          <em>inside</em> the venv and skips the install while that hash still matches. That is why
+          <code>update.sh</code> can call it every time — the work only happens when the
+          dependencies actually changed. It also rebuilds the venv from scratch if the Python
+          interpreter it was built with is no longer the one on <code>PATH</code>.
+        </p>
+        <p>
+          It runs as whoever invokes it — only the <code>python3.X-venv</code> package fallback
+          needs <code>sudo</code>. On a server the installer already ran it as the service user.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Flag</th><th>What it does</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>-d DIR</code></td><td>Project directory holding <code>requirements.txt</code>. Defaults to the script's own directory.</td></tr>
+              <tr><td><code>-f</code></td><td>Reinstall the dependencies even when the stored hash still matches.</td></tr>
+              <tr><td><code>-h</code></td><td>Print the script's usage and exit.</td></tr>
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section id="deploying-apps">
