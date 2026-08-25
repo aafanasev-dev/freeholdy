@@ -23,6 +23,29 @@ Usage examples:
   fhcli abort  myapp
 """
 
+# ── Run under the project venv ────────────────────────────────────────────────
+# The repo keeps ONE venv at <repo>/venv (built by configure.sh). Re-exec into its
+# interpreter so `./fhcli.py` and the /usr/local/bin/fhcli symlink both work with no
+# activation. __file__ is resolved FIRST, so a symlink resolves to the real checkout
+# rather than to /usr/local/bin — that is what makes the symlink find the right venv.
+# If that venv is absent (a workstation with the deps already importable) we carry on
+# under the current interpreter.
+#
+# The already-in-the-venv test compares sys.prefix, NOT the executable path: a venv's
+# bin/python is a symlink to the system interpreter, so resolving both sides would
+# always compare equal and the re-exec would never fire. sys.prefix is the venv dir
+# when running inside it and the system prefix otherwise, which is the real question
+# — and it is what stops an exec loop.
+import os
+import sys
+from pathlib import Path
+
+_SELF = Path(__file__).resolve()
+_VENV_DIR = _SELF.parent.parent / "venv"
+_VENV_PY = _VENV_DIR / "bin" / "python"
+if _VENV_PY.is_file() and Path(sys.prefix).resolve() != _VENV_DIR.resolve():
+    os.execv(str(_VENV_PY), [str(_VENV_PY), str(_SELF), *sys.argv[1:]])
+
 import asyncio
 import json
 import os

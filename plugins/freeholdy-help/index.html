@@ -323,7 +323,7 @@
         <ol>
           <li>Prompts for a service user (default <code>freeholdy</code>), your base domain, and a Let's Encrypt email.</li>
           <li>Sets up the service user with docker access and passwordless nginx/certbot sudo.</li>
-          <li>Creates the Python venv, writes <code>.env</code>, and picks a free local API port.</li>
+          <li>Runs <code>configure.sh</code> to build the Python venv (one venv serves the server and the CLI), writes <code>.env</code>, and picks a free local API port.</li>
           <li>Adds the <code>api.&lt;domain&gt;</code> nginx vhost, obtains its SSL certificate, and installs a nightly renewal cron.</li>
           <li>Installs and starts the <code>freeholdy</code> systemd service.</li>
           <li>Prints your first <strong>API token — shown once</strong>; save it.</li>
@@ -335,13 +335,19 @@
           after DNS propagates.
         </p>
         <h2>Set up the CLI</h2>
-        <p>On your workstation (or the server), from a clone of the repo:</p>
-        <pre><code>cd cli/
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # set TOKEN and BASE_DOMAIN</code></pre>
-        <p>Check it works with <code>./fhcli.py health</code>.</p>
+        <p>
+          The CLI shares the project's single venv — there is no separate one under
+          <code>cli/</code>. On your workstation, from a clone of the repo:
+        </p>
+        <pre><code>bash configure.sh              # builds ./venv (server + CLI deps)
+cp cli/.env.example cli/.env   # set TOKEN and BASE_DOMAIN</code></pre>
+        <p>
+          Check it works with <code>./cli/fhcli.py health</code> — no
+          <code>source venv/bin/activate</code> needed, because <code>fhcli.py</code>
+          re-execs itself under <code>./venv/bin/python</code>. On the server the
+          installer has already done this and linked <code>fhcli</code> into
+          <code>/usr/local/bin</code>, so you can just run <code>fhcli health</code>.
+        </p>
         <p>
           The same token logs you into the web UI at <code>ui.&lt;your-domain&gt;</code> — it is
           stored in the browser and sent as a bearer token on every request.

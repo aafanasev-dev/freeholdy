@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A FastAPI service (`app/`) that orchestrates Docker containers behind nginx + Let's Encrypt on a single VPS, exposing each as `*.your_domain.com`. A standalone CLI (`cli/fhcli.py`) wraps the HTTP API; it has its own venv and `.env` and is not imported by the server.
+A FastAPI service (`app/`) that orchestrates Docker containers behind nginx + Let's Encrypt on a single VPS, exposing each as `*.your_domain.com`. A standalone CLI (`cli/fhcli.py`) wraps the HTTP API; it keeps its own `.env` and is not imported by the server, but **shares the project's single venv** — it re-execs itself under `<repo>/venv/bin/python`, so it runs unactivated and through a symlink.
 
 
 ## System components vs pet projects
@@ -17,30 +17,32 @@ freeholdy manages two distinct layers:
 
 **Managed pet projects** — created by a **deploy** (`fhcli deploy` → chunked upload or `POST /git/add`; both auto-create the row) or `fhcli plugin-add`, tracked in SQLite, proxied by nginx. Includes `type: "system"` projects (webui) that are hidden from the web UI but are otherwise normal managed projects.
 
+**Upgrading an installed server is `update.sh`, not `install.sh`** (repo root). `install.sh`'s resume log marks `fetch_source` DONE, so re-running it never pulls. `update.sh` lists `origin`'s `main` plus every tag (each annotated with the `version.json` it declares — peel refs with `^{commit}`, an annotated tag rev-parses to the tag object), asks which to take, then: delete the `webui` + `freeholdy-help` projects if present → `systemctl stop freeholdy` → `git reset --hard` + `git clean -fd` (**never `-x`**: `.gitignore` is what preserves `.env`, `data/`, `projects/` and the venvs) → `configure.sh` (the shared venv builder: rebuilds on interpreter drift, reinstalls only when a hash of `requirements.txt` stored inside the venv changes) → back up the DB + run `migrate_db.sh` → start + poll `/health` → re-add the two plugins and poll `GET /projects/{n}/status` until the build leaves `running`. The delete/re-add is **required**, not incidental: `plugins/webui/install.sh` copies `webui/` out of the repo into the build context at install time, so a pull alone never reaches those containers, and `POST /plugins/{n}/add` is a 409 while the project exists. It mints a temporary API token and revokes it in an EXIT trap, so existing tokens (and the operator's web-UI login link) keep working.
+
 ## Common commands
 
-Server (run from repo root, venv active):
+Server (run from repo root; `bash configure.sh` builds `./venv` — one venv for the server and the CLI):
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload   # dev
 python scripts/generate_token.py generate --name "label"   # mint API token (printed once)
 python scripts/generate_token.py list | revoke --id N
 ```
 
-CLI (separate package, see `cli/README.md`):
+CLI (see `cli/README.md`; shares `./venv`, no activation needed — it re-execs into it.
+`install.sh` also links it to `/usr/local/bin/fhcli`, so `fhcli …` works box-wide):
 ```bash
-cd cli && source venv/bin/activate
-./fhcli.py health | projects
-./fhcli.py plugins                      # list available plugins
-./fhcli.py plugin-add PLUGIN PROJECT    # create a project from a plugin
-./fhcli.py deploy PROJECT PATH-OR-GIT-URL   # auto-create + provision + build/run (local path or git URL); re-run to redeploy
-./fhcli.py deploy PROJECT SRC --env FILE    # …storing FILE's vars before the first container start
-./fhcli.py versions PROJECT             # list blue/green versions (active/inactive/archived)
-./fhcli.py rollback PROJECT VERSION     # roll back to an inactive/archived version
-./fhcli.py set-backup-limit PROJECT N   # cap archived versions (default 5)
-./fhcli.py env-get PROJECT [-s SVC]     # download the stored .env file (stdout)
-./fhcli.py env-set PROJECT FILE [-s SVC]  # upload it ("-" = stdin); saved only
-./fhcli.py restart PROJECT              # recreate container(s), no rebuild → applies env
-./fhcli.py logs PROJECT [-n N] [-s SVC] # last N lines the container printed
+./cli/fhcli.py health | projects
+./cli/fhcli.py plugins                      # list available plugins
+./cli/fhcli.py plugin-add PLUGIN PROJECT    # create a project from a plugin
+./cli/fhcli.py deploy PROJECT PATH-OR-GIT-URL   # auto-create + provision + build/run (local path or git URL); re-run to redeploy
+./cli/fhcli.py deploy PROJECT SRC --env FILE    # …storing FILE's vars before the first container start
+./cli/fhcli.py versions PROJECT             # list blue/green versions (active/inactive/archived)
+./cli/fhcli.py rollback PROJECT VERSION     # roll back to an inactive/archived version
+./cli/fhcli.py set-backup-limit PROJECT N   # cap archived versions (default 5)
+./cli/fhcli.py env-get PROJECT [-s SVC]     # download the stored .env file (stdout)
+./cli/fhcli.py env-set PROJECT FILE [-s SVC]  # upload it ("-" = stdin); saved only
+./cli/fhcli.py restart PROJECT              # recreate container(s), no rebuild → applies env
+./cli/fhcli.py logs PROJECT [-n N] [-s SVC] # last N lines the container printed
 ```
 
 No test suite, linter, or formatter is configured — do not invent commands for them.
@@ -101,7 +103,7 @@ Key invariants that aren't obvious from a single file:
 
 ## Data & filesystem layout
 
-- SQLite at `{DATA_DIR}/freeholdy.db` (default `data/freeholdy.db`), schema auto-created on startup via `init_db()` in `app/main.py`'s lifespan. No migrations framework — schema changes mean editing `app/models/orm.py` and **deleting the DB** (no alter-table support). The one exception is the blue/green versioning columns/tables, which ship an idempotent `migrate_db.sh` (repo root, `sqlite3` CLI; self-checks, backfills existing dockerfile projects as active v1, makes `project_versions.image_name/container_name` nullable for compose versions, creates `project_env_files` for environment variables, run by `install.sh` on upgrades) so an existing DB survives those upgrades without a wipe.
+- SQLite at `{DATA_DIR}/freeholdy.db` (default `data/freeholdy.db`), schema auto-created on startup via `init_db()` in `app/main.py`'s lifespan. No migrations framework — schema changes mean editing `app/models/orm.py` and **deleting the DB** (no alter-table support). The one exception is the blue/green versioning columns/tables, which ship an idempotent `migrate_db.sh` (repo root, `sqlite3` CLI; self-checks, backfills existing dockerfile projects as active v1, makes `project_versions.image_name/container_name` nullable for compose versions, creates `project_env_files` for environment variables, run by `install.sh` on upgrades and by `update.sh` on every update — fatally there, unlike install.sh which only warns) so an existing DB survives those upgrades without a wipe.
 - All project files (both modes) live under `{PROJECTS_DIR}/{project}/` — the uploaded tree, the `Dockerfile` or `docker-compose.yml`, and (compose) the generated `docker-compose.override.yml`. `DOCKERFILES_DIR`/`COMPOSE_DIR` still exist in config but are only referenced by compose-plugin `.env` seeding.
 - Materialized environment files under `{DATA_DIR}/env/{project}/` — `_project.env` plus `svc-{service}.env`, regenerated from the DB at every deploy/restart and removed on teardown. Kept outside `PROJECTS_DIR` so a git redeploy or compose rollback can't wipe them, and out of build contexts and version snapshots.
 - Compose version snapshots under `{DATA_DIR}/versions/{project}/v{N}/` — a full copy of the project dir per deployed version (kept outside `PROJECTS_DIR` because git redeploys wipe the project dir), removed on prune/teardown.

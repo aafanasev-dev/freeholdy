@@ -28,7 +28,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FHCLI_PY="$ROOT/cli/fhcli.py"
-FHCLI_BIN="$ROOT/cli/venv/bin/python"
+FHCLI_BIN="$ROOT/venv/bin/python"     # one venv for the server and the CLI (configure.sh)
 
 # ── Output helpers (style shared with test_install.sh) ──────────────────────────
 RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -51,7 +51,7 @@ ENV_FILE="$ROOT/cli/.env"
 preflight() {
     hr "pre-flight"
     if [[ ! -x "$FHCLI_BIN" ]]; then
-        fail "fhcli venv python not found at $FHCLI_BIN — set up cli/ (see cli/README.md)"; exit 2
+        fail "venv python not found at $FHCLI_BIN — run 'bash configure.sh' at the repo root"; exit 2
     fi
     if [[ ! -f "$ENV_FILE" ]]; then
         fail "missing $ENV_FILE — the CLI needs TOKEN + BASE_DOMAIN"; exit 2

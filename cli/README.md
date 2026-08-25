@@ -4,15 +4,19 @@ Command-line wrapper for the freeholdy API.
 
 ## Setup
 
-```bash
-cd cli/
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+The CLI shares the project's single venv — there is no separate one under `cli/`.
+From the repo root:
 
-cp .env.example .env
-nano .env   # set TOKEN and BASE_DOMAIN
+```bash
+bash configure.sh          # builds ./venv and installs everything (server + CLI)
+
+cp cli/.env.example cli/.env
+nano cli/.env              # set TOKEN and BASE_DOMAIN
 ```
+
+`fhcli.py` re-execs itself under `./venv/bin/python`, so `./cli/fhcli.py health` works
+with no `source venv/bin/activate` — from any directory, and through a symlink. On a
+server, `install.sh` has already done both steps for you.
 
 `.env` (stays in this directory, never committed):
 ```
@@ -22,12 +26,12 @@ BASE_DOMAIN=your_domain.com
 
 ## Make `fhcli` available system-wide (optional)
 
-```bash
-# Option A — symlink into /usr/local/bin
-sudo ln -s "$(pwd)/fhcli.py" /usr/local/bin/fhcli
+`install.sh` already does this on a server. Elsewhere, one symlink is enough — the
+re-exec finds the venv from the script's real path, so it keeps working through the
+link:
 
-# Option B — shell alias in ~/.bashrc
-alias fhcli="$(pwd)/venv/bin/python $(pwd)/fhcli.py"
+```bash
+sudo ln -s "$(pwd)/cli/fhcli.py" /usr/local/bin/fhcli   # from the repo root
 ```
 
 ## Commands

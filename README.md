@@ -101,7 +101,7 @@ Regardless of mode, every change is additive and surgical — see [Coexistence s
 4. Creates/reuses the service user with docker access, passwordless nginx/certbot sudo, and nginx-config write permission (`nginx-managers` group)
 5. Uses the checkout you ran it from (or clones as a fallback) into `/home/<user>/freeholdy` and writes `.env`
 6. Picks the API port — default **27182**, auto-bumped to the next free port (with confirmation) if it's taken — and binds the app to `127.0.0.1`
-7. Creates the venv and installs Python dependencies
+7. Runs `configure.sh` to build the venv and install Python dependencies (one venv serves the server **and** `fhcli`), then links `fhcli` into `/usr/local/bin`
 8. Adds an nginx vhost for `api.<domain>` (validating the whole config and reverting on failure), obtains the SSL certificate, and installs a nightly renewal cron
 9. Installs + starts the `freeholdy` systemd service
 10. Prints your first API token (shown once)
@@ -122,6 +122,52 @@ These hold in **both** modes, and are what make it safe to run beside other apps
 | nginx reload | the whole config is validated first; if our change fails the test it is **reverted**, so a running nginx is never left broken |
 | API port | default `27182`, auto-bumped to the next free port (with confirmation) if taken; app listens on `127.0.0.1` so public traffic only arrives via nginx |
 | systemd / cron | only the `freeholdy` unit is (re)started; the renewal cron is scoped to `api.<domain>`, so other apps' units and cron lines are preserved |
+
+---
+
+## Updating
+
+`install.sh` is a bootstrap, not an upgrader — its resume log marks `fetch_source` done, so
+re-running it skips the pull. Use `update.sh` instead:
+
+```bash
+sudo bash /home/freeholdy/freeholdy/update.sh
+```
+
+It lists the revisions available on `origin` — the `main` branch plus every release tag, each
+shown with the version it declares in `version.json` — asks which one you want, and then:
+
+1. removes the `webui` and `freeholdy-help` projects, **if they are installed**
+2. stops the `freeholdy` service
+3. hard-resets the checkout to the chosen revision
+4. runs `configure.sh`, which rebuilds the venv if the interpreter changed and reinstalls dependencies only when `requirements.txt` actually differs
+5. backs up `data/freeholdy.db`, then runs `migrate_db.sh`
+6. starts the service and waits for `/health`
+7. re-adds the plugins it removed, waiting for each container build to finish
+
+Steps 1 and 7 are the point of the whole exercise: `webui` and `freeholdy-help` copy their build
+context **out of this repo** at install time (see `plugins/webui/install.sh`), so new code does
+not reach them until the plugin is added again — and `POST /plugins/{name}/add` is a 409 while
+the project exists. Your own projects are never touched.
+
+```
+Options:
+  -u USER   service user (default: auto-detected from the systemd unit)
+  -v REF    revision to update to: "main" or a tag name — skips the prompt
+  -y        assume "yes" to all confirmations (implies -v main without -v)
+  -l        list available versions and exit (changes nothing)
+```
+
+**What survives.** The update discards local edits to tracked files (`git reset --hard` +
+`git clean -fd`), but never passes `clean -x`, so everything in `.gitignore` is kept: `.env`,
+`data/` (the database), `projects/`, `dockerfiles/`, `compose/`, `nginx_configs/`, `cli/.env` and
+`venv/`.
+Existing API tokens keep working, so your web-UI login link is still valid — the script mints a
+temporary token for its own API calls and revokes it on exit.
+
+**If it fails.** Nothing is changed until you confirm, and any failure before the service is
+stopped leaves the box untouched. After that point the script prints the DB backup path, the
+previous revision, and the exact commands to roll both back.
 
 ---
 
@@ -461,9 +507,10 @@ freeholdy/
 │   └── templates/
 │       ├── nginx_http.conf.j2  # HTTP-only (for ACME challenge)
 │       └── nginx_ssl.conf.j2   # Full HTTPS config
+├── configure.sh              # Builds ./venv (server + CLI deps); used by install.sh & update.sh
 ├── plugins/                  # Built-in plugins (webui, freeholdy-help, nextcloud, …)
 ├── examples/                 # Deployable sample projects (fhcli deploy) + DEPLOY.md
-├── cli/                      # Standalone `fhcli` CLI (own venv + .env)
+├── cli/                      # Standalone `fhcli` CLI (own .env; shares the project venv)
 ├── webui/                    # React control panel (source for the webui plugin)
 ├── scripts/
 │   ├── generate_token.py     # Token management CLI

@@ -714,6 +714,7 @@ if [[ -f "${SCRIPT_DIR}/app/main.py" ]]; then
         mkdir -p "$APP_DIR"
         cp -a "${SCRIPT_DIR}/." "$APP_DIR/"
         rm -rf "${APP_DIR}/venv"          # never carry a venv across paths/users
+        rm -rf "${APP_DIR}/cli/venv"      # …including the obsolete pre-merge CLI one
         rm -f  "${APP_DIR}/install.log"   # the resume log belongs to the source dir
         ok "Source copied to $APP_DIR"
     fi
@@ -811,43 +812,32 @@ step_mark_done env_file
 fi
 
 # ── 9. Python venv + dependencies ───────────────────────────────────────────────
-section "Python virtual environment"
+# Delegated to configure.sh, which owns the single venv shared by the server and the
+# CLI. It runs as the service user (it only needs sudo for the python3.X-venv apt
+# fallback, which the sudoers file above covers) and is idempotent — a hash of
+# requirements.txt inside the venv makes a re-run a no-op. update.sh calls the very
+# same script, so there is one definition of "the environment is correct".
 if step_is_done python_venv; then
+    section "Python virtual environment"
     ok "python_venv already complete — skipping"
     step_mark_skipped python_venv
 else
 step_mark_started python_venv
 
-# Make sure the chosen interpreter can build a venv. A deadsnakes python3.X
-# without its matching -venv package fails with "ensurepip is not available".
-if ! "$PYTHON_BIN" -c "import ensurepip" &>/dev/null; then
-    info "Installing ${PYTHON_BIN}-venv (ensurepip missing for ${PYTHON_BIN})…"
-    apt_retry install -y "${PYTHON_BIN}-venv" \
-        || warn "Could not install ${PYTHON_BIN}-venv — venv creation may fail below."
-fi
-
-if [[ ! -d "$VENV_DIR" ]]; then
-    info "Creating venv with $PYTHON_BIN…"
-    as_user "$PYTHON_BIN" -m venv "$VENV_DIR"
-    ok "venv created at $VENV_DIR"
-else
-    VENV_PY_VER=$(as_user "${VENV_DIR}/bin/python" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "?")
-    EXPECTED_VER=$("$PYTHON_BIN" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-    if [[ "$VENV_PY_VER" != "$EXPECTED_VER" ]]; then
-        warn "Existing venv uses Python $VENV_PY_VER, expected $EXPECTED_VER — recreating"
-        rm -rf "$VENV_DIR"
-        as_user "$PYTHON_BIN" -m venv "$VENV_DIR"
-        ok "venv recreated at $VENV_DIR with $PYTHON_BIN"
-    else
-        ok "venv already exists at $VENV_DIR (Python $VENV_PY_VER)"
-    fi
-fi
-info "Installing Python dependencies…"
-as_user "${VENV_DIR}/bin/pip" install --quiet --upgrade pip
-as_user "${VENV_DIR}/bin/pip" install --quiet -r "${APP_DIR}/requirements.txt"
-ok "Dependencies installed"
+# configure.sh prints its own section header, so we don't emit one here.
+as_user bash "${APP_DIR}/configure.sh" -d "${APP_DIR}"
 
 step_mark_done python_venv
+fi
+
+# ── 9a. fhcli on PATH ───────────────────────────────────────────────────────────
+# One venv means cli/fhcli.py can re-exec itself into it, so a plain symlink is now
+# enough to make `fhcli` work box-wide with no activation and no alias. -n keeps us
+# from writing through an existing symlinked directory.
+if [[ -f "${APP_DIR}/cli/fhcli.py" ]]; then
+    ln -sfn "${APP_DIR}/cli/fhcli.py" /usr/local/bin/fhcli \
+        && ok "fhcli linked into /usr/local/bin (try: fhcli health)" \
+        || warn "Could not link /usr/local/bin/fhcli — call ${APP_DIR}/cli/fhcli.py directly."
 fi
 
 # ── 9b. Database migration (upgrades only) ──────────────────────────────────────
@@ -1120,6 +1110,7 @@ echo -e "  Service user   : ${CYAN}${SERVICE_USER}${NC}"
 echo -e "  Service        : ${CYAN}systemctl status freeholdy${NC}"
 echo -e "  Logs           : ${CYAN}journalctl -u freeholdy -f${NC}"
 echo -e "  App directory  : ${CYAN}${APP_DIR}${NC}"
+echo -e "  CLI            : ${CYAN}fhcli health${NC}  (shares the server venv; config in ${APP_DIR}/cli/.env)"
 echo -e "  Install log    : ${CYAN}${LOG_FILE}${NC}"
 echo ""
 if [[ "$MODE" == "coexist" ]]; then

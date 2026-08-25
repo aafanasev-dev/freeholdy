@@ -8,3 +8,9 @@ pydantic-settings==2.14.1
 python-multipart==0.0.20
 python-dotenv==1.1.1
 pyyaml==6.0.2
+
+# ── CLI (cli/fhcli.py) — shares this venv; see configure.sh ──
+click==8.1.7
+requests==2.32.3
+rich==13.9.4
+websockets==15.0.1
