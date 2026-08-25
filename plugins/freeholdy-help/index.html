@@ -21,7 +21,10 @@
       --header-h: 3.25rem;
       --sidebar-w: 232px;
     }
-    html { scroll-behavior: smooth; scroll-padding-top: calc(var(--header-h) + 1rem); }
+    /* scrollbar-gutter keeps the gutter reserved, so hiding body overflow for the
+       lightbox can't jog the fixed header or the centred column sideways. */
+    html { scroll-behavior: smooth; scroll-padding-top: calc(var(--header-h) + 1rem);
+           scrollbar-gutter: stable; }
     body {
       background: var(--bg);
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
@@ -54,18 +57,96 @@
     figure img {
       display: block;
       /* The width/height attributes reserve layout space before the image loads;
-         `height: auto` keeps the aspect ratio once CSS takes over the width. */
-      width: 100%;
+         `height: auto` keeps the aspect ratio once CSS takes over the width.
+         max-width (not width) so a screenshot narrower than the 760px column renders
+         at its own size instead of being stretched — five of them are. */
+      max-width: 100%;
       height: auto;
       border: 1px solid var(--border);
       border-radius: 0.5rem;
       background: #0d0e12;
+    }
+
+    /* Click-to-zoom. The <img> src is already the full-resolution file — the page only
+       scales it down with CSS — so opening the original costs no extra request. The
+       button wrapper is added by JS at load: real button semantics give Enter/Space
+       activation and focus for free, and the markup stays plain for a no-JS reader. */
+    .zoom-trigger {
+      display: block;
+      padding: 0;
+      border: 0;
+      background: none;
+      cursor: zoom-in;
+      /* fit-content so the button hugs the image: a screenshot narrower than the
+         column must not leave dead zoom-cursor space beside it. */
+      width: fit-content;
+      max-width: 100%;
+      text-align: left;
+      font: inherit;
+      color: inherit;
+    }
+    .zoom-trigger:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+      border-radius: 0.5rem;
     }
     figcaption {
       margin-top: 0.45rem;
       font-size: 0.8rem;
       color: var(--muted);
     }
+
+    /* Lightbox — above the header (z-index 20) and the mobile sidebar (15). */
+    .lightbox {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.75rem;
+      padding: 2vh 2vw;
+      background: rgba(8, 9, 12, 0.93);
+    }
+    /* [hidden] has to beat display:flex, or the overlay would always be visible. */
+    .lightbox[hidden] { display: none; }
+    .lightbox img {
+      /* width/height auto caps the image at its natural size, so a small screenshot is
+         never blown up — the viewport limits only ever scale it down. */
+      max-width: 96vw;
+      max-height: 88vh;
+      width: auto;
+      height: auto;
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      background: #0d0e12;
+    }
+    .lightbox figcaption {
+      margin: 0;
+      max-width: 70ch;
+      text-align: center;
+      color: var(--text);
+    }
+    .lightbox-close {
+      position: absolute;
+      top: 1rem;
+      right: 1rem;
+      width: 2.25rem;
+      height: 2.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+      line-height: 1;
+      color: var(--text);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 0.4rem;
+      cursor: pointer;
+    }
+    .lightbox-close:hover { color: var(--accent); border-color: var(--accent); }
+    .lightbox-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
     /* Header */
     header {
@@ -921,6 +1002,13 @@ python scripts/generate_token.py revoke --id 3</code></pre>
     </div>
   </main>
 
+  <div class="lightbox" id="lightbox" hidden role="dialog" aria-modal="true"
+       aria-label="Screenshot at full size">
+    <button type="button" class="lightbox-close" id="lightbox-close" aria-label="Close">&times;</button>
+    <img id="lightbox-img" src="" alt="">
+    <figcaption id="lightbox-caption"></figcaption>
+  </div>
+
   <script>
     const links = Array.from(document.querySelectorAll('nav a'));
     const targets = links.map(a => document.getElementById(a.getAttribute('href').slice(1)));
@@ -937,6 +1025,65 @@ python scripts/generate_token.py revoke --id 3</code></pre>
 
     document.getElementById('nav-toggle').addEventListener('click', () => sidebar.classList.toggle('open'));
     links.forEach(a => a.addEventListener('click', () => sidebar.classList.remove('open')));
+
+    /* ── Click a screenshot to see it at full size ──────────────────────────────
+       Every figure image is already the full-resolution file (the 760px column just
+       scales it down with CSS), so the overlay reuses the loaded image and issues no
+       new request. Each <img> is wrapped in a real <button> here rather than in the
+       markup: that keeps the 11 figures plain, and gives keyboard activation and a
+       focus ring without any extra handlers. */
+    const lightbox = document.getElementById('lightbox');
+    const lightboxImg = document.getElementById('lightbox-img');
+    const lightboxCaption = document.getElementById('lightbox-caption');
+    const lightboxClose = document.getElementById('lightbox-close');
+    let lastTrigger = null;
+
+    document.querySelectorAll('figure img').forEach(img => {
+      const trigger = document.createElement('button');
+      trigger.type = 'button';
+      trigger.className = 'zoom-trigger';
+      // Screen readers already get the img's alt; name the action itself.
+      trigger.setAttribute('aria-label', 'View full-size screenshot');
+      img.parentNode.insertBefore(trigger, img);
+      trigger.appendChild(img);
+      trigger.addEventListener('click', () => openLightbox(trigger, img));
+    });
+
+    function openLightbox(trigger, img) {
+      lightboxImg.src = img.currentSrc || img.src;
+      lightboxImg.alt = img.alt;
+      const caption = img.closest('figure').querySelector('figcaption');
+      lightboxCaption.innerHTML = caption ? caption.innerHTML : '';
+      lastTrigger = trigger;
+      lightbox.hidden = false;
+      // The gutter is reserved by scrollbar-gutter, so this can't shift the layout.
+      document.body.style.overflow = 'hidden';
+      lightboxClose.focus();
+    }
+
+    function closeLightbox() {
+      if (lightbox.hidden) return;
+      lightbox.hidden = true;
+      document.body.style.overflow = '';
+      lightboxImg.removeAttribute('src');
+      lightboxCaption.textContent = '';
+      if (lastTrigger) { lastTrigger.focus(); lastTrigger = null; }
+    }
+
+    lightboxClose.addEventListener('click', closeLightbox);
+    lightbox.addEventListener('click', e => {
+      // Backdrop only: a click on the image or caption must not dismiss.
+      if (e.target === lightbox) { closeLightbox(); return; }
+      // Neither is focusable, so clicking one drops focus to <body> — pull it back
+      // so focus never escapes the open dialog.
+      lightboxClose.focus();
+    });
+    document.addEventListener('keydown', e => {
+      if (lightbox.hidden) return;
+      if (e.key === 'Escape') { closeLightbox(); return; }
+      // One focusable control in the dialog, so containing Tab is just: stay on it.
+      if (e.key === 'Tab') { e.preventDefault(); lightboxClose.focus(); }
+    });
   </script>
 </body>
 </html>
