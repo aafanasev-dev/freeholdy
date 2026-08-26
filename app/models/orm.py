@@ -34,6 +34,8 @@ class Project(Base):
     services = relationship("ComposeService", back_populates="project", cascade="all, delete-orphan")
     versions = relationship("ProjectVersion", back_populates="project", cascade="all, delete-orphan")
     env_files = relationship("ProjectEnvFile", back_populates="project", cascade="all, delete-orphan")
+    # Guest tokens are scoped to exactly one project; deleting the project revokes them.
+    tokens = relationship("Token", back_populates="project", cascade="all, delete-orphan")
 
     @property
     def effective_domain(self) -> str | None:
@@ -122,6 +124,16 @@ class ProjectEnvFile(Base):
 
 
 class Token(Base):
+    """An API bearer token, stored as a SHA-256 hash (the plaintext exists only at mint time).
+
+    `role` is the authorization level:
+      * `admin` — full API access. The default, and what every token issued before roles
+        existed is (migrate_db.sh backfills them via the column DEFAULT).
+      * `guest` — bound to the single project in `project_id`: redeploy, restart, env,
+        logs/status, versions and rollback for that project and nothing else. Meant to be
+        handed to a third party (CI/CD) that must not see the rest of the server.
+
+    Enforcement lives in `app/auth.py` (HTTP) and `app/services/ws_session.py` (WebSockets)."""
     __tablename__ = "tokens"
 
     id = Column(Integer, primary_key=True)
@@ -129,3 +141,7 @@ class Token(Base):
     token_hash = Column(String, nullable=False, unique=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     active = Column(Boolean, default=True)
+    role = Column(String, nullable=False, default="admin")   # admin | guest
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)  # guest only; NULL for admin
+
+    project = relationship("Project", back_populates="tokens")

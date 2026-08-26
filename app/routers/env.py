@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from app.models.database import get_db
 from app.models.orm import ComposeService, Project
 from app.models.schemas import EnvResponse, SetEnvRequest
-from app.auth import require_auth
+from app.auth import require_project_access
 from app.services import env_service
 
 router = APIRouter()
@@ -77,7 +77,7 @@ def _response(db: Session, project: Project, service: str | None, message: str =
 @router.get("/{project_name}/env", response_model=EnvResponse,
             summary="Read the project's .env file (dockerfile: the container's environment; "
                     "compose: the file shared by every service)")
-def get_env(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
+def get_env(project_name: str, db: Session = Depends(get_db), _=Depends(require_project_access)):
     project = _get_project(project_name, db)
     return _response(db, project, None)
 
@@ -85,7 +85,7 @@ def get_env(project_name: str, db: Session = Depends(get_db), _=Depends(require_
 @router.put("/{project_name}/env", response_model=EnvResponse,
             summary="Replace the project's .env file — saved only, applied on next container start")
 def set_env(project_name: str, request: SetEnvRequest,
-            db: Session = Depends(get_db), _=Depends(require_auth)):
+            db: Session = Depends(get_db), _=Depends(require_project_access)):
     project = _get_project(project_name, db)
     env_service.set_content(db, project, request.content)
     db.commit()
@@ -96,7 +96,7 @@ def set_env(project_name: str, request: SetEnvRequest,
 
 @router.delete("/{project_name}/env", response_model=EnvResponse,
                summary="Clear the project's .env file — applied on next container start")
-def clear_env(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
+def clear_env(project_name: str, db: Session = Depends(get_db), _=Depends(require_project_access)):
     project = _get_project(project_name, db)
     removed = env_service.delete_row(db, project)
     db.commit()
@@ -110,7 +110,7 @@ def clear_env(project_name: str, db: Session = Depends(get_db), _=Depends(requir
 @router.get("/{project_name}/services/{service_name}/env", response_model=EnvResponse,
             summary="Read one compose service's own .env file")
 def get_service_env(project_name: str, service_name: str,
-                    db: Session = Depends(get_db), _=Depends(require_auth)):
+                    db: Session = Depends(get_db), _=Depends(require_project_access)):
     project = _get_project(project_name, db)
     svc = _get_service(project, service_name, db)
     return _response(db, project, svc.name)
@@ -119,7 +119,7 @@ def get_service_env(project_name: str, service_name: str,
 @router.put("/{project_name}/services/{service_name}/env", response_model=EnvResponse,
             summary="Replace one compose service's .env file (wins over the project-level one)")
 def set_service_env(project_name: str, service_name: str, request: SetEnvRequest,
-                    db: Session = Depends(get_db), _=Depends(require_auth)):
+                    db: Session = Depends(get_db), _=Depends(require_project_access)):
     project = _get_project(project_name, db)
     svc = _get_service(project, service_name, db)
     env_service.set_content(db, project, request.content, svc.name)
@@ -132,7 +132,7 @@ def set_service_env(project_name: str, service_name: str, request: SetEnvRequest
 @router.delete("/{project_name}/services/{service_name}/env", response_model=EnvResponse,
                summary="Clear one compose service's .env file")
 def clear_service_env(project_name: str, service_name: str,
-                      db: Session = Depends(get_db), _=Depends(require_auth)):
+                      db: Session = Depends(get_db), _=Depends(require_project_access)):
     project = _get_project(project_name, db)
     svc = _get_service(project, service_name, db)
     removed = env_service.delete_row(db, project, svc.name)

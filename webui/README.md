@@ -71,4 +71,11 @@ On first load you'll be prompted for an API token. Generate one on the server:
 python scripts/generate_token.py generate --name web_ui
 ```
 
-The token is stored in `localStorage` and persists across sessions.
+The token is stored in `localStorage` and persists across sessions. It is validated against
+`GET /tokens/me`, which also tells the UI what the token is allowed to do.
+
+A **guest** token works here too. It is bound to one project, so the panel shows only that
+project and only the actions it may take — deploy, env, restart, versions/rollback, logs,
+status. Deploy, Plugins, Tokens and Git key disappear from the rail, as do remove, stop,
+exec, ssl and domain. Mint one from the **Tokens** panel (admin only): it is shown once,
+with a `https://ui.<domain>/token/<TOKEN>` link you can hand to the third party.

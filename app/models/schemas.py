@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
@@ -8,6 +8,11 @@ class ProjectType(str, Enum):
     user = "user"       # created directly by the user via POST /projects
     plugin = "plugin"   # created from a (normal) plugin
     system = "system"   # created from a system plugin — hidden from the web UI
+
+
+class TokenRole(str, Enum):
+    admin = "admin"   # full API access — the default, and what every pre-roles token is
+    guest = "guest"   # bound to one project: redeploy, restart, env, logs, versions, rollback
 
 
 def validate_project_slug(v: str) -> str:
@@ -263,6 +268,54 @@ class ProjectDeleteResponse(BaseModel):
     status: str           # ok | partial
     message: str
     details: List[str]    # per-step log of what was done / skipped
+
+
+# ── API tokens / roles ──────────────────────────────────────────────────────────
+
+class CreateTokenRequest(BaseModel):
+    """POST /tokens — mint a token. The plaintext is returned once and never again."""
+    name: str                                # label, e.g. "gitlab-ci"
+    role: TokenRole = TokenRole.admin        # admin (full access) | guest (one project)
+    project: Optional[str] = None            # required for guest, rejected for admin
+
+    @field_validator("name")
+    @classmethod
+    def name_must_be_present(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("name must not be empty")
+        return v
+
+    @field_validator("project")
+    @classmethod
+    def project_must_be_slug(cls, v: Optional[str]) -> Optional[str]:
+        return v if not v else validate_project_slug(v)
+
+    @model_validator(mode="after")
+    def project_matches_role(self) -> "CreateTokenRequest":
+        # A guest token is meaningless without its binding, and a bound admin token would
+        # silently ignore the binding — reject both rather than guess. Model-level because
+        # an omitted `project` never reaches a field validator.
+        if self.role == TokenRole.guest and not self.project:
+            raise ValueError("a guest token must name the project it is bound to")
+        if self.role == TokenRole.admin and self.project:
+            raise ValueError("an admin token cannot be bound to a project")
+        return self
+
+
+class TokenResponse(BaseModel):
+    """A token row — never carries the hash, and never the plaintext."""
+    id: int
+    name: str
+    role: TokenRole
+    project: Optional[str] = None   # the bound project's name (guest tokens only)
+    active: bool
+    created_at: Optional[datetime] = None
+
+
+class TokenCreateResponse(TokenResponse):
+    """POST /tokens — as TokenResponse, plus the one-and-only sight of the plaintext."""
+    token: str
 
 
 # ── Versions / blue-green backups ───────────────────────────────────────────────

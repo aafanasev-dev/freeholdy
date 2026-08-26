@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app.models.database import get_db
 from app.models.orm import ComposeService, Project
 from app.models.schemas import LogsResponse
-from app.auth import require_auth
+from app.auth import require_project_access
 from app.services import compose_service, docker_service, env_service
 
 router = APIRouter()
@@ -90,7 +90,7 @@ def _response(project: str, service: str | None, container: str | None,
 def get_logs(project_name: str,
              tail: int = Query(DEFAULT_TAIL, ge=1, le=10000,
                                description="How many trailing lines to return."),
-             db: Session = Depends(get_db), _=Depends(require_auth)):
+             db: Session = Depends(get_db), _=Depends(require_project_access)):
     project = _get_project(project_name, db)
 
     if project.deploy_mode == "compose":
@@ -111,7 +111,7 @@ def get_logs(project_name: str,
 def get_service_logs(project_name: str, service_name: str,
                      tail: int = Query(DEFAULT_TAIL, ge=1, le=10000,
                                        description="How many trailing lines to return."),
-                     db: Session = Depends(get_db), _=Depends(require_auth)):
+                     db: Session = Depends(get_db), _=Depends(require_project_access)):
     project = _get_project(project_name, db)
     svc = _get_service(project, service_name, db)
     success, output = docker_service.get_container_logs(svc.container_name, tail)

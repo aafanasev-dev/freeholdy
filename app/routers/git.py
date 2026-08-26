@@ -13,7 +13,7 @@ from app.models.schemas import (
     DockerJobStatusResponse,
     ProjectType,
 )
-from app.auth import require_auth
+from app.auth import authorize_project, require_admin, require_token
 from app.services import docker_service, compose_service, git_service
 from app.routers.projects import (
     project_response,
@@ -40,7 +40,7 @@ def _deploy_ws_path(project_name: str) -> str:
 def add_git_project(
     request: GitAddRequest,
     db: Session = Depends(get_db),
-    _=Depends(require_auth),
+    token=Depends(require_token),
 ):
     """Deploy a project from a git clone URL. Clones the repo into the project dir, scans
     the root for a Dockerfile / docker-compose.yml (compose wins) and wires nginx/SSL/ports
@@ -50,6 +50,10 @@ def add_git_project(
     Idempotent: a new name creates the project; an existing name re-clones + redeploys it
     (a fresh blue/green version), so `deploy NAME <git-url>` behaves like a re-upload."""
     name = request.name
+    # The project name lives in the body, not the path, so the scope check is explicit here
+    # rather than a require_project_access dependency. It is also what stops a guest from
+    # *creating* a project: the only name it may pass is the one it is already bound to.
+    authorize_project(token, name)
     existing = db.query(Project).filter(Project.name == name).first()
     if existing:
         project = existing
@@ -129,7 +133,7 @@ def add_git_project(
     response_model=GitKeyResponse,
     summary="Get the server's GitHub SSH public key (creates one on first use)",
 )
-def get_git_key(_=Depends(require_auth)):
+def get_git_key(_=Depends(require_admin)):
     """Return the server's GitHub SSH public key so it can be added to GitHub for cloning
     private repos over SSH. If no `Host github.com` key exists yet, an ed25519 keypair is
     generated and a matching ~/.ssh/config block is written; subsequent calls return the

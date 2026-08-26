@@ -28,7 +28,7 @@ from app.models.schemas import (
     ProjectType,
     validate_project_slug,
 )
-from app.auth import require_auth
+from app.auth import guest_project_name, require_admin, require_project_access, require_token
 from app.config import settings
 from app.services import (
     docker_service,
@@ -143,8 +143,14 @@ def project_response(project: Project) -> dict:
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/", response_model=List[ProjectResponse])
-def list_projects(db: Session = Depends(get_db), _=Depends(require_auth)):
-    projects = db.query(Project).order_by(Project.name).all()
+def list_projects(db: Session = Depends(get_db), token=Depends(require_token)):
+    """Every project for an admin token; only its own project for a guest token — a guest
+    must not learn that the server's other projects exist."""
+    query = db.query(Project)
+    bound = guest_project_name(token)
+    if bound is not None:
+        query = query.filter(Project.name == bound)
+    projects = query.order_by(Project.name).all()
     return [project_response(p) for p in projects]
 
 
@@ -367,7 +373,7 @@ def _teardown_nginx(project_name: str, details: list[str], errors: list[str]) ->
 def delete_project(
     project_name: str,
     db: Session = Depends(get_db),
-    _=Depends(require_auth),
+    _=Depends(require_admin),
 ):
     """Full teardown: stop+remove container(s)/image(s), drop the files dir, remove the nginx
     config, and delete the DB row. Every phase runs even if an earlier one fails, so a project
@@ -392,7 +398,7 @@ def delete_project(
     # 2. nginx config + reload (always runs).
     _teardown_nginx(project_name, details, errors)
 
-    # 3. DB row (cascades to ComposeService).
+    # 3. DB row (cascades to ComposeService and to any guest tokens bound to it).
     db.delete(project)
     db.commit()
     details.append(f"Project '{project_name}' deleted from database")
@@ -492,7 +498,7 @@ async def upload(
     project_name: str,
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db),
-    _=Depends(require_auth),
+    _=Depends(require_project_access),
 ):
     """Single entry point for getting files into a project. Each upload's multipart filename
     carries its path relative to the project root; the tree is recreated under the one
@@ -624,7 +630,7 @@ def launch_restart(db: Session, project: Project) -> tuple[str, str]:
 @router.post("/{project_name}/restart", response_model=DockerJobStatusResponse,
              summary="Recreate the project's container(s) from their existing images "
                      "(no rebuild) so edited environment variables take effect")
-def restart_project(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
+def restart_project(project_name: str, db: Session = Depends(get_db), _=Depends(require_project_access)):
     project = db.query(Project).filter(Project.name == project_name).first()
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
@@ -741,7 +747,7 @@ async def upload_chunk(
     upload_id: str,
     offset: int,
     db: Session = Depends(get_db),
-    _=Depends(require_auth),
+    _=Depends(require_project_access),
 ):
     """Write one raw chunk (the request body) into the staged zip at `offset`. Offset
     addressing makes this idempotent and order-independent. The project need not exist yet —
@@ -769,7 +775,7 @@ async def upload_complete(
     project_name: str,
     request: UploadCompleteRequest,
     db: Session = Depends(get_db),
-    _=Depends(require_auth),
+    _=Depends(require_project_access),
 ):
     """Finalize a chunked upload: validate the staged zip, extract every member under the
     project dir (guarded against zip-slip by `_safe_join`), provision, and clean up. Creates
@@ -824,7 +830,7 @@ async def upload_abort(
     project_name: str,
     upload_id: str,
     db: Session = Depends(get_db),
-    _=Depends(require_auth),
+    _=Depends(require_project_access),
 ):
     # The project row may not exist yet (aborting before `complete`); `_staging_zip_path`
     # slug-validates the name, which is all we need to safely locate the staged data.
@@ -854,7 +860,9 @@ async def deploy_stream_session(websocket: WebSocket, project_name: str) -> None
     await websocket.accept()
 
     # First frame must be auth (browsers can't set an Authorization header on a WebSocket).
-    if not await ws_session.authenticate(websocket):
+    # Project-scoped: the admin tokens, plus this project's guest token (CI watching its
+    # own redeploy). The exec and plugin-install sockets stay admin-only.
+    if not await ws_session.authenticate(websocket, project=project_name):
         return
 
     db = SessionLocal()

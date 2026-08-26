@@ -56,6 +56,10 @@ sudo ln -s "$(pwd)/cli/fhcli.py" /usr/local/bin/fhcli   # from the repo root
 | `fhcli status PROJECT [--follow]` | Status + logs of the last docker **operation** (build/run/stop) |
 | `fhcli abort PROJECT` | Abort the running docker op |
 | `fhcli remove PROJECT [--yes]` | Delete the project (containers, images, nginx, DB row) |
+| `fhcli whoami` | What the configured token may do — its role, and the project a guest token is bound to |
+| `fhcli tokens` | List every API token (admin only) |
+| `fhcli token-create NAME [--role admin\|guest] [--project P]` | Mint a token, printed **once**. `--role guest --project P` scopes it to one project |
+| `fhcli token-revoke ID [--yes]` | Revoke a token immediately (admin only) |
 
 The deploy mode is **auto-detected** from your source: a `docker-compose.yml` in the
 deployed root makes it a compose project (it wins over a `Dockerfile`), a bare
@@ -143,6 +147,34 @@ The file is ordinary dotenv: `KEY=value` per line, `#` comments and blank lines 
 surrounding quotes stripped. Values are passed through verbatim (no shell expansion) and
 must stay on one line. This is separate from any `.env` a plugin writes into the project
 directory for compose `${VAR}` interpolation — freeholdy never touches that file.
+
+## Tokens & roles
+
+Every token has a role. **`admin`** (the default) can do everything. **`guest`** is bound to
+a single project: it may redeploy, restart, read logs and status, manage that project's
+environment, list versions and roll back — that project and no other. It cannot create or
+delete projects, open a shell (`exec`), issue certs, set domains, install plugins, or manage
+tokens; any of those returns `403`, as does naming a different project.
+
+That is the token you give to a CI/CD runner:
+
+```bash
+# you, as admin — the project must exist before it can be scoped to
+fhcli deploy myapp ./myapp
+
+# mint the token to hand over; it is printed once
+fhcli token-create gitlab-ci --role guest --project myapp
+
+fhcli tokens              # who has what
+fhcli token-revoke 4      # take it back
+```
+
+The third party puts `TOKEN` and `BASE_DOMAIN` into their own `cli/.env` (or CI secrets) and
+runs `fhcli deploy myapp .` on every push. `fhcli whoami` tells them what they hold.
+
+Two caveats: a guest token can read its project's environment **values**, so treat it as a
+secret of the same weight as that project's credentials; and deleting a project
+automatically revokes the guest tokens bound to it.
 
 ## Install from a plugin
 

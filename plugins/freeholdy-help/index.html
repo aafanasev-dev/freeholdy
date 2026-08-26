@@ -347,7 +347,8 @@
     <a href="#api">API</a>
     <a href="#api-endpoints" class="sub">Endpoints</a>
     <a href="#api-streaming" class="sub">Streaming logs</a>
-    <a href="#api-tokens" class="sub">Tokens</a>
+    <a href="#api-tokens" class="sub">Tokens &amp; roles</a>
+    <a href="#api-guest-tokens" class="sub">Guest tokens (CI/CD)</a>
     <a href="#cli">CLI reference</a>
     <a href="#ai-integration">AI integration</a>
   </nav>
@@ -1035,15 +1036,123 @@ curl "$BASE/projects/myapp/status" -H "Authorization: Bearer $TOKEN"</code></pre
           server, and reconnecting re-streams it.
         </p>
 
-        <h2 id="api-tokens">Tokens</h2>
-        <p>Tokens are minted on the server, from the repo root with the venv active:</p>
+        <h2 id="api-tokens">Tokens &amp; roles</h2>
+        <p>
+          Every token carries a <strong>role</strong>, chosen when it is issued:
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Role</th><th>What it can do</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="path"><code>admin</code></td>
+                <td>Everything: every project, every endpoint, plus minting and revoking
+                    tokens. The default, and what every token issued before roles existed is.</td>
+              </tr>
+              <tr>
+                <td class="path"><code>guest</code></td>
+                <td>Bound to <strong>one</strong> project: redeploy it, restart it, read its
+                    logs, edit its environment, list its versions and roll it back. Nothing
+                    else — and it cannot even see that your other projects exist.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>Mint them from the web UI's <strong>Tokens</strong> panel, from the CLI:</p>
+        <pre><code>fhcli tokens                                          # list
+fhcli token-create my-laptop                          # admin
+fhcli token-create gitlab-ci --role guest --project myapp
+fhcli token-revoke 3
+fhcli whoami                                          # what am I allowed to do?</code></pre>
+        <p>…or on the server itself, from the repo root with the venv active:</p>
         <pre><code>python scripts/generate_token.py generate --name "ci"
+python scripts/generate_token.py generate --name "gitlab-ci" --role guest --project myapp
 python scripts/generate_token.py list
 python scripts/generate_token.py revoke --id 3</code></pre>
         <div class="note">
           Tokens are stored as <strong>SHA-256 hashes</strong> — the plaintext is printed
           <strong>once</strong>, at generation, and there is no recovery path. Lost a token?
           Revoke it and mint a new one. (Your first token is the one the installer printed.)
+        </div>
+
+        <h2 id="api-guest-tokens">Guest tokens (CI/CD)</h2>
+        <p class="lead">
+          A guest token is what you hand to someone who is not you — a GitLab or GitHub
+          runner, a contractor, a client — so they can ship <em>their</em> project without
+          holding the keys to your whole server.
+        </p>
+
+        <p>The shape of it:</p>
+        <ol>
+          <li>You deploy the project once as an admin, so it exists and has a first version.</li>
+          <li>You mint a guest token bound to that project.</li>
+          <li>You give the third party the token and your domain. They can now redeploy and
+              roll back <strong>that project</strong> — and nothing else on the box.</li>
+        </ol>
+
+        <pre><code># 1 — you, as admin
+fhcli deploy myapp ./myapp
+
+# 2 — mint the token for the third party
+fhcli token-create gitlab-ci --role guest --project myapp
+</code></pre>
+
+        <p>What the holder of that token can and cannot do:</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Allowed on its own project</th><th>Refused (403) everywhere</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  redeploy (folder upload or git) · watch the build log ·
+                  <code>restart</code> · <code>logs</code> · <code>status</code> ·
+                  <code>abort</code> · <code>versions</code> · <code>rollback</code> ·
+                  read and write its <code>.env</code>
+                </td>
+                <td>
+                  every other project (it is not even listed) · creating or deleting projects ·
+                  <code>stop</code> · <code>exec</code> (no shell) · <code>ssl</code> ·
+                  <code>domain</code> · the backup limit · the plugin catalog and installs ·
+                  the server's git key · minting or revoking tokens
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>In GitLab CI, store the token as a masked variable and deploy on every push:</p>
+        <pre><code>deploy:
+  image: python:3.12-slim
+  script:
+    - pip install requests
+    - |
+      curl -sS -X POST "https://api.$BASE_DOMAIN/git/add" \
+        -H "Authorization: Bearer $FREEHOLDY_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\": \"myapp\", \"git_url\": \"$CI_REPOSITORY_URL\"}"</code></pre>
+        <p>
+          …or, if the runner has <code>fhcli</code>, set <code>TOKEN</code> and
+          <code>BASE_DOMAIN</code> from CI variables and just run
+          <code>fhcli deploy myapp .</code>. Either way the guest token can only ever name
+          the project it is bound to; passing any other name is a 403.
+        </p>
+
+        <div class="note">
+          A guest token can <strong>read that project's environment variables</strong>, values
+          and all — that is deliberate, since CI often needs them. Treat it as a secret of the
+          same weight as the project's own credentials. It just cannot reach anything else.
+        </div>
+        <div class="note">
+          Deleting a project <strong>revokes its guest tokens</strong> automatically, so a
+          torn-down project never leaves a live credential behind. The web UI works with a
+          guest token too — the same
+          <code>https://ui.&lt;your-domain&gt;/token/&lt;TOKEN&gt;</code> link opens the panel
+          showing that one project, with only the actions that token is allowed.
         </div>
       </section>
 
@@ -1088,6 +1197,12 @@ python scripts/generate_token.py revoke --id 3</code></pre>
               <tr><td class="path"><code>versions PROJECT</code></td><td>List the versions and their states.</td></tr>
               <tr><td class="path"><code>rollback PROJECT N</code></td><td>Make version N live again.</td></tr>
               <tr><td class="path"><code>set-backup-limit PROJECT N</code></td><td>Cap the archived versions and prune now.</td></tr>
+
+              <tr class="group"><td colspan="2">Tokens</td></tr>
+              <tr><td class="path"><code>whoami</code></td><td>What the configured token is allowed to do (role, and the project a guest is bound to).</td></tr>
+              <tr><td class="path"><code>tokens</code></td><td>List every API token. Admin only.</td></tr>
+              <tr><td class="path"><code>token-create NAME</code></td><td>Mint a token, shown once. <code>--role guest --project P</code> scopes it to one project.</td></tr>
+              <tr><td class="path"><code>token-revoke ID</code></td><td>Revoke a token immediately. Admin only.</td></tr>
 
               <tr class="group"><td colspan="2">Domains &amp; teardown</td></tr>
               <tr><td class="path"><code>ssl PROJECT</code></td><td>Re-run certbot for the project's domains.</td></tr>

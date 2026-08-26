@@ -1145,7 +1145,7 @@ const VersionBadge = ({ status }) => (
   </span>
 );
 
-const VersionsModal = ({ token, project, onClose, onStream, onRefresh }) => {
+const VersionsModal = ({ token, project, role, onClose, onStream, onRefresh }) => {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [limit, setLimit] = useState("");
@@ -1189,13 +1189,22 @@ const VersionsModal = ({ token, project, onClose, onStream, onRefresh }) => {
     <Modal onClose={onClose} width={660}>
       <ModalHeader title={`VERSIONS — ${project}`} color={C.txt} onClose={onClose} />
 
-      {/* Backup limit control + counts */}
+      {/* Backup limit control + counts. Setting the limit is admin-only (a guest's PUT
+          /backup-limit 403s), so show it read-only for them; rollback stays available. */}
       <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "12px", marginBottom: "14px", flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "flex-end", gap: "8px" }}>
-          <Field label="BACKUP LIMIT (ARCHIVED KEPT)">
-            <TextIn value={limit} onChange={setLimit} type="number" style={{ width: "90px" }} />
-          </Field>
-          <Btn v="primary" onClick={saveLimit} busy={busy.limit}>save</Btn>
+          {role === "guest" ? (
+            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px" }}>
+              backup limit <span style={{ color: C.txt }}>{data?.backup_limit ?? "—"}</span>
+            </div>
+          ) : (
+            <>
+              <Field label="BACKUP LIMIT (ARCHIVED KEPT)">
+                <TextIn value={limit} onChange={setLimit} type="number" style={{ width: "90px" }} />
+              </Field>
+              <Btn v="primary" onClick={saveLimit} busy={busy.limit}>save</Btn>
+            </>
+          )}
         </div>
         <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.7" }}>
           <span style={{ color: C.green }}>{counts.active || 0} active</span>
@@ -1273,7 +1282,7 @@ const Cells = ({ label, info }) => (
 );
 
 // ── Container row (dockerfile mode: one container per project, project-level ops) ──
-const ContainerRow = ({ project, info, token, onOperation, onRefresh, onStream }) => {
+const ContainerRow = ({ project, info, token, role, onOperation, onRefresh, onStream }) => {
   const [busy, setBusy] = useState({});
   const [modal, setModal] = useState(null); // null | {type, data?}
 
@@ -1294,6 +1303,9 @@ const ContainerRow = ({ project, info, token, onOperation, onRefresh, onStream }
   };
 
   const isRunning = info.container_status === "running";
+  // A guest token may redeploy, restart, read logs/status, edit env and roll back — the
+  // rest of these actions 403 on the API, so don't offer them (see app/auth.py).
+  const isAdmin = role !== "guest";
 
   return (
     <>
@@ -1301,10 +1313,10 @@ const ContainerRow = ({ project, info, token, onOperation, onRefresh, onStream }
         <Cells label={project} info={info} />
         <td style={{ padding: "6px 8px" }}>
           <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-            <Btn sm v="danger" onClick={() => act("stop")} busy={busy.stop} disabled={!isRunning} title="Stop container">stop</Btn>
-            <Btn sm v="amber" onClick={() => setModal({ type: "exec" })} disabled={!isRunning} title="Exec command in container">exec</Btn>
-            <Btn sm onClick={() => act("ssl")} busy={busy.ssl} title="Issue/renew SSL cert">ssl</Btn>
-            <Btn sm v="blue" onClick={() => setModal({ type: "domain" })} title="Set or clear a custom domain">domain</Btn>
+            {isAdmin && <Btn sm v="danger" onClick={() => act("stop")} busy={busy.stop} disabled={!isRunning} title="Stop container">stop</Btn>}
+            {isAdmin && <Btn sm v="amber" onClick={() => setModal({ type: "exec" })} disabled={!isRunning} title="Exec command in container">exec</Btn>}
+            {isAdmin && <Btn sm onClick={() => act("ssl")} busy={busy.ssl} title="Issue/renew SSL cert">ssl</Btn>}
+            {isAdmin && <Btn sm v="blue" onClick={() => setModal({ type: "domain" })} title="Set or clear a custom domain">domain</Btn>}
             <Btn sm v="blue" onClick={() => setModal({ type: "env" })} title="Edit environment variables">
               env{info.env_count > 0 ? ` ${info.env_count}` : ""}
             </Btn>
@@ -1322,23 +1334,24 @@ const ContainerRow = ({ project, info, token, onOperation, onRefresh, onStream }
       {modal?.type === "ssl"        && <SslModal data={modal.data} project={project} onClose={() => setModal(null)} />}
       {modal?.type === "domain"     && <DomainModal token={token} project={project} info={info} onClose={() => setModal(null)} onDone={onRefresh} />}
       {modal?.type === "env"        && <EnvModal token={token} project={project} onClose={() => setModal(null)} onRefresh={onRefresh} onRestart={() => act("restart")} />}
-      {modal?.type === "versions"   && <VersionsModal token={token} project={project} onClose={() => setModal(null)} onStream={onStream} onRefresh={onRefresh} />}
+      {modal?.type === "versions"   && <VersionsModal token={token} project={project} role={role} onClose={() => setModal(null)} onStream={onStream} onRefresh={onRefresh} />}
     </>
   );
 };
 
 // ── Service row (compose mode: per-service exec + custom domain; stack lifecycle is on the card) ──
-const ServiceRow = ({ project, info, token, onOperation, onRefresh, onRestart }) => {
+const ServiceRow = ({ project, info, token, role, onOperation, onRefresh, onRestart }) => {
   const [modal, setModal] = useState(null);
   const isRunning = info.container_status === "running";
+  const isAdmin = role !== "guest";
 
   return (
     <tr style={{ borderBottom: `1px solid ${C.bd}` }}>
       <Cells label={info.name} info={info} />
       <td style={{ padding: "6px 8px" }}>
         <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-          <Btn sm v="amber" onClick={() => setModal("exec")} disabled={!isRunning} title="Exec command in this service's container">exec</Btn>
-          {info.exposed !== false && (
+          {isAdmin && <Btn sm v="amber" onClick={() => setModal("exec")} disabled={!isRunning} title="Exec command in this service's container">exec</Btn>}
+          {isAdmin && info.exposed !== false && (
             <Btn sm v="blue" onClick={() => setModal("domain")} title="Set or clear a custom domain">domain</Btn>
           )}
           <Btn sm v="blue" onClick={() => setModal("env")} title="Edit this service's environment variables">
@@ -1356,7 +1369,7 @@ const ServiceRow = ({ project, info, token, onOperation, onRefresh, onRestart })
 };
 
 // ── Project card ──────────────────────────────────────────────────────────────
-const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDeploy, onStream }) => {
+const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, onDeploy, onStream }) => {
   const [confirm, setConfirm] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState({});
@@ -1367,6 +1380,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
   const isCompose = project.deploy_mode === "compose";
   const isPending = project.deploy_mode !== "compose" && project.deploy_mode !== "dockerfile";
   const isPlugin = project.type === "plugin";
+  const isAdmin = role !== "guest";   // guests may deploy/env/restart/versions/logs only
 
   const remove = async () => {
     setRemoving(true);
@@ -1452,10 +1466,10 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
             {isCompose && (
               <Btn sm v="ghost" onClick={() => setLogsModal(true)} title="Read the whole stack's output (every service, interleaved)">logs</Btn>
             )}
-            {isCompose && (
+            {isCompose && isAdmin && (
               <Btn sm v="danger" onClick={() => composeAct("down")} busy={busy.down} title="docker compose down">down</Btn>
             )}
-            <Btn v="danger" sm onClick={() => setConfirm(true)} busy={removing}>remove</Btn>
+            {isAdmin && <Btn v="danger" sm onClick={() => setConfirm(true)} busy={removing}>remove</Btn>}
           </div>
         </div>
 
@@ -1477,9 +1491,9 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
             </thead>
             <tbody>
               {isCompose
-                ? (project.services || []).map(s => <ServiceRow key={s.name} project={project.name} info={s} token={token} onOperation={onOperation} onRefresh={onRefresh} onRestart={restart} />)
+                ? (project.services || []).map(s => <ServiceRow key={s.name} project={project.name} info={s} token={token} role={role} onOperation={onOperation} onRefresh={onRefresh} onRestart={restart} />)
                 : (project.container
-                    ? <ContainerRow project={project.name} info={project.container} token={token} onOperation={onOperation} onRefresh={onRefresh} onStream={onStream} />
+                    ? <ContainerRow project={project.name} info={project.container} token={token} role={role} onOperation={onOperation} onRefresh={onRefresh} onStream={onStream} />
                     : null)}
             </tbody>
           </table>
@@ -1488,7 +1502,7 @@ const ProjectCard = ({ project, token, onOperation, onRemoved, onRefresh, onDepl
       </div>
 
       {uploadModal && <UploadModal token={token} project={project.name} onClose={() => setUploadModal(false)} onUploaded={() => onRefresh && onRefresh()} onDeploy={onDeploy} />}
-      {versionsModal && <VersionsModal token={token} project={project.name} onClose={() => setVersionsModal(false)} onStream={onStream} onRefresh={onRefresh} />}
+      {versionsModal && <VersionsModal token={token} project={project.name} role={role} onClose={() => setVersionsModal(false)} onStream={onStream} onRefresh={onRefresh} />}
       {envModal && <EnvModal token={token} project={project.name} compose onClose={() => setEnvModal(false)} onRefresh={onRefresh} onRestart={restart} />}
       {logsModal && <LogsModal token={token} project={project.name} onClose={() => setLogsModal(false)} />}
       {confirm && <ConfirmModal message={`Delete "${project.name}"? This stops containers, removes images and nginx config.`} onConfirm={remove} onCancel={() => setConfirm(false)} loading={removing} />}
@@ -1763,6 +1777,188 @@ const PluginPanel = ({ token, onInstalled, onCancel }) => {
   );
 };
 
+// ── Tokens panel (admin only: mint / revoke API tokens) ───────────────────────
+// The point of this panel is guest tokens: pick a project, mint a token bound to it, and
+// hand that to a third party (a CI/CD runner). It can redeploy, restart, read logs, edit
+// the env and roll back that one project — everything else 403s server-side (app/auth.py).
+// The plaintext exists only in the create response, so it is shown once, here.
+const TokensPanel = ({ token, projects, me, onCancel }) => {
+  const [tokens, setTokens] = useState(null);
+  const [error, setError] = useState("");
+  const [name, setName] = useState("");
+  const [role, setRole] = useState("guest");
+  const [project, setProject] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [minted, setMinted] = useState(null);      // the one-time plaintext reveal
+  const [copied, setCopied] = useState(false);
+  const [confirm, setConfirm] = useState(null);    // the token row awaiting revoke
+  const client = mkApi(token);
+
+  const load = async () => {
+    try { setTokens(await client.get("/tokens")); setError(""); }
+    catch (e) { setError(e.message); }
+  };
+  useEffect(() => { load(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Guest tokens bind to a project, so default the picker to the first one available.
+  useEffect(() => {
+    if (!project && projects.length) setProject(projects[0].name);
+  }, [projects]);                     // eslint-disable-line react-hooks/exhaustive-deps
+
+  const create = async () => {
+    if (!name.trim()) return setError("give the token a name");
+    if (role === "guest" && !project) return setError("a guest token needs a project");
+    setBusy(true); setError("");
+    try {
+      const body = { name: name.trim(), role };
+      if (role === "guest") body.project = project;
+      const d = await client.post("/tokens", body);
+      setMinted(d); setCopied(false); setName("");
+      load();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const revoke = async (t) => {
+    setError("");
+    try { await client.del(`/tokens/${t.id}`); setConfirm(null); load(); }
+    catch (e) { setError(e.message); setConfirm(null); }
+  };
+
+  const copy = () => {
+    navigator.clipboard?.writeText(minted.token).then(() => setCopied(true)).catch(() => {});
+  };
+
+  const TH = ({ children, right }) => (
+    <th style={{ padding: "4px 10px", textAlign: right ? "right" : "left", color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.1em", fontWeight: 400, whiteSpace: "nowrap" }}>{children}</th>
+  );
+  const td = { padding: "7px 10px", fontFamily: C.ff, fontSize: "11px", color: C.txt };
+  const sel = {
+    background: C.s2, border: `1px solid ${C.bdB}`, color: C.txt, fontFamily: C.ff,
+    fontSize: "12px", padding: "8px 11px", borderRadius: "10px", outline: "none",
+    width: "100%", boxSizing: "border-box",
+  };
+
+  return (
+    <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", marginBottom: "12px", boxShadow: C.shadow, overflow: "hidden" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
+        <span style={{ color: C.txt, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>API TOKENS</span>
+        <Btn v="ghost" sm onClick={onCancel}>✕</Btn>
+      </div>
+
+      <div style={{ padding: "16px" }}>
+        {/* Mint */}
+        <div style={{ display: "flex", gap: "10px", alignItems: "flex-end", flexWrap: "wrap", marginBottom: "6px" }}>
+          <Field label="NAME" style={{ flex: "1 1 190px" }}>
+            <TextIn value={name} onChange={setName} placeholder="gitlab-ci" />
+          </Field>
+          <Field label="ROLE" style={{ flex: "0 1 150px" }}>
+            <select value={role} onChange={e => setRole(e.target.value)} style={sel}>
+              <option value="guest">guest — one project</option>
+              <option value="admin">admin — full access</option>
+            </select>
+          </Field>
+          {role === "guest" && (
+            <Field label="PROJECT" style={{ flex: "1 1 190px" }}>
+              <select value={project} onChange={e => setProject(e.target.value)} style={sel}>
+                {projects.length === 0 && <option value="">— deploy a project first —</option>}
+                {projects.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+              </select>
+            </Field>
+          )}
+          <Btn v="primary" onClick={create} busy={busy} style={{ padding: "8px 14px" }}>create</Btn>
+        </div>
+
+        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: 1.7, marginBottom: "14px" }}>
+          {role === "guest"
+            ? <>a <span style={{ color: C.amber }}>guest</span> token can redeploy, restart, read logs, edit the env, list versions and roll back <span style={{ color: C.txt }}>{project || "its project"}</span> — nothing else, and no other project. It can still read that project's env values, so treat it as a secret.</>
+            : <>an <span style={{ color: C.green }}>admin</span> token can do everything, including minting and revoking tokens.</>}
+        </div>
+
+        {error && <div style={{ marginBottom: "10px" }}><Err msg={error} /></div>}
+
+        {/* List */}
+        {!tokens ? (
+          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", padding: "10px 0" }}>loading tokens…</div>
+        ) : tokens.length === 0 ? (
+          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", padding: "10px 0" }}>no tokens yet</div>
+        ) : (
+          <div style={{ overflowX: "auto", border: `1px solid ${C.bd}`, borderRadius: "14px" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
+                  <TH>NAME</TH><TH>ROLE</TH><TH>PROJECT</TH><TH>CREATED</TH><TH right>ACTION</TH>
+                </tr>
+              </thead>
+              <tbody>
+                {tokens.map(t => (
+                  <tr key={t.id} style={{ borderBottom: `1px solid ${C.bd}`, opacity: t.active ? 1 : 0.45 }}>
+                    <td style={{ ...td, color: C.blue }}>{t.name}</td>
+                    <td style={td}>
+                      <span style={{
+                        color: t.role === "guest" ? C.amber : C.green,
+                        background: t.role === "guest" ? C.amberFill : C.moneyFill,
+                        border: `1px solid ${t.role === "guest" ? C.amberBd : C.bd}`,
+                        fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px",
+                      }}>{t.role}</span>
+                    </td>
+                    <td style={{ ...td, color: t.project ? C.txt : C.dim }}>{t.project || "—"}</td>
+                    <td style={{ ...td, color: C.dim }}>{t.created_at ? new Date(t.created_at).toLocaleString() : "—"}</td>
+                    <td style={{ ...td, textAlign: "right" }}>
+                      {!t.active
+                        ? <span style={{ color: C.dim, fontSize: "10px" }}>revoked</span>
+                        : t.id === me?.id
+                          ? <span style={{ color: C.dim, fontSize: "10px" }}>this session</span>
+                          : <Btn sm v="danger" onClick={() => setConfirm(t)}>revoke</Btn>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* One-time reveal: the server keeps only a SHA-256 hash, so this is the only sight of it. */}
+      {minted && (
+        <Modal onClose={() => setMinted(null)} width={560}>
+          <ModalHeader title={`TOKEN — ${minted.name}`} color={C.amber} onClose={() => setMinted(null)} />
+          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", marginBottom: "10px" }}>
+            Copy it now — it is stored hashed and cannot be shown again.
+          </div>
+          <div style={{ background: C.s3, border: `1px solid ${C.bdB}`, borderRadius: "10px", padding: "10px 12px", color: C.txt, fontFamily: C.mono, fontSize: "11px", wordBreak: "break-all" }}>
+            {minted.token}
+          </div>
+          {minted.role === "guest" && (
+            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: 1.8, marginTop: "12px" }}>
+              give the third party these, e.g. as CI secrets:
+              <div style={{ color: C.txt, fontFamily: C.mono, fontSize: "10px", marginTop: "5px" }}>
+                TOKEN={minted.token}<br />BASE_DOMAIN={DOMAIN}
+              </div>
+              <div style={{ marginTop: "8px" }}>
+                or send them this link to open the panel for <span style={{ color: C.txt }}>{minted.project}</span> only:
+                <div style={{ color: C.txt, fontFamily: C.mono, fontSize: "10px", marginTop: "5px", wordBreak: "break-all" }}>
+                  {window.location.origin}/token/{minted.token}
+                </div>
+              </div>
+            </div>
+          )}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "16px" }}>
+            <Btn v="primary" onClick={copy}>{copied ? "copied ✓" : "copy token"}</Btn>
+            <Btn v="ghost" onClick={() => setMinted(null)}>done</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {confirm && (
+        <ConfirmModal
+          message={`Revoke "${confirm.name}"? Anything using it stops working immediately.`}
+          onConfirm={() => revoke(confirm)} onCancel={() => setConfirm(null)} />
+      )}
+    </div>
+  );
+};
+
 // ── Login screen ──────────────────────────────────────────────────────────────
 const LoginScreen = ({ onAuth }) => {
   const [token, setToken] = useState(() => localStorage.getItem("freeholdy_token") || "");
@@ -1773,7 +1969,8 @@ const LoginScreen = ({ onAuth }) => {
     if (!token.trim()) return setError("Enter a token");
     setBusy(true); setError("");
     try {
-      await mkApi(token.trim()).get("/health");
+      // /tokens/me, not /health: /health needs no auth, so it would accept any string.
+      await mkApi(token.trim()).get("/tokens/me");
       onAuth(token.trim());
     } catch (e) { setError(`Authentication failed: ${e.message}`); }
     finally { setBusy(false); }
@@ -1801,6 +1998,10 @@ const LoginScreen = ({ onAuth }) => {
           generate token:
           <div style={{ marginTop: "6px", color: C.txt, fontFamily: C.mono, fontSize: "10px", background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "7px 9px", wordBreak: "break-all" }}>
             python scripts/generate_token.py generate --name web_ui
+          </div>
+          <div style={{ marginTop: "8px" }}>
+            a <span style={{ color: C.txt }}>guest</span> token works here too — it opens a
+            single project, limited to deploy, env, logs, versions and rollback.
           </div>
         </div>
       </div>
@@ -1833,6 +2034,8 @@ const Dashboard = ({ token, onLogout }) => {
   const [showDeploy, setShowDeploy] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
   const [showGitKey, setShowGitKey] = useState(false);
+  const [showTokens, setShowTokens] = useState(false);
+  const [me, setMe] = useState(null);          // { id, name, role, project } — GET /tokens/me
   const [railOpen, setRailOpen] = useState(false);   // mobile: off-canvas nav rail
   const [activeLog, setActiveLog] = useState(null);
   const [interactiveLog, setInteractiveLog] = useState(null);  // { project, wsPath, kind }
@@ -1856,7 +2059,18 @@ const Dashboard = ({ token, onLogout }) => {
     try { setVersion(await client.get("/version")); } catch {}
   }, [client]);
 
-  useEffect(() => { checkHealth(); fetchProjects(); fetchVersion(); }, []);
+  // Who is holding this token. A `guest` is bound to one project and may only deploy,
+  // restart, read logs/status, edit env and roll back it — every other action 403s on the
+  // API, so the UI hides those controls rather than offering a button that fails.
+  const fetchMe = useCallback(async () => {
+    try { setMe(await client.get("/tokens/me")); }
+    catch { setMe({ role: "admin" }); }   // pre-roles server: behave exactly as before
+  }, [client]);
+
+  useEffect(() => { checkHealth(); fetchProjects(); fetchVersion(); fetchMe(); }, []);
+
+  const role = me?.role || "admin";
+  const isAdmin = role !== "guest";
 
   // Stop/ssl poll the project-level status endpoint; compose down has its own path.
   // (Deploys, exec, and installs stream over WebSockets, not polled.)
@@ -1931,6 +2145,7 @@ const Dashboard = ({ token, onLogout }) => {
 
   const sectionTitle = showDeploy ? "Deploy project"
     : showPlugins ? "Plugins"
+    : showTokens ? "Tokens"
     : `Projects (${projects.length})`;
 
   return (
@@ -1952,15 +2167,22 @@ const Dashboard = ({ token, onLogout }) => {
         )}
         {/* Nav */}
         <div style={{ flex: 1 }}>
-          <NavItem icon="▣" label="Projects" active={!showDeploy && !showPlugins}
-            onClick={() => { setShowDeploy(false); setShowPlugins(false); setRailOpen(false); }} />
-          <NavItem icon="＋" label="Deploy" active={showDeploy}
-            onClick={() => { setShowPlugins(false); setShowDeploy(true); setRailOpen(false); }} />
-          <NavItem icon="⧉" label="Plugins" active={showPlugins}
-            onClick={() => { setShowDeploy(false); setShowPlugins(true); setRailOpen(false); }} />
-          <NavItem icon="🔑" label="Git key"
-            title="Get the server's GitHub SSH public key to add to GitHub for cloning private repos"
-            onClick={() => { setShowGitKey(true); setRailOpen(false); }} />
+          <NavItem icon="▣" label="Projects" active={!showDeploy && !showPlugins && !showTokens}
+            onClick={() => { setShowDeploy(false); setShowPlugins(false); setShowTokens(false); setRailOpen(false); }} />
+          {/* Creating projects, installing plugins, the server SSH key and token management
+              are all admin-only on the API — a guest never sees them. */}
+          {isAdmin && (<>
+            <NavItem icon="＋" label="Deploy" active={showDeploy}
+              onClick={() => { setShowPlugins(false); setShowTokens(false); setShowDeploy(true); setRailOpen(false); }} />
+            <NavItem icon="⧉" label="Plugins" active={showPlugins}
+              onClick={() => { setShowDeploy(false); setShowTokens(false); setShowPlugins(true); setRailOpen(false); }} />
+            <NavItem icon="⚿" label="Tokens" active={showTokens}
+              title="Mint and revoke API tokens, including guest tokens scoped to one project"
+              onClick={() => { setShowDeploy(false); setShowPlugins(false); setShowTokens(true); setRailOpen(false); }} />
+            <NavItem icon="🔑" label="Git key"
+              title="Get the server's GitHub SSH public key to add to GitHub for cloning private repos"
+              onClick={() => { setShowGitKey(true); setRailOpen(false); }} />
+          </>)}
         </div>
         {/* Footer */}
         <div style={{ borderTop: `1px solid ${C.bd}`, paddingTop: "8px" }}>
@@ -1985,6 +2207,15 @@ const Dashboard = ({ token, onLogout }) => {
             <span style={{ color: healthColor, fontFamily: C.ff, fontSize: "10px", display: "flex", alignItems: "center", gap: "5px" }}>
               <span style={{ fontSize: "7px" }}>●</span>api {health ?? "checking…"}
             </span>
+            {role === "guest" && (
+              <>
+                <span style={{ width: 1, height: 14, background: C.bd, display: "inline-block" }} />
+                <span title={`This token is limited to the project "${me?.project}"`}
+                  style={{ color: C.amber, background: C.amberFill, border: `1px solid ${C.amberBd}`, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px" }}>
+                  guest · {me?.project}
+                </span>
+              </>
+            )}
             <span style={{ width: 1, height: 14, background: C.bd, display: "inline-block" }} />
             <span style={{ color: C.dim, fontSize: "10px" }}>{DOMAIN}</span>
           </div>
@@ -2003,18 +2234,24 @@ const Dashboard = ({ token, onLogout }) => {
             <PluginPanel token={token} onInstalled={handleInstalled} onCancel={() => setShowPlugins(false)} />
           )}
 
+          {showTokens && (
+            <TokensPanel token={token} projects={projects} me={me} onCancel={() => setShowTokens(false)} />
+          )}
+
           {/* The deployed-projects list shows only in the Projects view — Deploy / Plugins
               replace it with their own panel (above). */}
-          {!showDeploy && !showPlugins && (
+          {!showDeploy && !showPlugins && !showTokens && (
             loading ? (
               <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", padding: "24px 0" }}>loading projects…</div>
             ) : projects.length === 0 ? (
               <div style={{ border: `1px dashed ${C.bd}`, borderRadius: "14px", padding: "40px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
-                no projects yet — use <span style={{ color: C.txt }}>Deploy</span> or <span style={{ color: C.txt }}>Plugins</span> in the sidebar
+                {isAdmin
+                  ? <>no projects yet — use <span style={{ color: C.txt }}>Deploy</span> or <span style={{ color: C.txt }}>Plugins</span> in the sidebar</>
+                  : <>this token's project is not available — ask the server's operator</>}
               </div>
             ) : (
               projects.map(p => (
-                <ProjectCard key={p.name} project={p} token={token}
+                <ProjectCard key={p.name} project={p} token={token} role={role}
                   onOperation={handleOperation}
                   onRefresh={fetchProjects}
                   onDeploy={handleInstalled}

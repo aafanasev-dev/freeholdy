@@ -19,6 +19,9 @@
 #   4. environment variables — adds the project_env_files table holding one .env-format file
 #      per project (service_name = '') and per compose service. Nothing to backfill: a
 #      project with no row simply has no env, which is the pre-feature behaviour.
+#   5. token roles — adds tokens.role ('admin' | 'guest') and tokens.project_id (the project
+#      a guest token is bound to; NULL for admin). No backfill: the column DEFAULT makes
+#      every pre-existing token an admin, i.e. exactly what it was before roles existed.
 #
 # Usage:
 #   ./migrate_db.sh [path/to/freeholdy.db]
@@ -70,13 +73,28 @@ fi
 # versions need it nullable). A missing table is created nullable by the bluegreen step.
 has_env_files="$(sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='project_env_files';")"
 
+# tokens.role / tokens.project_id mark the token-roles migration as applied. The tokens
+# table may legitimately not exist yet (a DB whose server never minted one) — treat that
+# as done; init_db() creates it with both columns.
+has_tokens="$(sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='tokens';")"
+has_token_role=""
+has_token_project=""
+if [ -n "$has_tokens" ]; then
+    has_token_role="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('tokens') WHERE name='role';")"
+    has_token_project="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('tokens') WHERE name='project_id';")"
+fi
+roles_done=""
+if [ -z "$has_tokens" ] || { [ -n "$has_token_role" ] && [ -n "$has_token_project" ]; }; then
+    roles_done=1
+fi
+
 versions_notnull=""
 if [ -n "$has_versions" ]; then
     versions_notnull="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('project_versions') WHERE name='image_name' AND \"notnull\"=1;")"
 fi
 
 if [ -n "$bluegreen_done" ] && [ -n "$compose_done" ] && [ -z "$versions_notnull" ] \
-   && [ -n "$has_env_files" ]; then
+   && [ -n "$has_env_files" ] && [ -n "$roles_done" ]; then
     echo "Database '$DB' is already up to date — nothing to migrate."
     exit 0
 fi
@@ -193,6 +211,17 @@ if [ -z "$has_env_files" ]; then
         updated_at   DATETIME
     );
     CREATE UNIQUE INDEX ux_project_env_files ON project_env_files (project_id, service_name);"
+fi
+
+# tokens: role + the guest binding. Guarded ALTERs — the DEFAULT backfills every existing
+# token as an admin, which is what it effectively was before roles existed.
+if [ -n "$has_tokens" ] && [ -z "$has_token_role" ]; then
+    echo "  + tokens.role"
+    SQL="$SQL ALTER TABLE tokens ADD COLUMN role VARCHAR NOT NULL DEFAULT 'admin';"
+fi
+if [ -n "$has_tokens" ] && [ -z "$has_token_project" ]; then
+    echo "  + tokens.project_id"
+    SQL="$SQL ALTER TABLE tokens ADD COLUMN project_id INTEGER REFERENCES projects(id);"
 fi
 
 SQL="$SQL COMMIT;"

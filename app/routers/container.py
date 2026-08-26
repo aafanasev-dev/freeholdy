@@ -18,7 +18,7 @@ from app.models.schemas import (
     SetDomainRequest,
     ProjectResponse,
 )
-from app.auth import require_auth
+from app.auth import require_admin, require_project_access
 from app.services import docker_service, nginx_service, compose_service, interactive_service, ws_session, deploy_service
 
 router = APIRouter()
@@ -62,7 +62,7 @@ def _job_response(job_key: str, launched_message: str) -> DockerJobStatusRespons
 
 @router.post("/{project_name}/stop", response_model=DockerJobStatusResponse,
              summary="Stop the project's container — poll /status")
-def stop_container(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
+def stop_container(project_name: str, db: Session = Depends(get_db), _=Depends(require_admin)):
     project = _get_dockerfile_project(project_name, db)
     # Stop the active version's container, but track the job under the stable deploy key
     # (project.container_name is version-scoped and changes on every blue/green deploy).
@@ -73,7 +73,7 @@ def stop_container(project_name: str, db: Session = Depends(get_db), _=Depends(r
 
 @router.get("/{project_name}/status", response_model=DockerJobStatusResponse,
             summary="Status + logs of the last docker operation for the project")
-def get_docker_status(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
+def get_docker_status(project_name: str, db: Session = Depends(get_db), _=Depends(require_project_access)):
     project = _get_dockerfile_project(project_name, db)
     job_key = deploy_service.deploy_job_key(project_name)
     job = docker_service.get_job(job_key)
@@ -90,7 +90,7 @@ def get_docker_status(project_name: str, db: Session = Depends(get_db), _=Depend
 
 @router.post("/{project_name}/abort", response_model=DockerJobStatusResponse,
              summary="Abort the currently running docker operation for the project")
-def abort_docker_job(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
+def abort_docker_job(project_name: str, db: Session = Depends(get_db), _=Depends(require_project_access)):
     project = _get_dockerfile_project(project_name, db)
     job_key = deploy_service.deploy_job_key(project_name)
     success, message = docker_service.abort_job(job_key)
@@ -139,7 +139,7 @@ async def exec_session(websocket: WebSocket, project_name: str, cmd: str = ""):
 
 @router.post("/{project_name}/ssl", response_model=SslResponse,
              summary="(Re)issue the Let's Encrypt SSL certificate for the project")
-def issue_ssl(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
+def issue_ssl(project_name: str, db: Session = Depends(get_db), _=Depends(require_admin)):
     project = _get_dockerfile_project(project_name, db)
     success, message = nginx_service.issue_cert(project.effective_domain)
     if success:
@@ -161,7 +161,7 @@ def issue_ssl(project_name: str, db: Session = Depends(get_db), _=Depends(requir
 @router.post("/{project_name}/domain", response_model=ProjectResponse,
              summary="Set or clear the project's custom domain (re-runs nginx + certbot)")
 def set_domain(project_name: str, request: SetDomainRequest,
-               db: Session = Depends(get_db), _=Depends(require_auth)):
+               db: Session = Depends(get_db), _=Depends(require_admin)):
     """Point this dockerfile project at a custom domain instead of its auto subdomain.
     Pass `custom_domain: null` (or empty) to revert to the subdomain. Rewrites the nginx
     config and issues a Let's Encrypt cert for the effective domain; if DNS doesn't yet

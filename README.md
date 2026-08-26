@@ -311,6 +311,35 @@ python scripts/generate_token.py list
 python scripts/generate_token.py revoke --id 2
 ```
 
+### Token roles: `admin` and `guest`
+
+Every token has a role. `admin` (the default) can do everything. **`guest` is bound to one
+project** — it can redeploy, restart, read logs, manage that project's environment, list
+versions and roll back, and nothing else: no other project is even visible to it, and it
+cannot create or delete projects, open a shell, issue certs, install plugins or manage
+tokens.
+
+That is what you hand to a third party — a GitLab/GitHub CI runner, a contractor — so they
+can ship their project without holding the keys to the whole server:
+
+```bash
+fhcli deploy myapp ./myapp                                  # you, as admin, first
+fhcli token-create gitlab-ci --role guest --project myapp   # the token you give away
+fhcli tokens                                                # list · fhcli token-revoke ID
+fhcli whoami                                                # what am I allowed to do?
+```
+
+The same is available from the web UI's **Tokens** panel, from the API
+(`POST /tokens`, admin only), and on the server:
+
+```bash
+python scripts/generate_token.py generate --name "gitlab-ci" --role guest --project myapp
+```
+
+Two things worth knowing: a guest token can read its project's environment **values**, so
+treat it as a secret of the same weight as that project's credentials; and deleting a
+project automatically revokes the guest tokens bound to it.
+
 ---
 
 ## Running freeholdy

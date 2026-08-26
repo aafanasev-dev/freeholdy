@@ -21,6 +21,9 @@ Usage examples:
   fhcli ssl   myapp
   fhcli status myapp
   fhcli abort  myapp
+  fhcli whoami                          # what this token is allowed to do
+  fhcli tokens                          # list API tokens (admin only)
+  fhcli token-create ci --role guest --project myapp   # a token for CI, scoped to myapp
 """
 
 # ── Run under the project venv ────────────────────────────────────────────────
@@ -744,6 +747,113 @@ def get_git_key():
     instructions = data.get("instructions", "")
     if instructions:
         console.print(instructions)
+
+
+# ── tokens & roles ────────────────────────────────────────────────────────────
+# Tokens carry a role. `admin` is the default and can do everything; `guest` is bound to
+# one project and may only redeploy, restart, read logs/status, manage that project's env,
+# list versions and roll back — see the API's /tokens endpoints.
+
+def _print_token_table(tokens: list):
+    table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
+    table.add_column("ID",      justify="right", min_width=3)
+    table.add_column("Name",    style="cyan", min_width=16)
+    table.add_column("Role",    min_width=7)
+    table.add_column("Project", style="blue", min_width=16)
+    table.add_column("Active",  min_width=6)
+    table.add_column("Created", style="dim", min_width=19)
+    for t in tokens:
+        role = "[magenta]guest[/]" if t.get("role") == "guest" else "[green]admin[/]"
+        table.add_row(
+            str(t.get("id", "?")),
+            t.get("name", "—"),
+            role,
+            t.get("project") or "[dim]—[/]",
+            "[green]yes[/]" if t.get("active") else "[dim]no[/]",
+            (t.get("created_at") or "")[:19],
+        )
+    console.print(table)
+
+
+@cli.command("whoami")
+def whoami():
+    """Show what the configured token is allowed to do."""
+    data = _get("/tokens/me")
+    role = data.get("role", "?")
+    console.print(f"Token [bold cyan]{data.get('name', '?')}[/] (id {data.get('id', '?')})")
+    if role == "guest":
+        console.print(f"  Role:    [magenta]guest[/] — limited to project [bold]{data.get('project')}[/]")
+        console.print("  Allowed: [dim]deploy, restart, logs, status, abort, env, versions, rollback[/]")
+    else:
+        console.print("  Role:    [green]admin[/] — full API access")
+
+
+@cli.command("tokens")
+def list_tokens():
+    """List API tokens (admin only). Revoked tokens are shown too."""
+    data = _get("/tokens")
+    if not data:
+        console.print("[dim]No tokens yet. Mint one with [bold]fhcli token-create NAME[/].[/]")
+        return
+    _print_token_table(data)
+
+
+@cli.command("token-create")
+@click.argument("name")
+@click.option("--role", type=click.Choice(["admin", "guest"]), default="admin",
+              show_default=True, help="admin = full access; guest = one project only.")
+@click.option("--project", "-P", default=None,
+              help="Project a guest token is bound to (required with --role guest).")
+def token_create(name: str, role: str, project: str):
+    """Mint an API token called NAME (admin only). The token is shown ONCE.
+
+    \b
+    Examples:
+      fhcli token-create my-laptop
+      fhcli token-create gitlab-ci --role guest --project myapp
+
+    A guest token is meant to be handed to a third party (a CI/CD runner): it can redeploy,
+    restart, read logs, manage the env and roll back its own project — and nothing else.
+    """
+    if role == "guest" and not project:
+        console.print("[bold red]Error:[/] a guest token needs [bold]--project NAME[/].")
+        sys.exit(1)
+    if role == "admin" and project:
+        console.print("[bold red]Error:[/] an admin token cannot be bound to a project.")
+        sys.exit(1)
+
+    body = {"name": name, "role": role}
+    if project:
+        body["project"] = project
+    data = _post("/tokens", json=body)
+
+    scope = f"guest token for [bold]{data.get('project')}[/]" if role == "guest" else "admin token"
+    console.print(f"[green]✓[/] Created {scope} '[bold cyan]{name}[/]' (id {data.get('id')})\n")
+    console.print(Panel(data.get("token", ""), title="[bold]token — shown only once[/]",
+                        border_style="yellow"))
+    if role == "guest":
+        console.print("\n[dim]Give the third party these two lines (e.g. as CI secrets):[/]")
+        console.print(f"  TOKEN={data.get('token')}")
+        console.print(f"  BASE_DOMAIN={BASE_DOMAIN or '<your-domain>'}")
+    console.print("\n[yellow]⚠[/]  Save it now — it is stored hashed and cannot be shown again.")
+
+
+@cli.command("token-revoke")
+@click.argument("token_id", type=int)
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation prompt.")
+def token_revoke(token_id: int, yes: bool):
+    """Revoke the token with id TOKEN_ID (admin only).
+
+    \b
+    Example:
+      fhcli token-revoke 3
+    """
+    if not yes:
+        console.print(f"[bold yellow]Warning:[/] token [bold]{token_id}[/] will stop working immediately.")
+        click.confirm("Are you sure?", abort=True)
+
+    data = _delete(f"/tokens/{token_id}")
+    console.print(f"[green]✓[/] Revoked token '[bold cyan]{data.get('name')}[/]' (id {data.get('id')})")
 
 
 # ── compose lifecycle ─────────────────────────────────────────────────────────────
