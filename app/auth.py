@@ -15,8 +15,9 @@ do their own check via `authorize_project`.
 
 Roles:
   * `admin` — everything (the default; every pre-roles token is one).
-  * `guest` — bound to a single project (`Token.project_id`): redeploy, restart, env,
-    logs/status, versions and rollback for that project only.
+  * `guest` — scoped to a set of projects (`Token.projects`): redeploy, restart, env,
+    logs/status, versions and rollback for those projects only. The set may be empty, in
+    which case the token authenticates but may do nothing.
 
 WebSocket routes can't use FastAPI dependencies for this (the token arrives in the first
 frame, not a header) — the mirror-image checks live in `app/services/ws_session.py`.
@@ -47,16 +48,17 @@ def is_admin(token: Optional[Token]) -> bool:
     return token is None or token.role == ROLE_ADMIN
 
 
-def guest_project_name(token: Optional[Token]) -> Optional[str]:
-    """The project a guest token is bound to, or None for an admin/DEBUG caller.
+def guest_project_names(token: Optional[Token]) -> Optional[list[str]]:
+    """The projects a guest token may act on, sorted; None for an admin/DEBUG caller.
 
-    A guest whose project row is gone (the project was deleted) resolves to None here, and
-    `authorize_project` denies it — its token rows are cascade-deleted with the project, so
-    this is only reachable inside a request that raced the deletion.
+    An empty list is a real state, not an error: deleting a project unbinds it from every
+    token that covered it, so a guest can end up scoped to nothing. It still authenticates
+    (`GET /tokens/me` works, which is how a client explains itself to its user), but
+    `authorize_project` denies every project.
     """
     if is_admin(token):
         return None
-    return token.project.name if token.project is not None else None
+    return sorted(p.name for p in token.projects)
 
 
 async def require_token(
@@ -103,18 +105,18 @@ def authorize_project(token: Optional[Token], project_name: str) -> Optional[Tok
     if is_admin(token):
         return token
 
-    bound = guest_project_name(token)
-    if bound is None:
+    allowed = guest_project_names(token)
+    if not allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="This guest token is not bound to an existing project",
+            detail="This guest token is not scoped to any project",
         )
-    if bound != project_name:
-        # Name only the project the caller already knows about — never confirm or deny
-        # that the project it asked for exists.
+    if project_name not in allowed:
+        # Name only the projects the caller already knows about — the message is identical
+        # whether the project it asked for exists or not, so existence never leaks.
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"This guest token is limited to project '{bound}'",
+            detail="This guest token is limited to: " + ", ".join(allowed),
         )
     return token
 

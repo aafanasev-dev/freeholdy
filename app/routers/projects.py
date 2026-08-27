@@ -22,19 +22,21 @@ from app.models.orm import Project, ComposeService, ProjectVersion
 from app.models.schemas import (
     ProjectResponse,
     ProjectDeleteResponse,
+    PluginAddResponse,
     UploadResponse,
     UploadCompleteRequest,
     DockerJobStatusResponse,
     ProjectType,
     validate_project_slug,
 )
-from app.auth import guest_project_name, require_admin, require_project_access, require_token
+from app.auth import guest_project_names, require_admin, require_project_access, require_token
 from app.config import settings
 from app.services import (
     docker_service,
     nginx_service,
     compose_service,
     env_service,
+    git_service,
     scan,
     interactive_service,
     ws_session,
@@ -128,6 +130,21 @@ def _service_info(svc: ComposeService) -> dict:
     }
 
 
+def public_git_url(url: str | None) -> str | None:
+    """A git URL safe to hand back over the API: any embedded `user:password@` removed.
+
+    The full URL stays in the DB because the clone needs it, but an HTTPS URL can carry a
+    PAT in its authority — and the project list is readable by guest tokens."""
+    if not url:
+        return None
+    # Strip the userinfo from http(s) URLs only: there it is always a credential, whether a
+    # user:password pair or the bare-token form GitHub accepts
+    # (https://ghp_xxx@github.com/o/r.git). Under ssh:// — and in scp-style
+    # git@host:path, which has no scheme to match — the same slot is an SSH login, not a
+    # secret, so those come back unchanged.
+    return re.sub(r"^(https?://)[^/@]*@", r"\1", url)
+
+
 def project_response(project: Project) -> dict:
     """Build the API representation of a project (container for dockerfile, services for compose)."""
     return {
@@ -135,6 +152,8 @@ def project_response(project: Project) -> dict:
         "type": project.type,
         "deploy_mode": project.deploy_mode,
         "created_at": project.created_at,
+        "git_url": public_git_url(project.git_url),
+        "git_branch": project.git_branch,
         "container": _container_info(project) if project.deploy_mode == "dockerfile" else None,
         "services": [_service_info(s) for s in project.services] if project.deploy_mode == "compose" else [],
     }
@@ -144,12 +163,12 @@ def project_response(project: Project) -> dict:
 
 @router.get("/", response_model=List[ProjectResponse])
 def list_projects(db: Session = Depends(get_db), token=Depends(require_token)):
-    """Every project for an admin token; only its own project for a guest token — a guest
-    must not learn that the server's other projects exist."""
+    """Every project for an admin token; only the ones in its scope for a guest token — a
+    guest must not learn that the server's other projects exist."""
     query = db.query(Project)
-    bound = guest_project_name(token)
-    if bound is not None:
-        query = query.filter(Project.name == bound)
+    allowed = guest_project_names(token)
+    if allowed is not None:
+        query = query.filter(Project.name.in_(allowed))
     projects = query.order_by(Project.name).all()
     return [project_response(p) for p in projects]
 
@@ -498,7 +517,7 @@ async def upload(
     project_name: str,
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db),
-    _=Depends(require_project_access),
+    _=Depends(require_admin),
 ):
     """Single entry point for getting files into a project. Each upload's multipart filename
     carries its path relative to the project root; the tree is recreated under the one
@@ -539,12 +558,20 @@ def _autoprovision(
 ) -> tuple[bool, str | None]:
     """Scan base_dir's root for a manifest and provision the project if one is found.
 
-    Shared by the legacy multipart upload and the chunked-upload `complete` endpoint.
-    Returns `(provisioned, detected_mode)`. Raises 400 if the detected mode conflicts
-    with the project's already-fixed deploy mode."""
+    Shared by the legacy multipart upload, the chunked-upload `complete` endpoint, and
+    `deploy_from_git`. Returns `(provisioned, detected_mode)`. Raises 400 if the detected
+    mode conflicts with the project's already-fixed deploy mode.
+
+    Provisioning clears any recorded git origin, because whatever is on disk is now what the
+    project deploys — `deploy_from_git` re-stamps it afterwards, so only a file upload
+    actually leaves it empty. A manifest-less call (a plain file sync) provisions nothing and
+    so leaves the origin alone: it was not a deploy."""
     detected_mode, manifest_path = _detect_manifest(base_dir)
     if not detected_mode:
         return False, None
+
+    project.git_url = None
+    project.git_branch = None
 
     if project.deploy_mode in ("dockerfile", "compose") and project.deploy_mode != detected_mode:
         raise HTTPException(
@@ -642,6 +669,112 @@ def restart_project(project_name: str, db: Session = Depends(get_db), _=Depends(
         )
     job_key, message = launch_restart(db, project)
     return _deploy_job_response(job_key, message)
+
+
+# ── Git deploy ────────────────────────────────────────────────────────────────
+#
+# Shared by `POST /git/add` (routers/git.py, admin-only: it names the repo) and by
+# `POST /projects/{name}/redeploy` below (guest-allowed: it re-clones whatever origin the
+# project already records). The helper lives here rather than in routers/git.py because
+# git.py already imports this module — the reverse would be a circular import, while
+# `git_service` is a plain service both can use.
+
+
+def deploy_from_git(db: Session, project: Project, git_url: str, branch: str | None) -> tuple[str, str]:
+    """Wipe the project dir, clone `git_url` into it, provision, and launch the build+run.
+
+    Records the origin on the project row (`git_url` / `git_branch`) so a later `redeploy`
+    can repeat this without being handed the URL again. Returns `(job_key, detected_mode)`.
+    Raises HTTPException(400) on a failed clone or a repo with no manifest, rolling the
+    session back and dropping the cloned tree so a retry starts clean.
+    """
+    name = project.name
+    project_dir = os.path.abspath(compose_service.project_dir(name))
+    # git clone needs a clean target; clear the existing tree (a prior deploy or a stale dir
+    # from a failed attempt) so the clone lands fresh.
+    if os.path.isdir(project_dir):
+        shutil.rmtree(project_dir, ignore_errors=True)
+
+    # 1. Clone the repo into the project dir.
+    ok, message = git_service.clone(git_url, project_dir, branch)
+    if not ok:
+        db.rollback()
+        shutil.rmtree(project_dir, ignore_errors=True)
+        detail = f"git clone failed: {message}"
+        if git_service.is_auth_failure(message):
+            detail += (
+                " — this looks like an SSH auth problem. Run `fhcli get-git-key` (or click "
+                "'git key' in the web UI) to get the server's public key, add it to GitHub, "
+                "then retry."
+            )
+        raise HTTPException(status_code=400, detail=detail)
+
+    # 2. Provision nginx/SSL/ports (the same path the upload endpoint runs). On any
+    # failure, roll back and drop the cloned tree so a retry starts clean.
+    try:
+        provisioned, detected_mode = _autoprovision(db, project, name, project_dir)
+    except HTTPException:
+        db.rollback()
+        shutil.rmtree(project_dir, ignore_errors=True)
+        raise
+    if not provisioned:
+        db.rollback()
+        shutil.rmtree(project_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=400,
+            detail="no Dockerfile or docker-compose.yml found in the repository root",
+        )
+    db.refresh(project)
+
+    # 3. Record the origin, so a later `redeploy` can repeat this call without being handed
+    # the URL. After provisioning, which clears it (see _autoprovision); the caller commits.
+    project.git_url = git_url
+    project.git_branch = branch
+
+    # 4. Launch the async build + run job (no install.sh) — same dispatch the upload flow uses.
+    return launch_deploy(project), detected_mode
+
+
+@router.post("/{project_name}/redeploy", response_model=PluginAddResponse,
+             summary="Re-clone a git-backed project from its stored origin and redeploy it")
+def redeploy_project(project_name: str, db: Session = Depends(get_db),
+                     _=Depends(require_project_access)):
+    """Redeploy from the git URL + branch the project already records — no body, no URL.
+
+    This is the deploy a **guest** token gets: it can rebuild its project from that
+    project's own repo, but it cannot point the project somewhere else or push it arbitrary
+    files (uploads and `POST /git/add` are admin-only). Cuts a fresh blue/green version like
+    any other deploy; stream it over `WS /projects/{name}/deploy`.
+    """
+    project = db.query(Project).filter(Project.name == project_name).first()
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+    if not project.git_url:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Project '{project_name}' was not deployed from git — there is no origin "
+                    f"to re-clone. Deploy it from a repository first "
+                    f"(`fhcli deploy {project_name} <git-url>`)."),
+        )
+
+    job_key, detected_mode = deploy_from_git(db, project, project.git_url, project.git_branch)
+    db.commit()
+
+    job = docker_service.get_job(job_key)
+    ws_path = _deploy_ws_path(project_name)
+    return PluginAddResponse(
+        status="ok",
+        message=f"Project '{project_name}' redeployed from {project.git_branch or 'the default branch'}",
+        project=project_response(project),
+        job=DockerJobStatusResponse(
+            status=job.status if job else "no_job",
+            operation=job.operation if job else None,
+            message=f"Redeploying '{project_name}' ({detected_mode}) — stream {ws_path}",
+            logs=docker_service.get_job_logs(job_key),
+            exit_code=job.exit_code if job else None,
+        ),
+        ws_path=ws_path,
+    )
 
 
 def deploy_job_key(project: Project) -> str:
@@ -747,7 +880,7 @@ async def upload_chunk(
     upload_id: str,
     offset: int,
     db: Session = Depends(get_db),
-    _=Depends(require_project_access),
+    _=Depends(require_admin),
 ):
     """Write one raw chunk (the request body) into the staged zip at `offset`. Offset
     addressing makes this idempotent and order-independent. The project need not exist yet —
@@ -775,7 +908,7 @@ async def upload_complete(
     project_name: str,
     request: UploadCompleteRequest,
     db: Session = Depends(get_db),
-    _=Depends(require_project_access),
+    _=Depends(require_admin),
 ):
     """Finalize a chunked upload: validate the staged zip, extract every member under the
     project dir (guarded against zip-slip by `_safe_join`), provision, and clean up. Creates
@@ -830,7 +963,7 @@ async def upload_abort(
     project_name: str,
     upload_id: str,
     db: Session = Depends(get_db),
-    _=Depends(require_project_access),
+    _=Depends(require_admin),
 ):
     # The project row may not exist yet (aborting before `complete`); `_staging_zip_path`
     # slug-validates the name, which is all we need to safely locate the staged data.

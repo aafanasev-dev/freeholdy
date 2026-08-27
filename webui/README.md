@@ -74,8 +74,13 @@ python scripts/generate_token.py generate --name web_ui
 The token is stored in `localStorage` and persists across sessions. It is validated against
 `GET /tokens/me`, which also tells the UI what the token is allowed to do.
 
-A **guest** token works here too. It is bound to one project, so the panel shows only that
-project and only the actions it may take — deploy, env, restart, versions/rollback, logs,
+A **guest** token works here too. It is scoped to a set of projects, so the panel shows only
+those and only the actions it may take — redeploy, env, restart, versions/rollback, logs,
 status. Deploy, Plugins, Tokens and Git key disappear from the rail, as do remove, stop,
-exec, ssl and domain. Mint one from the **Tokens** panel (admin only): it is shown once,
-with a `https://ui.<domain>/token/<TOKEN>` link you can hand to the third party.
+exec, ssl and domain. Note **redeploy**, not deploy: it re-clones the git origin the server
+recorded for that project, so a guest cannot upload files or repoint a project.
+
+Mint one from the **Tokens** panel (admin only), picking its projects from a checkbox list:
+the token is shown once, with a `https://ui.<domain>/token/<TOKEN>` link you can hand to the
+third party. The panel's per-token **edit** re-scopes a token later without changing the
+secret it holds.

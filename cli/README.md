@@ -43,6 +43,7 @@ sudo ln -s "$(pwd)/cli/fhcli.py" /usr/local/bin/fhcli   # from the repo root
 | `fhcli plugins` | List available plugins in the catalog (incl. system plugins) |
 | `fhcli plugin-add PLUGIN PROJECT` | Create a project from a plugin, then build + run it |
 | `fhcli deploy NAME SOURCE [--branch B] [--dest DIR] [--env FILE] [--no-follow]` | **Deploy a project** — auto-creates it if new, redeploys if it exists. `SOURCE` is a local file/folder (zipped + streamed in 1 MiB chunks) **or** a git clone URL (cloned server-side). Either way the server auto-detects Dockerfile/compose, provisions nginx + SSL, then builds + runs it (deploy log streams live). `--branch` is git-only; `--dest` is local-upload-only; `--env FILE` stores variables **before the first container start**. |
+| `fhcli redeploy PROJECT [--no-follow]` | **Rebuild from the project's own git origin** — re-clones the URL and branch recorded at its last git deploy, no arguments. Git-backed projects only; this is the deploy a guest token gets |
 | `fhcli stop PROJECT` | Stop the container |
 | `fhcli restart PROJECT [--no-follow]` | Recreate the container(s) from the images they already run — no rebuild. How edited environment variables take effect |
 | `fhcli env-get PROJECT [-s SERVICE] [-o FILE]` | Download the project's (or one compose service's) `.env` file — prints to stdout, or writes `FILE` |
@@ -58,7 +59,8 @@ sudo ln -s "$(pwd)/cli/fhcli.py" /usr/local/bin/fhcli   # from the repo root
 | `fhcli remove PROJECT [--yes]` | Delete the project (containers, images, nginx, DB row) |
 | `fhcli whoami` | What the configured token may do — its role, and the project a guest token is bound to |
 | `fhcli tokens` | List every API token (admin only) |
-| `fhcli token-create NAME [--role admin\|guest] [--project P]` | Mint a token, printed **once**. `--role guest --project P` scopes it to one project |
+| `fhcli token-create NAME [--role admin\|guest] [-P PROJECT]…` | Mint a token, printed **once**. `--role guest -P a -P b` scopes it to those projects |
+| `fhcli token-projects ID [-P PROJECT]…` | Replace which projects a guest token may act on — the token itself is unchanged (admin only) |
 | `fhcli token-revoke ID [--yes]` | Revoke a token immediately (admin only) |
 
 The deploy mode is **auto-detected** from your source: a `docker-compose.yml` in the
@@ -150,31 +152,38 @@ directory for compose `${VAR}` interpolation — freeholdy never touches that fi
 
 ## Tokens & roles
 
-Every token has a role. **`admin`** (the default) can do everything. **`guest`** is bound to
-a single project: it may redeploy, restart, read logs and status, manage that project's
-environment, list versions and roll back — that project and no other. It cannot create or
-delete projects, open a shell (`exec`), issue certs, set domains, install plugins, or manage
-tokens; any of those returns `403`, as does naming a different project.
+Every token has a role. **`admin`** (the default) can do everything. **`guest`** is scoped to
+a set of projects: for those it may **redeploy**, restart, read logs and status, manage the
+environment, list versions and roll back — and no other project. It cannot create or delete
+projects, upload files, point a project at a repo, open a shell (`exec`), issue certs, set
+domains, install plugins, or manage tokens; any of those returns `403`, as does naming a
+project outside its scope.
+
+`redeploy` is the key part: it re-clones the git URL and branch **the server already
+recorded** for that project, so the runner never supplies a source. That is what keeps a
+guest from replacing a project's contents with something else.
 
 That is the token you give to a CI/CD runner:
 
 ```bash
-# you, as admin — the project must exist before it can be scoped to
-fhcli deploy myapp ./myapp
+# you, as admin — deploy it from git first, so the project has an origin to re-clone
+fhcli deploy myapp https://github.com/me/myapp.git
 
-# mint the token to hand over; it is printed once
+# mint the token to hand over; it is printed once. Repeat -P for several projects.
 fhcli token-create gitlab-ci --role guest --project myapp
 
-fhcli tokens              # who has what
-fhcli token-revoke 4      # take it back
+fhcli tokens                        # who has what
+fhcli token-projects 4 -P myapp -P api   # re-scope without re-minting
+fhcli token-revoke 4                # take it back
 ```
 
 The third party puts `TOKEN` and `BASE_DOMAIN` into their own `cli/.env` (or CI secrets) and
-runs `fhcli deploy myapp .` on every push. `fhcli whoami` tells them what they hold.
+runs `fhcli redeploy myapp` on every push. `fhcli whoami` tells them what they hold.
 
-Two caveats: a guest token can read its project's environment **values**, so treat it as a
-secret of the same weight as that project's credentials; and deleting a project
-automatically revokes the guest tokens bound to it.
+Two caveats: a guest token can read its projects' environment **values**, so treat it as a
+secret of the same weight as those projects' credentials; and deleting a project unbinds it
+from every token that covered it — the token keeps working for whatever else it covers, and
+is left able to authenticate but not act if that was its last project.
 
 ## Install from a plugin
 

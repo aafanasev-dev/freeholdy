@@ -181,6 +181,11 @@ class ProjectResponse(BaseModel):
     type: str
     deploy_mode: str                       # dockerfile | compose
     created_at: datetime
+    # The origin a git deploy recorded, so clients can show what `redeploy` will pull.
+    # NULL = not git-backed (deployed from files) → POST /{name}/redeploy is a 400.
+    # Any embedded credentials are stripped on the way out (projects.py::public_git_url).
+    git_url: Optional[str] = None
+    git_branch: Optional[str] = None       # None = the repo's default branch
     container: Optional[ContainerInfo] = None   # dockerfile mode
     services: List[ServiceInfo] = []            # compose mode
 
@@ -272,11 +277,22 @@ class ProjectDeleteResponse(BaseModel):
 
 # ── API tokens / roles ──────────────────────────────────────────────────────────
 
+def validate_project_list(v: List[str]) -> List[str]:
+    """Validate a list of project names, de-duplicated, order preserved."""
+    seen, out = set(), []
+    for name in v or []:
+        validate_project_slug(name)
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
 class CreateTokenRequest(BaseModel):
     """POST /tokens — mint a token. The plaintext is returned once and never again."""
     name: str                                # label, e.g. "gitlab-ci"
-    role: TokenRole = TokenRole.admin        # admin (full access) | guest (one project)
-    project: Optional[str] = None            # required for guest, rejected for admin
+    role: TokenRole = TokenRole.admin        # admin (full access) | guest (scoped projects)
+    projects: List[str] = []                 # required for guest, rejected for admin
 
     @field_validator("name")
     @classmethod
@@ -286,21 +302,34 @@ class CreateTokenRequest(BaseModel):
             raise ValueError("name must not be empty")
         return v
 
-    @field_validator("project")
+    @field_validator("projects")
     @classmethod
-    def project_must_be_slug(cls, v: Optional[str]) -> Optional[str]:
-        return v if not v else validate_project_slug(v)
+    def projects_must_be_slugs(cls, v: List[str]) -> List[str]:
+        return validate_project_list(v)
 
     @model_validator(mode="after")
-    def project_matches_role(self) -> "CreateTokenRequest":
-        # A guest token is meaningless without its binding, and a bound admin token would
-        # silently ignore the binding — reject both rather than guess. Model-level because
-        # an omitted `project` never reaches a field validator.
-        if self.role == TokenRole.guest and not self.project:
-            raise ValueError("a guest token must name the project it is bound to")
-        if self.role == TokenRole.admin and self.project:
-            raise ValueError("an admin token cannot be bound to a project")
+    def projects_match_role(self) -> "CreateTokenRequest":
+        # A guest token with no projects could do nothing, and a scoped admin token would
+        # silently ignore the scope — reject both rather than guess. Model-level because an
+        # omitted `projects` never reaches a field validator.
+        if self.role == TokenRole.guest and not self.projects:
+            raise ValueError("a guest token must name at least one project to scope it to")
+        if self.role == TokenRole.admin and self.projects:
+            raise ValueError("an admin token cannot be scoped to projects")
         return self
+
+
+class SetTokenProjectsRequest(BaseModel):
+    """PUT /tokens/{id}/projects — replace a guest token's scope wholesale.
+
+    An empty list is allowed: it leaves the token able to authenticate but not to act,
+    which is the same state it reaches when its last project is deleted."""
+    projects: List[str] = []
+
+    @field_validator("projects")
+    @classmethod
+    def projects_must_be_slugs(cls, v: List[str]) -> List[str]:
+        return validate_project_list(v)
 
 
 class TokenResponse(BaseModel):
@@ -308,7 +337,7 @@ class TokenResponse(BaseModel):
     id: int
     name: str
     role: TokenRole
-    project: Optional[str] = None   # the bound project's name (guest tokens only)
+    projects: List[str] = []        # the projects a guest token may act on; empty for admin
     active: bool
     created_at: Optional[datetime] = None
 

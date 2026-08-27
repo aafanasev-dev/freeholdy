@@ -1380,7 +1380,10 @@ const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, 
   const isCompose = project.deploy_mode === "compose";
   const isPending = project.deploy_mode !== "compose" && project.deploy_mode !== "dockerfile";
   const isPlugin = project.type === "plugin";
-  const isAdmin = role !== "guest";   // guests may deploy/env/restart/versions/logs only
+  const isAdmin = role !== "guest";   // guests may redeploy/env/restart/versions/logs only
+  // A git-backed project can be rebuilt from the origin the server recorded — the only
+  // deploy a guest token has (uploads and POST /git/add are admin-only).
+  const gitUrl = project.git_url;
 
   const remove = async () => {
     setRemoving(true);
@@ -1408,6 +1411,20 @@ const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, 
   // Recreate the project's container(s) from the images they already run — how an edited
   // environment goes live. Compose stacks report on the compose status endpoint, so the
   // LogPane needs kind: "compose" for them.
+  // Re-clone the stored git origin and cut a new version. Streams over the same deploy
+  // WebSocket a rollback uses, so it hands the ws_path straight to the InstallPane.
+  const redeploy = async () => {
+    setBusy(b => ({ ...b, redeploy: true }));
+    try {
+      const data = await mkApi(token).post(`/projects/${project.name}/redeploy`);
+      if (data.ws_path) onStream({ project: project.name, wsPath: data.ws_path });
+    } catch (e) {
+      onOperation({ project: project.name, operation: "redeploy", status: "error", logs: e.message });
+    } finally {
+      setBusy(b => ({ ...b, redeploy: false }));
+    }
+  };
+
   const restart = async () => {
     setBusy(b => ({ ...b, restart: true }));
     try {
@@ -1451,9 +1468,20 @@ const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, 
             {project.created_at && (
               <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>created {new Date(project.created_at).toLocaleDateString()}</span>
             )}
+            {gitUrl && (
+              <span title={gitUrl} style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", maxWidth: "320px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                ⑂ {gitUrl.replace(/^https?:\/\//, "")}{project.git_branch ? ` · ${project.git_branch}` : ""}
+              </span>
+            )}
           </div>
           <div style={{ display: "flex", gap: "6px" }}>
-            <Btn sm v="primary" onClick={() => setUploadModal(true)} title="Upload files or a folder — auto-detects Dockerfile / docker-compose.yml, provisions, and deploys">{isPending ? "upload" : "deploy"}</Btn>
+            {gitUrl && (
+              <Btn sm v="primary" onClick={redeploy} busy={busy.redeploy}
+                   title={`Re-clone ${gitUrl}${project.git_branch ? ` (${project.git_branch})` : ""} and deploy a new version`}>redeploy</Btn>
+            )}
+            {isAdmin && (
+              <Btn sm v={gitUrl ? "ghost" : "primary"} onClick={() => setUploadModal(true)} title="Upload files or a folder — auto-detects Dockerfile / docker-compose.yml, provisions, and deploys">{isPending ? "upload" : "deploy"}</Btn>
+            )}
             {isCompose && (
               <Btn sm v="blue" onClick={() => setEnvModal(true)} title="Edit the environment variables shared by every service">env</Btn>
             )}
@@ -1777,21 +1805,46 @@ const PluginPanel = ({ token, onInstalled, onCancel }) => {
   );
 };
 
+// Checkbox list of project names — a guest token's scope, on the create form and in the
+// re-scope modal. An empty selection is a real state for an existing token (it can
+// authenticate but not act), so nothing is forced selected.
+const ProjectPicker = ({ projects, selected, onToggle }) => (
+  <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+    {projects.map(p => {
+      const on = selected.includes(p.name);
+      return (
+        <button key={p.name} onClick={() => onToggle(p.name)} style={{
+          background: on ? C.blueFill : C.s3,
+          border: `1px solid ${on ? C.blueBd : C.bd}`,
+          color: on ? C.blue : C.muted,
+          borderRadius: "8px", padding: "5px 10px", cursor: "pointer",
+          fontFamily: C.ff, fontSize: "11px",
+        }}>
+          <span style={{ marginRight: "6px" }}>{on ? "☑" : "☐"}</span>{p.name}
+        </button>
+      );
+    })}
+  </div>
+);
+
 // ── Tokens panel (admin only: mint / revoke API tokens) ───────────────────────
-// The point of this panel is guest tokens: pick a project, mint a token bound to it, and
-// hand that to a third party (a CI/CD runner). It can redeploy, restart, read logs, edit
-// the env and roll back that one project — everything else 403s server-side (app/auth.py).
-// The plaintext exists only in the create response, so it is shown once, here.
+// The point of this panel is guest tokens: pick one or more projects, mint a token scoped
+// to them, and hand it to a third party (a CI/CD runner). It can redeploy those projects
+// from their own git origins, restart them, read their logs, edit their env and roll them
+// back — everything else 403s server-side (app/auth.py). The scope can be changed later
+// without re-minting (PUT /tokens/{id}/projects). The plaintext exists only in the create
+// response, so it is shown once, here.
 const TokensPanel = ({ token, projects, me, onCancel }) => {
   const [tokens, setTokens] = useState(null);
   const [error, setError] = useState("");
   const [name, setName] = useState("");
   const [role, setRole] = useState("guest");
-  const [project, setProject] = useState("");
+  const [picked, setPicked] = useState([]);        // project names for the new guest token
   const [busy, setBusy] = useState(false);
   const [minted, setMinted] = useState(null);      // the one-time plaintext reveal
   const [copied, setCopied] = useState(false);
   const [confirm, setConfirm] = useState(null);    // the token row awaiting revoke
+  const [editing, setEditing] = useState(null);    // { id, name, projects } being re-scoped
   const client = mkApi(token);
 
   const load = async () => {
@@ -1800,23 +1853,31 @@ const TokensPanel = ({ token, projects, me, onCancel }) => {
   };
   useEffect(() => { load(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Guest tokens bind to a project, so default the picker to the first one available.
-  useEffect(() => {
-    if (!project && projects.length) setProject(projects[0].name);
-  }, [projects]);                     // eslint-disable-line react-hooks/exhaustive-deps
+  const toggle = (name) =>
+    setPicked(p => p.includes(name) ? p.filter(x => x !== name) : [...p, name]);
 
   const create = async () => {
     if (!name.trim()) return setError("give the token a name");
-    if (role === "guest" && !project) return setError("a guest token needs a project");
+    if (role === "guest" && !picked.length) return setError("a guest token needs at least one project");
     setBusy(true); setError("");
     try {
-      const body = { name: name.trim(), role };
-      if (role === "guest") body.project = project;
-      const d = await client.post("/tokens", body);
-      setMinted(d); setCopied(false); setName("");
+      const d = await client.post("/tokens", {
+        name: name.trim(), role, projects: role === "guest" ? picked : [],
+      });
+      setMinted(d); setCopied(false); setName(""); setPicked([]);
       load();
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
+  };
+
+  // Re-scope an existing token: the secret the third party holds is untouched, only what
+  // it reaches changes.
+  const saveScope = async () => {
+    setError("");
+    try {
+      await client.put(`/tokens/${editing.id}/projects`, { projects: editing.projects });
+      setEditing(null); load();
+    } catch (e) { setError(e.message); }
   };
 
   const revoke = async (t) => {
@@ -1854,24 +1915,26 @@ const TokensPanel = ({ token, projects, me, onCancel }) => {
           </Field>
           <Field label="ROLE" style={{ flex: "0 1 150px" }}>
             <select value={role} onChange={e => setRole(e.target.value)} style={sel}>
-              <option value="guest">guest — one project</option>
+              <option value="guest">guest — scoped projects</option>
               <option value="admin">admin — full access</option>
             </select>
           </Field>
-          {role === "guest" && (
-            <Field label="PROJECT" style={{ flex: "1 1 190px" }}>
-              <select value={project} onChange={e => setProject(e.target.value)} style={sel}>
-                {projects.length === 0 && <option value="">— deploy a project first —</option>}
-                {projects.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
-              </select>
-            </Field>
-          )}
           <Btn v="primary" onClick={create} busy={busy} style={{ padding: "8px 14px" }}>create</Btn>
         </div>
 
+        {role === "guest" && (
+          <Field label="PROJECTS THIS TOKEN MAY ACT ON" style={{ marginBottom: "10px" }}>
+            {projects.length === 0 ? (
+              <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>deploy a project first</div>
+            ) : (
+              <ProjectPicker projects={projects} selected={picked} onToggle={toggle} />
+            )}
+          </Field>
+        )}
+
         <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: 1.7, marginBottom: "14px" }}>
           {role === "guest"
-            ? <>a <span style={{ color: C.amber }}>guest</span> token can redeploy, restart, read logs, edit the env, list versions and roll back <span style={{ color: C.txt }}>{project || "its project"}</span> — nothing else, and no other project. It can still read that project's env values, so treat it as a secret.</>
+            ? <>a <span style={{ color: C.amber }}>guest</span> token can redeploy <span style={{ color: C.txt }}>{picked.join(", ") || "its projects"}</span> from their own git origins, restart them, read their logs, edit their env, list versions and roll back — nothing else, and no other project. It cannot upload files or repoint a project at another repo. It can read those projects' env values, so treat it as a secret.</>
             : <>an <span style={{ color: C.green }}>admin</span> token can do everything, including minting and revoking tokens.</>}
         </div>
 
@@ -1887,7 +1950,7 @@ const TokensPanel = ({ token, projects, me, onCancel }) => {
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr style={{ borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
-                  <TH>NAME</TH><TH>ROLE</TH><TH>PROJECT</TH><TH>CREATED</TH><TH right>ACTION</TH>
+                  <TH>NAME</TH><TH>ROLE</TH><TH>PROJECTS</TH><TH>CREATED</TH><TH right>ACTION</TH>
                 </tr>
               </thead>
               <tbody>
@@ -1902,7 +1965,14 @@ const TokensPanel = ({ token, projects, me, onCancel }) => {
                         fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px",
                       }}>{t.role}</span>
                     </td>
-                    <td style={{ ...td, color: t.project ? C.txt : C.dim }}>{t.project || "—"}</td>
+                    <td style={{ ...td, color: (t.projects || []).length ? C.txt : C.dim }}>
+                      {(t.projects || []).join(", ") || (t.role === "guest" ? "none" : "—")}
+                      {t.role === "guest" && t.active && (
+                        <button onClick={() => setEditing({ id: t.id, name: t.name, projects: [...(t.projects || [])] })}
+                          title="Change which projects this token may act on"
+                          style={{ background: "transparent", border: "none", color: C.blue, cursor: "pointer", fontFamily: C.ff, fontSize: "10px", marginLeft: "8px" }}>edit</button>
+                      )}
+                    </td>
                     <td style={{ ...td, color: C.dim }}>{t.created_at ? new Date(t.created_at).toLocaleString() : "—"}</td>
                     <td style={{ ...td, textAlign: "right" }}>
                       {!t.active
@@ -1946,6 +2016,27 @@ const TokensPanel = ({ token, projects, me, onCancel }) => {
           <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "16px" }}>
             <Btn v="primary" onClick={copy}>{copied ? "copied ✓" : "copy token"}</Btn>
             <Btn v="ghost" onClick={() => setMinted(null)}>done</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {editing && (
+        <Modal onClose={() => setEditing(null)} width={480}>
+          <ModalHeader title={`SCOPE — ${editing.name}`} color={C.txt} onClose={() => setEditing(null)} />
+          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", marginBottom: "12px" }}>
+            Which projects this token may act on. The token itself does not change, so
+            whoever holds it keeps working with the secret they already have.
+          </div>
+          <ProjectPicker
+            projects={projects}
+            selected={editing.projects}
+            onToggle={(n) => setEditing(e => ({
+              ...e,
+              projects: e.projects.includes(n) ? e.projects.filter(x => x !== n) : [...e.projects, n],
+            }))} />
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "16px" }}>
+            <Btn v="primary" onClick={saveScope}>save</Btn>
+            <Btn v="ghost" onClick={() => setEditing(null)}>cancel</Btn>
           </div>
         </Modal>
       )}
@@ -2035,7 +2126,7 @@ const Dashboard = ({ token, onLogout }) => {
   const [showPlugins, setShowPlugins] = useState(false);
   const [showGitKey, setShowGitKey] = useState(false);
   const [showTokens, setShowTokens] = useState(false);
-  const [me, setMe] = useState(null);          // { id, name, role, project } — GET /tokens/me
+  const [me, setMe] = useState(null);          // { id, name, role, projects[] } — GET /tokens/me
   const [railOpen, setRailOpen] = useState(false);   // mobile: off-canvas nav rail
   const [activeLog, setActiveLog] = useState(null);
   const [interactiveLog, setInteractiveLog] = useState(null);  // { project, wsPath, kind }
@@ -2059,9 +2150,10 @@ const Dashboard = ({ token, onLogout }) => {
     try { setVersion(await client.get("/version")); } catch {}
   }, [client]);
 
-  // Who is holding this token. A `guest` is bound to one project and may only deploy,
-  // restart, read logs/status, edit env and roll back it — every other action 403s on the
-  // API, so the UI hides those controls rather than offering a button that fails.
+  // Who is holding this token. A `guest` is scoped to a set of projects and may only
+  // redeploy (from each project's stored git origin), restart, read logs/status, edit env
+  // and roll back those — every other action 403s on the API, so the UI hides those
+  // controls rather than offering a button that fails.
   const fetchMe = useCallback(async () => {
     try { setMe(await client.get("/tokens/me")); }
     catch { setMe({ role: "admin" }); }   // pre-roles server: behave exactly as before
@@ -2210,9 +2302,9 @@ const Dashboard = ({ token, onLogout }) => {
             {role === "guest" && (
               <>
                 <span style={{ width: 1, height: 14, background: C.bd, display: "inline-block" }} />
-                <span title={`This token is limited to the project "${me?.project}"`}
+                <span title={`This token is limited to: ${(me?.projects || []).join(", ") || "nothing"}`}
                   style={{ color: C.amber, background: C.amberFill, border: `1px solid ${C.amberBd}`, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px" }}>
-                  guest · {me?.project}
+                  guest · {(me?.projects || []).length === 1 ? me.projects[0] : `${(me?.projects || []).length} projects`}
                 </span>
               </>
             )}
@@ -2247,7 +2339,7 @@ const Dashboard = ({ token, onLogout }) => {
               <div style={{ border: `1px dashed ${C.bd}`, borderRadius: "14px", padding: "40px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
                 {isAdmin
                   ? <>no projects yet — use <span style={{ color: C.txt }}>Deploy</span> or <span style={{ color: C.txt }}>Plugins</span> in the sidebar</>
-                  : <>this token's project is not available — ask the server's operator</>}
+                  : <>this token is not scoped to any project — ask the server's operator</>}
               </div>
             ) : (
               projects.map(p => (

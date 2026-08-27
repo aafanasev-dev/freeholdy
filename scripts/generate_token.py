@@ -5,12 +5,14 @@ Manage API tokens for freeholdy.
 Usage:
   python scripts/generate_token.py generate --name "my_laptop"
   python scripts/generate_token.py generate --name "gitlab-ci" --role guest --project myapp
+  python scripts/generate_token.py generate --name "ci" --role guest --project a --project b
   python scripts/generate_token.py list
   python scripts/generate_token.py revoke --id 2
 
-Roles: `admin` (default) has full API access. `guest` is bound to one existing project and
-may only redeploy, restart, read logs/status, manage that project's env, list versions and
-roll back — see app/auth.py.
+Roles: `admin` (default) has full API access. `guest` is scoped to one or more existing
+projects and may only redeploy (from each project's own stored git origin), restart, read
+logs/status, manage env, list versions and roll back — see app/auth.py. Repeat --project to
+scope a guest token to several.
 """
 
 import sys
@@ -33,32 +35,36 @@ def _hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def cmd_generate(name: str, role: str = "admin", project: str = None) -> None:
+def cmd_generate(name: str, role: str = "admin", projects: list = None) -> None:
     init_db()
-    if role == "guest" and not project:
-        print("❌  A guest token must be bound to a project: pass --project NAME.")
+    projects = list(projects or [])
+    if role == "guest" and not projects:
+        print("❌  A guest token must be scoped to a project: pass --project NAME "
+              "(repeat it for several).")
         sys.exit(1)
-    if role == "admin" and project:
-        print("❌  An admin token cannot be bound to a project — drop --project.")
+    if role == "admin" and projects:
+        print("❌  An admin token cannot be scoped to projects — drop --project.")
         sys.exit(1)
 
     token = secrets.token_urlsafe(32)
     db = SessionLocal()
     try:
-        project_id = None
-        if project:
+        rows = []
+        for project in projects:
             row = db.query(Project).filter(Project.name == project).first()
             if not row:
-                print(f"❌  Project '{project}' not found — deploy it first, then mint a "
-                      "guest token for it.")
+                print(f"❌  Project '{project}' not found — deploy it first, then scope a "
+                      "guest token to it.")
                 sys.exit(1)
-            project_id = row.id
-        db.add(Token(name=name, token_hash=_hash(token), role=role, project_id=project_id))
+            rows.append(row)
+        record = Token(name=name, token_hash=_hash(token), role=role)
+        record.projects = rows
+        db.add(record)
         db.commit()
     finally:
         db.close()
 
-    scope = f"{role} token" + (f" for project '{project}'" if project else "")
+    scope = f"{role} token" + (f" for {', '.join(projects)}" if projects else "")
     print(f"\n✅  {scope.capitalize()} created for '{name}'")
     print(f"\n    {token}\n")
     print("⚠️   Save this token — it will NOT be shown again.\n")
@@ -69,9 +75,9 @@ def cmd_list() -> None:
     db = SessionLocal()
     try:
         # Flatten inside the session — the rows are detached once it closes, so a lazy
-        # `token.project` load would blow up in the print loop below.
+        # `token.projects` load would blow up in the print loop below.
         tokens = [
-            (t.id, t.name, t.role, t.project.name if t.project is not None else "-",
+            (t.id, t.name, t.role, ",".join(sorted(p.name for p in t.projects)) or "-",
              t.active, t.created_at)
             for t in db.query(Token).order_by(Token.id).all()
         ]
@@ -84,10 +90,10 @@ def cmd_list() -> None:
 
     # ID first, Name second: update.sh resolves the token it just minted with
     # `awk '$2 == name { print $1 }'` — new columns go after Name, never before.
-    print(f"\n{'ID':<5}  {'Name':<24}  {'Role':<7}  {'Project':<16}  {'Active':<8}  Created at")
-    print("─" * 92)
+    print(f"\n{'ID':<5}  {'Name':<24}  {'Role':<7}  {'Projects':<28}  {'Active':<8}  Created at")
+    print("─" * 104)
     for tid, name, role, project, active, created_at in tokens:
-        print(f"{tid:<5}  {name:<24}  {role:<7}  {project:<16}  "
+        print(f"{tid:<5}  {name:<24}  {role:<7}  {project:<28}  "
               f"{'yes' if active else 'no':<8}  {created_at}")
     print()
 
@@ -115,7 +121,9 @@ if __name__ == "__main__":
     p_gen.add_argument("--name", required=True, help="Label for this token (e.g. 'my_laptop')")
     p_gen.add_argument("--role", choices=["admin", "guest"], default="admin",
                        help="admin = full access (default); guest = one project only")
-    p_gen.add_argument("--project", help="Project a guest token is bound to (required for --role guest)")
+    p_gen.add_argument("--project", action="append", dest="projects", metavar="NAME",
+                       help="Project a guest token may act on (required for --role guest; "
+                            "repeat for several)")
 
     sub.add_parser("list", help="List all tokens")
 
@@ -125,7 +133,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.cmd == "generate":
-        cmd_generate(args.name, args.role, args.project)
+        cmd_generate(args.name, args.role, args.projects)
     elif args.cmd == "list":
         cmd_list()
     elif args.cmd == "revoke":

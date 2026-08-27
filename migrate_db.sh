@@ -19,9 +19,16 @@
 #   4. environment variables — adds the project_env_files table holding one .env-format file
 #      per project (service_name = '') and per compose service. Nothing to backfill: a
 #      project with no row simply has no env, which is the pre-feature behaviour.
-#   5. token roles — adds tokens.role ('admin' | 'guest') and tokens.project_id (the project
-#      a guest token is bound to; NULL for admin). No backfill: the column DEFAULT makes
-#      every pre-existing token an admin, i.e. exactly what it was before roles existed.
+#   5. token roles — adds tokens.role ('admin' | 'guest') and the token_projects table (the
+#      projects a guest token may act on; empty for admin). No backfill: the role column's
+#      DEFAULT makes every pre-existing token an admin, i.e. exactly what it was before roles
+#      existed. An intermediate dev build stored a single binding in tokens.project_id; if
+#      that column is present its rows are copied into token_projects. The column itself is
+#      left alone — nothing reads it, and dropping one in SQLite means rebuilding the table.
+#   6. git origin — adds projects.git_url / projects.git_branch, recorded by a git deploy and
+#      cleared by a file upload, so POST /projects/{name}/redeploy can re-clone from the
+#      stored origin. Nothing to backfill: an existing project has no recorded origin until
+#      its next git deploy (the .git dir on disk is not read).
 #
 # Usage:
 #   ./migrate_db.sh [path/to/freeholdy.db]
@@ -78,14 +85,24 @@ has_env_files="$(sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='table
 # as done; init_db() creates it with both columns.
 has_tokens="$(sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='tokens';")"
 has_token_role=""
-has_token_project=""
+has_token_project_col=""
 if [ -n "$has_tokens" ]; then
     has_token_role="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('tokens') WHERE name='role';")"
-    has_token_project="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('tokens') WHERE name='project_id';")"
+    # Vestigial single-binding column from an intermediate dev build — its rows are migrated
+    # into token_projects below, then it is left in place (nothing reads it).
+    has_token_project_col="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('tokens') WHERE name='project_id';")"
 fi
+has_token_projects="$(sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='token_projects';")"
 roles_done=""
-if [ -z "$has_tokens" ] || { [ -n "$has_token_role" ] && [ -n "$has_token_project" ]; }; then
+if [ -z "$has_tokens" ] || { [ -n "$has_token_role" ] && [ -n "$has_token_projects" ]; }; then
     roles_done=1
+fi
+
+has_git_url="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('projects') WHERE name='git_url';")"
+has_git_branch="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('projects') WHERE name='git_branch';")"
+git_origin_done=""
+if [ -n "$has_git_url" ] && [ -n "$has_git_branch" ]; then
+    git_origin_done=1
 fi
 
 versions_notnull=""
@@ -94,7 +111,7 @@ if [ -n "$has_versions" ]; then
 fi
 
 if [ -n "$bluegreen_done" ] && [ -n "$compose_done" ] && [ -z "$versions_notnull" ] \
-   && [ -n "$has_env_files" ] && [ -n "$roles_done" ]; then
+   && [ -n "$has_env_files" ] && [ -n "$roles_done" ] && [ -n "$git_origin_done" ]; then
     echo "Database '$DB' is already up to date — nothing to migrate."
     exit 0
 fi
@@ -213,15 +230,39 @@ if [ -z "$has_env_files" ]; then
     CREATE UNIQUE INDEX ux_project_env_files ON project_env_files (project_id, service_name);"
 fi
 
-# tokens: role + the guest binding. Guarded ALTERs — the DEFAULT backfills every existing
-# token as an admin, which is what it effectively was before roles existed.
+# tokens.role: a guarded ALTER — the DEFAULT backfills every existing token as an admin,
+# which is what it effectively was before roles existed.
 if [ -n "$has_tokens" ] && [ -z "$has_token_role" ]; then
     echo "  + tokens.role"
     SQL="$SQL ALTER TABLE tokens ADD COLUMN role VARCHAR NOT NULL DEFAULT 'admin';"
 fi
-if [ -n "$has_tokens" ] && [ -z "$has_token_project" ]; then
-    echo "  + tokens.project_id"
-    SQL="$SQL ALTER TABLE tokens ADD COLUMN project_id INTEGER REFERENCES projects(id);"
+# token_projects: which projects each guest token may act on (many-to-many).
+if [ -z "$has_token_projects" ]; then
+    echo "  + token_projects table"
+    SQL="$SQL
+    CREATE TABLE token_projects (
+        token_id   INTEGER NOT NULL REFERENCES tokens(id),
+        project_id INTEGER NOT NULL REFERENCES projects(id),
+        PRIMARY KEY (token_id, project_id)
+    );"
+    # Carry over bindings from the intermediate single-project column, if this DB has it.
+    if [ -n "$has_token_project_col" ]; then
+        echo "  + migrating tokens.project_id bindings into token_projects"
+        SQL="$SQL
+        INSERT OR IGNORE INTO token_projects (token_id, project_id)
+        SELECT id, project_id FROM tokens WHERE project_id IS NOT NULL;"
+    fi
+fi
+
+# projects.git_url / git_branch: the origin a git deploy came from, so redeploy can re-clone
+# it without being handed the URL again. NULL means "not git-backed".
+if [ -z "$has_git_url" ]; then
+    echo "  + projects.git_url"
+    SQL="$SQL ALTER TABLE projects ADD COLUMN git_url VARCHAR;"
+fi
+if [ -z "$has_git_branch" ]; then
+    echo "  + projects.git_branch"
+    SQL="$SQL ALTER TABLE projects ADD COLUMN git_branch VARCHAR;"
 fi
 
 SQL="$SQL COMMIT;"

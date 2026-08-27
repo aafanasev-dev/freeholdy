@@ -1,7 +1,20 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Table, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.models.database import Base
+
+
+# A guest token may cover several projects, and a project may be covered by several guest
+# tokens — hence a plain association table rather than a column on either side. Deleting a
+# project drops its rows here (SQLAlchemy clears the secondary table) but leaves the tokens
+# themselves alive: a token that loses its last project still authenticates, it just has
+# nothing it may act on.
+token_projects = Table(
+    "token_projects",
+    Base.metadata,
+    Column("token_id", Integer, ForeignKey("tokens.id"), primary_key=True),
+    Column("project_id", Integer, ForeignKey("projects.id"), primary_key=True),
+)
 
 
 class Project(Base):
@@ -27,6 +40,12 @@ class Project(Base):
     # ── compose mode ──
     compose_path = Column(String, nullable=True)      # path to the uploaded docker-compose.yml
 
+    # ── git origin (set by a git deploy, cleared by a file upload) ──
+    # These record how the project was LAST deployed, which is what makes POST /{name}/redeploy
+    # honest: a NULL git_url means "not git-backed", never a stale repo from an earlier deploy.
+    git_url = Column(String, nullable=True)           # clone URL, verbatim (may embed credentials)
+    git_branch = Column(String, nullable=True)        # NULL = the repo's default branch
+
     # ── blue/green versioning (dockerfile mode only) ──
     backup_limit = Column(Integer, nullable=False, default=5)      # max archived versions kept
     version_counter = Column(Integer, nullable=False, default=0)   # last version number assigned
@@ -34,8 +53,9 @@ class Project(Base):
     services = relationship("ComposeService", back_populates="project", cascade="all, delete-orphan")
     versions = relationship("ProjectVersion", back_populates="project", cascade="all, delete-orphan")
     env_files = relationship("ProjectEnvFile", back_populates="project", cascade="all, delete-orphan")
-    # Guest tokens are scoped to exactly one project; deleting the project revokes them.
-    tokens = relationship("Token", back_populates="project", cascade="all, delete-orphan")
+    # Guest tokens scoped to this project. Deleting the project unbinds them (the association
+    # rows go) but never deletes the tokens — one may still cover other projects.
+    tokens = relationship("Token", secondary=token_projects, back_populates="projects")
 
     @property
     def effective_domain(self) -> str | None:
@@ -129,9 +149,11 @@ class Token(Base):
     `role` is the authorization level:
       * `admin` — full API access. The default, and what every token issued before roles
         existed is (migrate_db.sh backfills them via the column DEFAULT).
-      * `guest` — bound to the single project in `project_id`: redeploy, restart, env,
-        logs/status, versions and rollback for that project and nothing else. Meant to be
-        handed to a third party (CI/CD) that must not see the rest of the server.
+      * `guest` — scoped to the projects in `projects`: redeploy (from the project's own
+        stored git origin), restart, env, logs/status, versions and rollback for those
+        projects and nothing else. Meant to be handed to a third party (CI/CD) that must
+        not see the rest of the server. The set may be empty, in which case the token
+        authenticates but may do nothing.
 
     Enforcement lives in `app/auth.py` (HTTP) and `app/services/ws_session.py` (WebSockets)."""
     __tablename__ = "tokens"
@@ -142,6 +164,6 @@ class Token(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     active = Column(Boolean, default=True)
     role = Column(String, nullable=False, default="admin")   # admin | guest
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)  # guest only; NULL for admin
 
-    project = relationship("Project", back_populates="tokens")
+    # Guest scope. Always empty for an admin token, which needs no scoping.
+    projects = relationship("Project", secondary=token_projects, back_populates="tokens")

@@ -749,17 +749,53 @@ def get_git_key():
         console.print(instructions)
 
 
+@cli.command("redeploy")
+@click.argument("project")
+@click.option("--follow/--no-follow", default=True,
+              help="Stream the deploy log until it completes (default: on).")
+def redeploy(project: str, follow: bool):
+    """Rebuild PROJECT from the git repo it was deployed from.
+
+    Re-clones the URL and branch the server recorded at the last git deploy — you do not
+    pass them again — then cuts a fresh blue/green version, exactly like `deploy`. Only
+    works for projects deployed from git; a folder-deployed project has no origin to pull.
+
+    This is the deploy a **guest** token gets: it can rebuild its own project from its own
+    repo, but cannot repoint it or upload arbitrary files.
+
+    \b
+    Examples:
+      fhcli redeploy myapp
+      fhcli redeploy myapp --no-follow
+    """
+    console.print(f"Redeploying [cyan]{project}[/] from its git origin…")
+    data = _post(f"/projects/{project}/redeploy")
+
+    ws_path = data.get("ws_path")
+    if not follow or not ws_path:
+        console.print(f"[green]✓[/] {data.get('message', 'Redeploy launched')}")
+        console.print(f"  Watch with: [bold]fhcli status {project}[/]")
+        return
+
+    code = asyncio.run(_install_ws(ws_path))
+    if code == 0:
+        console.print(f"\n[green]✓[/] Redeployed '{project}'")
+    else:
+        console.print(f"\n[red]✗[/] Redeploy failed (exit {code})")
+        sys.exit(1)
+
+
 # ── tokens & roles ────────────────────────────────────────────────────────────
-# Tokens carry a role. `admin` is the default and can do everything; `guest` is bound to
-# one project and may only redeploy, restart, read logs/status, manage that project's env,
-# list versions and roll back — see the API's /tokens endpoints.
+# Tokens carry a role. `admin` is the default and can do everything; `guest` is scoped to
+# one or more projects and may only redeploy (from each project's stored git origin),
+# restart, read logs/status, manage env, list versions and roll back — see /tokens.
 
 def _print_token_table(tokens: list):
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
     table.add_column("ID",      justify="right", min_width=3)
     table.add_column("Name",    style="cyan", min_width=16)
     table.add_column("Role",    min_width=7)
-    table.add_column("Project", style="blue", min_width=16)
+    table.add_column("Projects", style="blue", min_width=18)
     table.add_column("Active",  min_width=6)
     table.add_column("Created", style="dim", min_width=19)
     for t in tokens:
@@ -768,7 +804,7 @@ def _print_token_table(tokens: list):
             str(t.get("id", "?")),
             t.get("name", "—"),
             role,
-            t.get("project") or "[dim]—[/]",
+            ", ".join(t.get("projects") or []) or "[dim]—[/]",
             "[green]yes[/]" if t.get("active") else "[dim]no[/]",
             (t.get("created_at") or "")[:19],
         )
@@ -782,8 +818,13 @@ def whoami():
     role = data.get("role", "?")
     console.print(f"Token [bold cyan]{data.get('name', '?')}[/] (id {data.get('id', '?')})")
     if role == "guest":
-        console.print(f"  Role:    [magenta]guest[/] — limited to project [bold]{data.get('project')}[/]")
-        console.print("  Allowed: [dim]deploy, restart, logs, status, abort, env, versions, rollback[/]")
+        projects = data.get("projects") or []
+        console.print(f"  Role:    [magenta]guest[/] — limited to {len(projects)} project(s)")
+        for name in projects:
+            console.print(f"           [bold]{name}[/]")
+        if not projects:
+            console.print("           [dim](none — this token cannot act on anything)[/]")
+        console.print("  Allowed: [dim]redeploy, restart, logs, status, abort, env, versions, rollback[/]")
     else:
         console.print("  Role:    [green]admin[/] — full API access")
 
@@ -802,32 +843,35 @@ def list_tokens():
 @click.argument("name")
 @click.option("--role", type=click.Choice(["admin", "guest"]), default="admin",
               show_default=True, help="admin = full access; guest = one project only.")
-@click.option("--project", "-P", default=None,
-              help="Project a guest token is bound to (required with --role guest).")
-def token_create(name: str, role: str, project: str):
+@click.option("--project", "-P", multiple=True,
+              help="Project a guest token may act on (required with --role guest; repeat "
+                   "for several).")
+def token_create(name: str, role: str, project: tuple):
     """Mint an API token called NAME (admin only). The token is shown ONCE.
 
     \b
     Examples:
       fhcli token-create my-laptop
       fhcli token-create gitlab-ci --role guest --project myapp
+      fhcli token-create ci --role guest -P frontend -P backend
 
-    A guest token is meant to be handed to a third party (a CI/CD runner): it can redeploy,
-    restart, read logs, manage the env and roll back its own project — and nothing else.
+    A guest token is meant to be handed to a third party (a CI/CD runner): it can redeploy
+    its projects from their own git origins, restart them, read their logs, manage their env
+    and roll them back — and nothing else, on no other project.
     """
-    if role == "guest" and not project:
-        console.print("[bold red]Error:[/] a guest token needs [bold]--project NAME[/].")
+    projects = list(project)
+    if role == "guest" and not projects:
+        console.print("[bold red]Error:[/] a guest token needs at least one [bold]--project NAME[/].")
         sys.exit(1)
-    if role == "admin" and project:
-        console.print("[bold red]Error:[/] an admin token cannot be bound to a project.")
+    if role == "admin" and projects:
+        console.print("[bold red]Error:[/] an admin token cannot be scoped to projects.")
         sys.exit(1)
 
-    body = {"name": name, "role": role}
-    if project:
-        body["project"] = project
+    body = {"name": name, "role": role, "projects": projects}
     data = _post("/tokens", json=body)
 
-    scope = f"guest token for [bold]{data.get('project')}[/]" if role == "guest" else "admin token"
+    scope = (f"guest token for [bold]{', '.join(data.get('projects') or [])}[/]"
+             if role == "guest" else "admin token")
     console.print(f"[green]✓[/] Created {scope} '[bold cyan]{name}[/]' (id {data.get('id')})\n")
     console.print(Panel(data.get("token", ""), title="[bold]token — shown only once[/]",
                         border_style="yellow"))
@@ -836,6 +880,28 @@ def token_create(name: str, role: str, project: str):
         console.print(f"  TOKEN={data.get('token')}")
         console.print(f"  BASE_DOMAIN={BASE_DOMAIN or '<your-domain>'}")
     console.print("\n[yellow]⚠[/]  Save it now — it is stored hashed and cannot be shown again.")
+
+
+@cli.command("token-projects")
+@click.argument("token_id", type=int)
+@click.option("--project", "-P", multiple=True,
+              help="Project the token may act on. Repeat for several; pass none to clear "
+                   "the scope entirely.")
+def token_projects(token_id: int, project: tuple):
+    """Replace which projects guest token TOKEN_ID may act on (admin only).
+
+    The token itself is unchanged, so a CI runner keeps the secret it already has — only
+    what it reaches changes.
+
+    \b
+    Examples:
+      fhcli token-projects 4 -P frontend -P backend
+      fhcli token-projects 4              # scope it to nothing
+    """
+    data = _put(f"/tokens/{token_id}/projects", json={"projects": list(project)})
+    names = data.get("projects") or []
+    console.print(f"[green]✓[/] Token '[bold cyan]{data.get('name')}[/]' (id {data.get('id')}) now covers "
+                  + (f"[bold]{', '.join(names)}[/]" if names else "[dim]nothing[/]"))
 
 
 @cli.command("token-revoke")

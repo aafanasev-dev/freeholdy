@@ -27,7 +27,7 @@ from app.auth import hash_token, ROLE_ADMIN
 def authorize(raw_token: str, project: Optional[str]) -> bool:
     """True if `raw_token` is an active token allowed on this socket.
 
-    `project is None` → admin only; otherwise admin, or the guest bound to that project.
+    `project is None` → admin only; otherwise admin, or a guest scoped to that project.
     DEBUG bypasses auth entirely, as it does for HTTP.
     """
     if settings.DEBUG:
@@ -47,7 +47,7 @@ def authorize(raw_token: str, project: Optional[str]) -> bool:
             return True
         if project is None:
             return False
-        return token.project is not None and token.project.name == project
+        return any(p.name == project for p in token.projects)
     finally:
         db.close()
 
@@ -71,7 +71,7 @@ async def authenticate(
     """Read and validate the mandatory first auth frame on an already-accepted socket.
 
     `project=None` (the default) admits admin tokens only; pass a project name to also
-    admit the guest token bound to it.
+    admit guest tokens scoped to it.
 
     Returns True on success; on failure it has already sent an error frame + closed
     (4401 unknown/inactive token, 4403 valid token without permission), so the caller
@@ -97,7 +97,7 @@ async def authenticate(
         await reject(
             websocket, 4403,
             "this token is not permitted here"
-            + (f" — it is not bound to project '{project}'" if project else " — admin only"),
+            + (f" — it is not scoped to project '{project}'" if project else " — admin only"),
         )
         return False
     await reject(websocket, 4401, "invalid or inactive token")
