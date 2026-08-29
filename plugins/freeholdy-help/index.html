@@ -347,7 +347,8 @@
     <a href="#api">API</a>
     <a href="#api-endpoints" class="sub">Endpoints</a>
     <a href="#api-streaming" class="sub">Streaming logs</a>
-    <a href="#api-tokens" class="sub">Tokens</a>
+    <a href="#api-tokens" class="sub">Tokens &amp; roles</a>
+    <a href="#api-guest-tokens" class="sub">Guest tokens (CI/CD)</a>
     <a href="#cli">CLI reference</a>
     <a href="#ai-integration">AI integration</a>
   </nav>
@@ -1035,15 +1036,230 @@ curl "$BASE/projects/myapp/status" -H "Authorization: Bearer $TOKEN"</code></pre
           server, and reconnecting re-streams it.
         </p>
 
-        <h2 id="api-tokens">Tokens</h2>
-        <p>Tokens are minted on the server, from the repo root with the venv active:</p>
+        <h2 id="api-tokens">Tokens &amp; roles</h2>
+        <p>
+          Every token carries a <strong>role</strong>, chosen when it is issued:
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Role</th><th>What it can do</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="path"><code>admin</code></td>
+                <td>Everything: every project, every endpoint, plus minting and revoking
+                    tokens. The default, and what every token issued before roles existed is.</td>
+              </tr>
+              <tr>
+                <td class="path"><code>guest</code></td>
+                <td>Scoped to <strong>one or more</strong> projects: redeploy them from their
+                    own git origins, restart them, read their logs, edit their environment,
+                    list their versions and roll them back. Nothing else — and it cannot even
+                    see that your other projects exist.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>Mint them from the web UI's <strong>Tokens</strong> panel, from the CLI:</p>
+        <pre><code>fhcli tokens                                          # list
+fhcli token-create my-laptop                          # admin
+fhcli token-create gitlab-ci --role guest --project myapp
+fhcli token-create ci --role guest -P frontend -P backend   # several projects
+fhcli token-projects 3 -P frontend                    # re-scope, same secret
+fhcli token-revoke 3
+fhcli whoami                                          # what am I allowed to do?</code></pre>
+        <p>…or on the server itself, from the repo root with the venv active:</p>
         <pre><code>python scripts/generate_token.py generate --name "ci"
+python scripts/generate_token.py generate --name "gitlab-ci" --role guest --project myapp
 python scripts/generate_token.py list
 python scripts/generate_token.py revoke --id 3</code></pre>
         <div class="note">
           Tokens are stored as <strong>SHA-256 hashes</strong> — the plaintext is printed
           <strong>once</strong>, at generation, and there is no recovery path. Lost a token?
           Revoke it and mint a new one. (Your first token is the one the installer printed.)
+        </div>
+
+        <h2 id="api-guest-tokens">Guest tokens (CI/CD)</h2>
+        <p class="lead">
+          A guest token is what you hand to someone who is not you — a GitLab or GitHub
+          runner, a contractor, a client — so they can ship <em>their</em> projects without
+          holding the keys to your whole server.
+        </p>
+
+        <p>The shape of it:</p>
+        <ol>
+          <li>You deploy the project <strong>from git</strong> once as an admin. freeholdy
+              records the repository URL and branch on the project.</li>
+          <li>You mint a guest token scoped to that project (or several).</li>
+          <li>The third party calls <strong>redeploy</strong>. freeholdy re-clones the origin
+              it already recorded and cuts a new version — the runner never supplies a URL,
+              and cannot change one.</li>
+        </ol>
+
+        <pre><code># 1 — you, as admin: the project needs an origin to re-clone
+fhcli deploy myapp https://github.com/me/myapp.git
+
+# 2 — mint the token to hand over (repeat -P for several projects)
+fhcli token-create gitlab-ci --role guest --project myapp
+
+# 3 — what the third party runs, from then on
+fhcli redeploy myapp</code></pre>
+
+        <div class="note">
+          <strong>Redeploy, not deploy.</strong> Uploading files and
+          <code>POST /git/add</code> both name a <em>source</em>, so both are admin-only. A
+          guest can rebuild a project from the repo it already points at — it cannot repoint
+          it at a different repo, and cannot push it arbitrary files. That is the difference
+          between "let CI ship this app" and "let CI put anything on my server".
+        </div>
+
+        <p>What the holder of that token can and cannot do:</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Allowed, on the projects in its scope</th><th>Refused (403) everywhere</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <code>redeploy</code> (re-clone its own origin) · watch the build log ·
+                  <code>restart</code> · <code>logs</code> · <code>status</code> ·
+                  <code>abort</code> · <code>versions</code> · <code>rollback</code> ·
+                  read and write the <code>.env</code>
+                </td>
+                <td>
+                  every project outside its scope (not even listed) · uploading files ·
+                  <code>git/add</code> (pointing a project at a repo) · creating or deleting
+                  projects · <code>stop</code> · <code>exec</code> (no shell) ·
+                  <code>ssl</code> · <code>domain</code> · the backup limit · the plugin
+                  catalog and installs · the server's git key · minting or revoking tokens
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>
+          <strong>The redeploy script.</strong> freeholdy ships
+          <code>ci/redeploy.sh</code> for exactly this job — copy it out of the
+          <a href="https://github.com/aafanasev-dev/freeholdy" target="_blank" rel="noreferrer">freeholdy
+          repository</a> into the repository the third party actually builds from. It needs
+          nothing but <code>sh</code> and <code>curl</code>, so it runs in whatever image the
+          pipeline already uses: no freeholdy checkout, no Python, no <code>fhcli</code>.
+        </p>
+        <p>It takes its settings either from the environment, or from a dotenv file passed as
+           its one positional argument:</p>
+        <pre><code>./redeploy.sh                 # settings from the environment
+./redeploy.sh deploy.env      # settings from that file instead</code></pre>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Setting</th><th>What it is</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="path"><code>FH_TOKEN</code></td><td>The API token. A guest token scoped to the project is all this needs, and is what you should use.</td></tr>
+              <tr><td class="path"><code>FH_PROJECT_NAME</code></td><td>The project to redeploy.</td></tr>
+              <tr><td class="path"><code>FH_BASE_DOMAIN</code></td><td>Your server's base domain — the API is reached at <code>https://api.&lt;domain&gt;</code>.</td></tr>
+              <tr><td class="path"><code>FH_API_URL</code></td><td><em>Optional.</em> A full API base URL, overriding the line above. Set it only if your API is not at <code>api.&lt;domain&gt;</code>; when it is set, <code>FH_BASE_DOMAIN</code> is not needed.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>In GitLab CI, store the token as a <strong>masked</strong> variable and redeploy on
+           every push — the whole job is one line:</p>
+        <pre><code>deploy:
+  script:
+    - ./redeploy.sh
+  variables:
+    FH_PROJECT_NAME: myapp
+    FH_BASE_DOMAIN: your-domain.com
+  # FH_TOKEN comes from a masked CI variable, not from this file</code></pre>
+        <p>
+          The runner must push to the repository <em>before</em> it calls this: redeploy pulls
+          whatever the branch points at right now, so a job that redeploys before it pushes
+          will faithfully rebuild the previous commit.
+        </p>
+
+        <p>
+          <strong>Checking it without deploying.</strong> <code>--dry-run</code> resolves and
+          validates the settings exactly as a real run does — a missing file or a missing
+          setting still fails — then prints the equivalent <code>curl</code> command instead of
+          sending anything:
+        </p>
+        <pre><code>$ ./redeploy.sh deploy.env --dry-run
+redeploy: would POST https://api.your-domain.com/projects/myapp/redeploy
+redeploy: $FH_TOKEN is left unexpanded — export it first, or re-run with --show-token
+curl -sS -X POST "https://api.your-domain.com/projects/myapp/redeploy" \
+  -H "Authorization: Bearer $FH_TOKEN" \
+  -H "Accept: application/json"</code></pre>
+        <p>
+          The command goes to <strong>stdout</strong> and every other line to
+          <strong>stderr</strong>, so <code>./redeploy.sh --dry-run 2&gt;/dev/null</code> is
+          just the command, and <code>eval "$(./redeploy.sh --dry-run)"</code> runs it. The
+          token is left as <code>$FH_TOKEN</code>, which means the printed command is safe to
+          paste into a ticket — and that it only runs if you have that variable exported. Add
+          <code>--show-token</code> to embed the real value instead, at which point the output
+          <em>is</em> a live credential:
+        </p>
+        <pre><code>$ ./redeploy.sh deploy.env --dry-run --show-token
+redeploy: the command below contains a live token — treat it as a secret
+curl -sS -X POST "https://api.your-domain.com/projects/myapp/redeploy" \
+  -H 'Authorization: Bearer &lt;your token&gt;' \
+  -H "Accept: application/json"</code></pre>
+
+        <p>It exits with:</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Code</th><th>Meaning</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="path"><code>0</code></td><td>The server accepted the redeploy.</td></tr>
+              <tr><td class="path"><code>1</code></td><td>A configuration problem — missing file, missing setting, bad argument. Nothing was sent.</td></tr>
+              <tr><td class="path"><code>2</code></td><td>The API call failed. The server's own message is printed, so a 403 tells you which projects the token is limited to and a 400 tells you the project was never deployed from git.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note">
+          The script is <strong>fire-and-forget</strong>: it returns as soon as the server
+          accepts the call, and the build then runs in the background. A build that fails a
+          minute later will <em>not</em> fail the CI job. If your pipeline needs to gate on the
+          result, poll <code>GET /projects/&lt;name&gt;/status</code> until its
+          <code>status</code> is no longer <code>running</code>.
+        </div>
+        <p>
+          None of this is required, mind — the script is a convenience wrapper. The same
+          redeploy is one call, if you would rather not vendor a file:
+        </p>
+        <pre><code>curl -fsS -X POST "https://api.$BASE_DOMAIN/projects/myapp/redeploy" \
+  -H "Authorization: Bearer $FREEHOLDY_TOKEN"</code></pre>
+
+        <p>
+          <strong>Several projects, one token.</strong> A guest token can cover any number of
+          projects — useful when one repo group or one team ships several apps:
+        </p>
+        <pre><code>fhcli token-create ci --role guest -P frontend -P backend -P worker
+fhcli token-projects 4 -P frontend -P backend    # narrow it later
+fhcli token-projects 4                           # scope it to nothing</code></pre>
+        <p>
+          Re-scoping does not change the secret, so the third party's CI variable keeps
+          working — only what it reaches changes. Deleting a project unbinds it from every
+          token that covered it; those tokens keep working for whatever else they cover, and
+          a token left with nothing can still authenticate but can act on no project.
+        </p>
+
+        <div class="note">
+          A guest token can <strong>read the environment variables</strong> of the projects in
+          its scope, values and all — that is deliberate, since CI often needs them. Treat it
+          as a secret of the same weight as those projects' own credentials. It just cannot
+          reach anything else.
+        </div>
+        <div class="note">
+          The web UI works with a guest token too — the same
+          <code>https://ui.&lt;your-domain&gt;/token/&lt;TOKEN&gt;</code> link opens the panel
+          showing only that token's projects, with only the actions it is allowed.
         </div>
       </section>
 
@@ -1065,7 +1281,8 @@ python scripts/generate_token.py revoke --id 3</code></pre>
               <tr><td class="path"><code>status PROJECT</code></td><td>Container state plus the log of the last freeholdy operation.</td></tr>
 
               <tr class="group"><td colspan="2">Deploying</td></tr>
-              <tr><td class="path"><code>deploy NAME SOURCE</code></td><td>Deploy a folder or a git URL. Creates the project if new, redeploys if not. <code>--env</code>, <code>--branch</code>, <code>--dest</code>.</td></tr>
+              <tr><td class="path"><code>deploy NAME SOURCE</code></td><td>Deploy a folder or a git URL. Creates the project if new, redeploys if not. <code>--env</code>, <code>--branch</code>, <code>--dest</code>. Admin only.</td></tr>
+              <tr><td class="path"><code>redeploy PROJECT</code></td><td>Rebuild from the git origin the project already records — no source needed. The deploy a guest token gets.</td></tr>
               <tr><td class="path"><code>plugins</code></td><td>List the plugin catalog.</td></tr>
               <tr><td class="path"><code>plugin-add PLUGIN PROJECT</code></td><td>Install a plugin as a project; interactive plugins prompt right here.</td></tr>
               <tr><td class="path"><code>get-git-key</code></td><td>Print the server's SSH public key, for cloning private repos.</td></tr>
@@ -1088,6 +1305,13 @@ python scripts/generate_token.py revoke --id 3</code></pre>
               <tr><td class="path"><code>versions PROJECT</code></td><td>List the versions and their states.</td></tr>
               <tr><td class="path"><code>rollback PROJECT N</code></td><td>Make version N live again.</td></tr>
               <tr><td class="path"><code>set-backup-limit PROJECT N</code></td><td>Cap the archived versions and prune now.</td></tr>
+
+              <tr class="group"><td colspan="2">Tokens</td></tr>
+              <tr><td class="path"><code>whoami</code></td><td>What the configured token is allowed to do (role, and the project a guest is bound to).</td></tr>
+              <tr><td class="path"><code>tokens</code></td><td>List every API token. Admin only.</td></tr>
+              <tr><td class="path"><code>token-create NAME</code></td><td>Mint a token, shown once. <code>--role guest -P a -P b</code> scopes it to those projects.</td></tr>
+              <tr><td class="path"><code>token-projects ID</code></td><td>Replace which projects a guest token may act on. The token itself is unchanged.</td></tr>
+              <tr><td class="path"><code>token-revoke ID</code></td><td>Revoke a token immediately. Admin only.</td></tr>
 
               <tr class="group"><td colspan="2">Domains &amp; teardown</td></tr>
               <tr><td class="path"><code>ssl PROJECT</code></td><td>Re-run certbot for the project's domains.</td></tr>

@@ -39,8 +39,27 @@ Things that require reading the whole file to understand:
   `unwrap` throws `Error(detail)` on non-2xx, so all callers just `try/catch` and surface
   `e.message`.
 - **Auth is a token in `localStorage["freeholdy_token"]`.** `App` gates on its presence; `LoginScreen`
-  validates by calling `/health` before storing. Logout clears the key. There is no refresh/expiry
-  handling — a rejected request just shows an error, it does not force re-login.
+  validates by calling `/tokens/me` before storing (**not** `/health` — that endpoint needs no auth,
+  so it would accept any string). Logout clears the key. There is no refresh/expiry handling — a
+  rejected request just shows an error, it does not force re-login.
+- **The token's role gates the UI, and it is prop-drilled.** `Dashboard` fetches `GET /tokens/me`
+  once into `me` (`{role, projects[]}`), derives `const role = me?.role || "admin"` (an older
+  server with no `/tokens/me` falls back to admin, i.e. the pre-roles UI), and passes `role` down
+  to `ProjectCard` → `ContainerRow`/`ServiceRow`/`VersionsModal`. Each computes
+  `const isAdmin = role !== "guest"` and simply omits the buttons a guest's API calls would 403
+  on — Deploy/Plugins/Tokens/Git key in the rail, remove/compose-down/upload on the card,
+  stop/exec/ssl/domain on the rows, the backup-limit control in `VersionsModal`. **Hiding is
+  presentation, not enforcement**: the server is the authority (`app/auth.py`), so a new
+  admin-only control needs the same gate here *and* the right dependency there.
+- **`redeploy` vs `deploy` on a project card.** The `redeploy` button shows whenever
+  `project.git_url` is set — for *both* roles — and POSTs `/projects/{name}/redeploy`, handing
+  the returned `ws_path` to `onStream` (`Dashboard.handleDeployStream` → `InstallPane`), exactly
+  like a rollback. The upload/`deploy` button is admin-only, because choosing a source is. A
+  card also shows its git origin next to the created date when there is one.
+- **`TokensPanel`** (admin only) mints, re-scopes and revokes tokens. A guest token's scope is a
+  checkbox list (`ProjectPicker`, shared by the create form and the per-token edit modal) that
+  PUTs `/tokens/{id}/projects`; a minted token's plaintext is shown once, in a `Modal`, because
+  the server only stores its hash.
 - **All styling is inline.** Colors come from the `C` object; the only class names are the
   handful the one global `<style>` block in `App` needs — the responsive nav-rail media query
   (`.fh-rail`, `.fh-main`, `.fh-burger`), the `.fh-nav` / `.fh-active` nav-item hover rule

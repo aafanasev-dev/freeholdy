@@ -4,7 +4,8 @@ A deployable **user guide for freeholdy itself** — a single **static HTML page
 Python's built-in `http.server`, with a minimal header and a left-hand navigation menu.
 It covers: what freeholdy is, installation, deploying apps (folder / git / plugins), the
 plugin catalog, versions & rollback, environment variables, container logs & shell access,
-the REST API, the `fhcli` command reference, and the `fhdeploy` Claude Code AI integration.
+the REST API, token roles (including guest tokens for CI/CD), the `fhcli` command
+reference, and the `fhdeploy` Claude Code AI integration.
 No build step, no dependencies, nothing to configure — it also doubles as a smoke test that
 provisioning, nginx, and SSL all work.
 

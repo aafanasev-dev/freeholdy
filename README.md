@@ -311,6 +311,50 @@ python scripts/generate_token.py list
 python scripts/generate_token.py revoke --id 2
 ```
 
+### Token roles: `admin` and `guest`
+
+Every token has a role. `admin` (the default) can do everything. **`guest` is scoped to a
+set of projects** — for those it can redeploy, restart, read logs, manage the environment,
+list versions and roll back, and nothing else: no other project is even visible to it, and
+it cannot create or delete projects, open a shell, issue certs, install plugins or manage
+tokens.
+
+Crucially, a guest **redeploys rather than deploys**: `POST /projects/{name}/redeploy`
+re-clones the git URL and branch the server recorded for that project. Uploading files and
+`POST /git/add` (which name a source) stay admin-only, so a guest can rebuild a project from
+its own repo but cannot repoint it at another one or push it arbitrary files.
+
+That is what you hand to a third party — a GitLab/GitHub CI runner, a contractor — so they
+can ship their project without holding the keys to the whole server:
+
+```bash
+fhcli deploy myapp https://github.com/me/myapp.git       # you, as admin, first
+fhcli token-create gitlab-ci --role guest --project myapp   # the token you give away
+fhcli token-create ci --role guest -P frontend -P backend   # …or several projects
+fhcli token-projects 4 -P frontend                       # re-scope it later, same secret
+fhcli tokens                                             # list · fhcli token-revoke ID
+fhcli whoami                                             # what am I allowed to do?
+```
+
+The runner then only ever needs:
+
+```bash
+fhcli redeploy myapp     # or: curl -X POST -H "Authorization: Bearer $TOKEN" \
+                         #       https://api.<your-domain>/projects/myapp/redeploy
+```
+
+The same is available from the web UI's **Tokens** panel, from the API
+(`POST /tokens`, admin only), and on the server:
+
+```bash
+python scripts/generate_token.py generate --name "gitlab-ci" --role guest --project myapp
+```
+
+Two things worth knowing: a guest token can read its projects' environment **values**, so
+treat it as a secret of the same weight as those projects' credentials; and deleting a
+project unbinds it from every token that covered it — the token itself keeps working for
+whatever else it covers.
+
 ---
 
 ## Running freeholdy

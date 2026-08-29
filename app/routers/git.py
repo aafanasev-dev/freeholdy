@@ -1,6 +1,3 @@
-import os
-import shutil
-
 from fastapi import APIRouter, Depends, HTTPException, WebSocket
 from sqlalchemy.orm import Session
 
@@ -13,13 +10,12 @@ from app.models.schemas import (
     DockerJobStatusResponse,
     ProjectType,
 )
-from app.auth import require_auth
-from app.services import docker_service, compose_service, git_service
+from app.auth import require_admin
+from app.services import docker_service, git_service
 from app.routers.projects import (
     project_response,
-    _autoprovision,
     apply_deploy_env,
-    launch_deploy,
+    deploy_from_git,
     deploy_stream_session,
 )
 
@@ -40,7 +36,7 @@ def _deploy_ws_path(project_name: str) -> str:
 def add_git_project(
     request: GitAddRequest,
     db: Session = Depends(get_db),
-    _=Depends(require_auth),
+    _=Depends(require_admin),
 ):
     """Deploy a project from a git clone URL. Clones the repo into the project dir, scans
     the root for a Dockerfile / docker-compose.yml (compose wins) and wires nginx/SSL/ports
@@ -48,7 +44,12 @@ def add_git_project(
     `ws_path` — connect to `WS /git/deploy/{name}` to stream the build log live.
 
     Idempotent: a new name creates the project; an existing name re-clones + redeploys it
-    (a fresh blue/green version), so `deploy NAME <git-url>` behaves like a re-upload."""
+    (a fresh blue/green version), so `deploy NAME <git-url>` behaves like a re-upload.
+
+    **Admin only** — this call names the repository, so it is how a project's origin is set
+    or changed. A guest token redeploys from the origin already recorded, via
+    `POST /projects/{name}/redeploy`.
+    """
     name = request.name
     existing = db.query(Project).filter(Project.name == name).first()
     if existing:
@@ -60,49 +61,13 @@ def add_git_project(
 
     # Store any env supplied with the deploy before provisioning, so the first container
     # start already has it (provision_compose bakes env_file: entries into the override).
-    # Flush only — the provisioning commit persists it on success, and the rollbacks below
-    # discard it along with the project row on failure.
+    # Flush only — the provisioning commit persists it on success, and deploy_from_git's
+    # rollbacks discard it along with the project row on failure.
     apply_deploy_env(db, project, request.env)
 
-    project_dir = os.path.abspath(compose_service.project_dir(name))
-    # git clone needs a clean target; clear the existing tree (a prior deploy or a stale dir
-    # from a failed attempt) so the clone lands fresh.
-    if os.path.isdir(project_dir):
-        shutil.rmtree(project_dir, ignore_errors=True)
-
-    # 1. Clone the repo into the project dir.
-    ok, message = git_service.clone(request.git_url, project_dir, request.branch)
-    if not ok:
-        db.rollback()
-        shutil.rmtree(project_dir, ignore_errors=True)
-        detail = f"git clone failed: {message}"
-        if git_service.is_auth_failure(message):
-            detail += (
-                " — this looks like an SSH auth problem. Run `fhcli get-git-key` (or click "
-                "'git key' in the web UI) to get the server's public key, add it to GitHub, "
-                "then retry."
-            )
-        raise HTTPException(status_code=400, detail=detail)
-
-    # 2. Provision nginx/SSL/ports (the same path the upload endpoint runs). On any
-    # failure, roll back and drop the cloned tree so a retry starts clean.
-    try:
-        provisioned, detected_mode = _autoprovision(db, project, name, project_dir)
-    except HTTPException:
-        db.rollback()
-        shutil.rmtree(project_dir, ignore_errors=True)
-        raise
-    if not provisioned:
-        db.rollback()
-        shutil.rmtree(project_dir, ignore_errors=True)
-        raise HTTPException(
-            status_code=400,
-            detail="no Dockerfile or docker-compose.yml found in the repository root",
-        )
-    db.refresh(project)
-
-    # 3. Launch the async build + run job (no install.sh) — same dispatch the upload flow uses.
-    job_key = launch_deploy(project)
+    # Clone → record the origin → provision → launch the build (shared with redeploy).
+    job_key, detected_mode = deploy_from_git(db, project, request.git_url, request.branch)
+    db.commit()
 
     verb = "Redeploying" if existing else "Cloned and provisioning"
     job = docker_service.get_job(job_key)
@@ -129,7 +94,7 @@ def add_git_project(
     response_model=GitKeyResponse,
     summary="Get the server's GitHub SSH public key (creates one on first use)",
 )
-def get_git_key(_=Depends(require_auth)):
+def get_git_key(_=Depends(require_admin)):
     """Return the server's GitHub SSH public key so it can be added to GitHub for cloning
     private repos over SSH. If no `Host github.com` key exists yet, an ed25519 keypair is
     generated and a matching ~/.ssh/config block is written; subsequent calls return the

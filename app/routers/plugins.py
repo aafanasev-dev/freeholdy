@@ -14,7 +14,7 @@ from app.models.schemas import (
     PluginAddResponse,
     DockerJobStatusResponse,
 )
-from app.auth import require_auth
+from app.auth import require_admin
 from app.config import settings
 from app.services import (
     docker_service,
@@ -33,7 +33,7 @@ router = APIRouter()
 
 
 @router.get("/", response_model=List[PluginResponse])
-def list_plugins(_=Depends(require_auth)):
+def list_plugins(_=Depends(require_admin)):
     return [
         {
             "name": p["name"],
@@ -90,7 +90,7 @@ def add_plugin(
     plugin_name: str,
     request: PluginAddRequest,
     db: Session = Depends(get_db),
-    _=Depends(require_auth),
+    _=Depends(require_admin),
 ):
     plugin = plugin_service.get_plugin(plugin_name)
     if plugin is None:

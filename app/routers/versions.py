@@ -25,7 +25,7 @@ from app.models.schemas import (
     RollbackResponse,
     DockerJobStatusResponse,
 )
-from app.auth import require_auth
+from app.auth import require_admin, require_project_access
 from app.services import docker_service, deploy_service
 
 router = APIRouter()
@@ -94,7 +94,7 @@ def _versions_response(project: Project) -> VersionsResponse:
 
 @router.get("/{project_name}/versions", response_model=VersionsResponse,
             summary="List the project's blue/green versions (active / inactive / archived)")
-def list_versions(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
+def list_versions(project_name: str, db: Session = Depends(get_db), _=Depends(require_project_access)):
     project = _get_versioned_project(project_name, db)
     return _versions_response(project)
 
@@ -102,7 +102,7 @@ def list_versions(project_name: str, db: Session = Depends(get_db), _=Depends(re
 @router.put("/{project_name}/backup-limit", response_model=VersionsResponse,
             summary="Set how many archived versions to keep (oldest pruned immediately)")
 def set_backup_limit(project_name: str, request: SetBackupLimitRequest,
-                     db: Session = Depends(get_db), _=Depends(require_auth)):
+                     db: Session = Depends(get_db), _=Depends(require_admin)):
     project = _get_versioned_project(project_name, db)
     project.backup_limit = request.limit
     db.commit()
@@ -115,7 +115,7 @@ def set_backup_limit(project_name: str, request: SetBackupLimitRequest,
 @router.post("/{project_name}/rollback", response_model=RollbackResponse,
              summary="Roll back to an inactive or archived version — stream WS /deploy")
 def rollback(project_name: str, request: RollbackRequest,
-             db: Session = Depends(get_db), _=Depends(require_auth)):
+             db: Session = Depends(get_db), _=Depends(require_project_access)):
     """Make an earlier version active again. Dockerfile: its container is brought up (docker
     start for an inactive version, docker run from the retained image for an archived one)
     and nginx switches to it. Compose: the current stack is downed, the version's file

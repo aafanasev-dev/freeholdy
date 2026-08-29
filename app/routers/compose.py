@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.models.database import get_db, SessionLocal
 from app.models.orm import Project, ComposeService
 from app.models.schemas import DockerJobStatusResponse, SetDomainRequest, ProjectResponse
-from app.auth import require_auth
+from app.auth import require_admin, require_project_access
 from app.config import settings
 from app.services import docker_service, nginx_service, compose_service, env_service, interactive_service, ws_session
 from app.routers.projects import _next_port, assert_domain_available, project_response
@@ -205,7 +205,7 @@ def set_service_domain(
     service_name: str,
     request: SetDomainRequest,
     db: Session = Depends(get_db),
-    _=Depends(require_auth),
+    _=Depends(require_admin),
 ):
     """Point one exposed service at a custom domain instead of its
     `{service}.{project}.{domain}` subdomain. Pass `custom_domain: null` (or empty) to
@@ -292,7 +292,7 @@ def _require_compose_files(project_name: str):
     response_model=DockerJobStatusResponse,
     summary="docker compose down — returns immediately, poll /compose/status",
 )
-def compose_down(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
+def compose_down(project_name: str, db: Session = Depends(get_db), _=Depends(require_admin)):
     project = _get_compose_project(project_name, db)
     _require_compose_files(project_name)
     # Pass the env file so ${VAR} interpolation resolves the same way it did on `up`.
@@ -306,7 +306,7 @@ def compose_down(project_name: str, db: Session = Depends(get_db), _=Depends(req
     response_model=DockerJobStatusResponse,
     summary="Status + logs of the last docker compose operation",
 )
-def compose_status(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
+def compose_status(project_name: str, db: Session = Depends(get_db), _=Depends(require_project_access)):
     _get_compose_project(project_name, db)
     key = _job_key(project_name)
     job = docker_service.get_job(key)
@@ -326,7 +326,7 @@ def compose_status(project_name: str, db: Session = Depends(get_db), _=Depends(r
     response_model=DockerJobStatusResponse,
     summary="Abort the currently running docker compose operation",
 )
-def compose_abort(project_name: str, db: Session = Depends(get_db), _=Depends(require_auth)):
+def compose_abort(project_name: str, db: Session = Depends(get_db), _=Depends(require_project_access)):
     _get_compose_project(project_name, db)
     key = _job_key(project_name)
     success, message = docker_service.abort_job(key)
