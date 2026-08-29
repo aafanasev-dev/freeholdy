@@ -1141,19 +1141,100 @@ fhcli redeploy myapp</code></pre>
           </table>
         </div>
 
-        <p>In GitLab CI, store the token as a masked variable and redeploy on every push —
-           the whole job is one call:</p>
+        <p>
+          <strong>The redeploy script.</strong> freeholdy ships
+          <code>ci/redeploy.sh</code> for exactly this job — copy it out of the
+          <a href="https://github.com/aafanasev-dev/freeholdy" target="_blank" rel="noreferrer">freeholdy
+          repository</a> into the repository the third party actually builds from. It needs
+          nothing but <code>sh</code> and <code>curl</code>, so it runs in whatever image the
+          pipeline already uses: no freeholdy checkout, no Python, no <code>fhcli</code>.
+        </p>
+        <p>It takes its settings either from the environment, or from a dotenv file passed as
+           its one positional argument:</p>
+        <pre><code>./redeploy.sh                 # settings from the environment
+./redeploy.sh deploy.env      # settings from that file instead</code></pre>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Setting</th><th>What it is</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="path"><code>FH_TOKEN</code></td><td>The API token. A guest token scoped to the project is all this needs, and is what you should use.</td></tr>
+              <tr><td class="path"><code>FH_PROJECT_NAME</code></td><td>The project to redeploy.</td></tr>
+              <tr><td class="path"><code>FH_BASE_DOMAIN</code></td><td>Your server's base domain — the API is reached at <code>https://api.&lt;domain&gt;</code>.</td></tr>
+              <tr><td class="path"><code>FH_API_URL</code></td><td><em>Optional.</em> A full API base URL, overriding the line above. Set it only if your API is not at <code>api.&lt;domain&gt;</code>; when it is set, <code>FH_BASE_DOMAIN</code> is not needed.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>In GitLab CI, store the token as a <strong>masked</strong> variable and redeploy on
+           every push — the whole job is one line:</p>
         <pre><code>deploy:
   script:
-    - |
-      curl -fsS -X POST "https://api.$BASE_DOMAIN/projects/myapp/redeploy" \
-        -H "Authorization: Bearer $FREEHOLDY_TOKEN"</code></pre>
+    - ./redeploy.sh
+  variables:
+    FH_PROJECT_NAME: myapp
+    FH_BASE_DOMAIN: your-domain.com
+  # FH_TOKEN comes from a masked CI variable, not from this file</code></pre>
         <p>
-          …or, if the runner has <code>fhcli</code>, set <code>TOKEN</code> and
-          <code>BASE_DOMAIN</code> from CI variables and run <code>fhcli redeploy myapp</code>.
-          Note the runner must push to the repo <em>first</em>: redeploy pulls whatever the
-          branch points at right now.
+          The runner must push to the repository <em>before</em> it calls this: redeploy pulls
+          whatever the branch points at right now, so a job that redeploys before it pushes
+          will faithfully rebuild the previous commit.
         </p>
+
+        <p>
+          <strong>Checking it without deploying.</strong> <code>--dry-run</code> resolves and
+          validates the settings exactly as a real run does — a missing file or a missing
+          setting still fails — then prints the equivalent <code>curl</code> command instead of
+          sending anything:
+        </p>
+        <pre><code>$ ./redeploy.sh deploy.env --dry-run
+redeploy: would POST https://api.your-domain.com/projects/myapp/redeploy
+redeploy: $FH_TOKEN is left unexpanded — export it first, or re-run with --show-token
+curl -sS -X POST "https://api.your-domain.com/projects/myapp/redeploy" \
+  -H "Authorization: Bearer $FH_TOKEN" \
+  -H "Accept: application/json"</code></pre>
+        <p>
+          The command goes to <strong>stdout</strong> and every other line to
+          <strong>stderr</strong>, so <code>./redeploy.sh --dry-run 2&gt;/dev/null</code> is
+          just the command, and <code>eval "$(./redeploy.sh --dry-run)"</code> runs it. The
+          token is left as <code>$FH_TOKEN</code>, which means the printed command is safe to
+          paste into a ticket — and that it only runs if you have that variable exported. Add
+          <code>--show-token</code> to embed the real value instead, at which point the output
+          <em>is</em> a live credential:
+        </p>
+        <pre><code>$ ./redeploy.sh deploy.env --dry-run --show-token
+redeploy: the command below contains a live token — treat it as a secret
+curl -sS -X POST "https://api.your-domain.com/projects/myapp/redeploy" \
+  -H 'Authorization: Bearer &lt;your token&gt;' \
+  -H "Accept: application/json"</code></pre>
+
+        <p>It exits with:</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Code</th><th>Meaning</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="path"><code>0</code></td><td>The server accepted the redeploy.</td></tr>
+              <tr><td class="path"><code>1</code></td><td>A configuration problem — missing file, missing setting, bad argument. Nothing was sent.</td></tr>
+              <tr><td class="path"><code>2</code></td><td>The API call failed. The server's own message is printed, so a 403 tells you which projects the token is limited to and a 400 tells you the project was never deployed from git.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note">
+          The script is <strong>fire-and-forget</strong>: it returns as soon as the server
+          accepts the call, and the build then runs in the background. A build that fails a
+          minute later will <em>not</em> fail the CI job. If your pipeline needs to gate on the
+          result, poll <code>GET /projects/&lt;name&gt;/status</code> until its
+          <code>status</code> is no longer <code>running</code>.
+        </div>
+        <p>
+          None of this is required, mind — the script is a convenience wrapper. The same
+          redeploy is one call, if you would rather not vendor a file:
+        </p>
+        <pre><code>curl -fsS -X POST "https://api.$BASE_DOMAIN/projects/myapp/redeploy" \
+  -H "Authorization: Bearer $FREEHOLDY_TOKEN"</code></pre>
 
         <p>
           <strong>Several projects, one token.</strong> A guest token can cover any number of
