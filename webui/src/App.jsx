@@ -2508,7 +2508,11 @@ const CRON_PRESETS = [
   ["monthly 1st 03:00", "0 3 1 * *"],
 ];
 
-const BackupsPanel = ({ token, projects, onCancel, onStream }) => {
+const BackupsPanel = ({ token, projects, role, onCancel, onStream }) => {
+  // A guest may take manual backups of the projects it is scoped to — nothing else. The
+  // automatic-backup config (GET *and* PUT), the destinations and the whole freeholdy-database
+  // scope are admin-only on the API, so they are not rendered and, crucially, not fetched.
+  const isAdmin = role !== "guest";
   // `scope` is a project name, or null for the freeholdy database.
   const [scope, setScope] = useState(projects[0]?.name ?? null);
   const [data, setData] = useState(null);
@@ -2525,7 +2529,7 @@ const BackupsPanel = ({ token, projects, onCancel, onStream }) => {
   const fileRef = useRef(null);
   const client = mkApi(token);
 
-  const isDb = scope === null;
+  const isDb = isAdmin && scope === null;
   const scopeLabel = isDb ? "freeholdy database" : scope;
 
   const load = useCallback(async () => {
@@ -2533,11 +2537,11 @@ const BackupsPanel = ({ token, projects, onCancel, onStream }) => {
     try {
       const [list, cfg] = await Promise.all([
         client.get(backupPath(scope)),
-        client.get(configPath(scope)),
+        isAdmin ? client.get(configPath(scope)) : Promise.resolve(null),
       ]);
       setData(list);
       setConfig(cfg);
-      setWithVolumes(cfg.include_volumes);
+      if (cfg) setWithVolumes(cfg.include_volumes);
       if (!isDb) {
         try { setVersions((await client.get(`/projects/${scope}/versions`)).versions || []); }
         catch { setVersions([]); }
@@ -2549,6 +2553,7 @@ const BackupsPanel = ({ token, projects, onCancel, onStream }) => {
 
   useEffect(() => { setData(null); setConfig(null); load(); }, [scope]);   // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
+    if (!isAdmin) return;   // /backups/targets is admin-only — don't ask
     client.get("/backups/targets").then(d => setTargets(d.targets || [])).catch(() => setTargets([]));
   }, []);   // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -2673,7 +2678,7 @@ const BackupsPanel = ({ token, projects, onCancel, onStream }) => {
                     onChange={e => setScope(e.target.value === "__db__" ? null : e.target.value)}
                     style={sel}>
               {projects.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
-              <option value="__db__">freeholdy database</option>
+              {isAdmin && <option value="__db__">freeholdy database</option>}
             </select>
           </Field>
           {!isDb && versions.length > 0 && (
@@ -2687,7 +2692,7 @@ const BackupsPanel = ({ token, projects, onCancel, onStream }) => {
           <Btn v="primary" onClick={backupNow} busy={busy.backup} style={{ padding: "8px 14px" }}>
             back up now
           </Btn>
-          {!isDb && (
+          {isAdmin && !isDb && (
             <>
               <Btn v="blue" onClick={() => fileRef.current?.click()} disabled={!!transfer}>
                 upload backup
@@ -2784,7 +2789,15 @@ const BackupsPanel = ({ token, projects, onCancel, onStream }) => {
           </div>
         )}
 
-        {/* Automatic backups */}
+        {/* Automatic backups — admin only, and `config` is only fetched for an admin, so a
+            guest gets the note instead of an empty section that looks like a bug. */}
+        {!isAdmin && (
+          <div style={{ marginTop: "18px", borderTop: `1px solid ${C.bd}`, paddingTop: "16px",
+                        color: C.muted, fontFamily: C.ff, fontSize: "12px", lineHeight: 1.7 }}>
+            automatic backups (schedules, destinations and retention) are configured by the server
+            administrator — this token can take, download and delete manual backups.
+          </div>
+        )}
         {config && (
           <div style={{ marginTop: "18px", borderTop: `1px solid ${C.bd}`, paddingTop: "16px" }}>
             <div style={{ color: C.txt, fontFamily: C.ff, fontSize: "12px", letterSpacing: "0.1em", fontWeight: 600, marginBottom: "10px" }}>
@@ -3111,10 +3124,14 @@ const Dashboard = ({ token, onLogout }) => {
           <NavItem icon="▣" label="Projects" active={!showDeploy && !showPlugins && !showTokens && !showBackups}
             onClick={() => { showOnly(); setRailOpen(false); }} />
           {/* Creating projects, installing plugins, the server SSH key and token management
-              are all admin-only on the API — a guest never sees them. Backups are not: a
-              guest may back up and restore the projects it is scoped to. */}
+              are all admin-only on the API — a guest never sees them. Backups are not: a guest
+              may take, download and delete *manual* backups of the projects it is scoped to.
+              Inside the panel, the automatic-backup schedules and the freeholdy-database scope
+              are still admin-only (`role` is passed in so it can hide them). */}
           <NavItem icon="🗄" label="Backups" active={showBackups}
-            title="Archive a project (image, volumes, env, files) or the freeholdy database, and schedule automatic backups"
+            title={isAdmin
+              ? "Archive a project (image, volumes, env, files) or the freeholdy database, and schedule automatic backups"
+              : "Archive a project — its image, volumes, env and files"}
             onClick={() => { showOnly(setShowBackups); setRailOpen(false); }} />
           {isAdmin && (<>
             <NavItem icon="＋" label="Deploy" active={showDeploy}
@@ -3189,7 +3206,7 @@ const Dashboard = ({ token, onLogout }) => {
                 nothing to back up yet — deploy a project first
               </div>
             ) : (
-              <BackupsPanel token={token} projects={projects} onStream={handleDeployStream}
+              <BackupsPanel token={token} projects={projects} role={role} onStream={handleDeployStream}
                             onCancel={() => setShowBackups(false)} />
             )
           )}

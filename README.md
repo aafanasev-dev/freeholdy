@@ -317,9 +317,10 @@ python scripts/generate_token.py revoke --id 2
 
 Every token has a role. `admin` (the default) can do everything. **`guest` is scoped to a
 set of projects** — for those it can redeploy, restart, read logs, manage the environment,
-list versions and roll back, and nothing else: no other project is even visible to it, and
-it cannot create or delete projects, open a shell, issue certs, install plugins or manage
-tokens.
+list versions, roll back, and take, download or delete **manual** backups, and nothing else:
+no other project is even visible to it, and it cannot create or delete projects, open a
+shell, issue certs, install plugins, import a backup archive, read or change the
+automatic-backup settings, reach the freeholdy-database backup scope, or manage tokens.
 
 Crucially, a guest **redeploys rather than deploys**: `POST /projects/{name}/redeploy`
 re-clones the git URL and branch the server recorded for that project. Uploading files and
@@ -545,6 +546,10 @@ today's data.
 
 ### Automatic backups
 
+Automatic backups are the operator's policy, so the whole config is **admin-only** — reading it as
+well as writing it. A guest token still gets "back up now" and the archive list for its own projects;
+it just cannot see or change the schedule, the destination or the retention counts.
+
 Two independent triggers, per project, set with `fhcli backup-config` or on the web UI's **Backups**
 tab:
 
@@ -593,7 +598,9 @@ A destination being down never fails the backup — the local archive is kept an
 ### Backing up freeholdy itself
 
 The freeholdy database (projects, versions, env, tokens) is a backup scope of its own, with the same
-commands and the same schedule options:
+commands and the same schedule options. It holds every project, token and env value on the box, so
+**every route in this scope is admin-only** — a guest token neither sees it in the web UI's scope
+picker nor gets a reply from `/backups/database*`:
 
 ```bash
 fhcli db-backup --upload

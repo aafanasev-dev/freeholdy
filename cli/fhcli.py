@@ -297,6 +297,10 @@ def _print_http_error(response: requests.Response):
     except Exception:
         detail = response.text
     console.print(f"[bold red]HTTP {response.status_code}:[/] {detail}")
+    # A 403 is authorization, not a bad request — the token is valid but the route is out of
+    # its reach (a guest hitting an admin-only endpoint, or a project outside its scope).
+    if response.status_code == 403:
+        console.print("[dim]         run [bold]fhcli whoami[/] to see what this token may do[/]")
 
 
 # ── Job polling ────────────────────────────────────────────────────────────────
@@ -865,7 +869,11 @@ def whoami():
             console.print(f"           [bold]{name}[/]")
         if not projects:
             console.print("           [dim](none — this token cannot act on anything)[/]")
-        console.print("  Allowed: [dim]redeploy, restart, logs, status, abort, env, versions, rollback[/]")
+        console.print("  Allowed: [dim]redeploy, restart, logs, status, abort, env, versions, rollback,[/]")
+        console.print("           [dim]manual backups of those projects (backup / backups /[/]")
+        console.print("           [dim]backup-download / backup-delete)[/]")
+        console.print("  Denied:  [dim]backup schedules (backup-config), destinations and every[/]")
+        console.print("           [dim]db-backup* command — those are the operator's[/]")
     else:
         console.print("  Role:    [green]admin[/] — full API access")
 

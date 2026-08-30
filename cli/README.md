@@ -65,12 +65,12 @@ sudo ln -s "$(pwd)/cli/fhcli.py" /usr/local/bin/fhcli   # from the repo root
 | `fhcli backup PROJECT [--version N] [--no-volumes] [--upload] [--no-follow]` | **Archive the project** — its version's image(s), volumes, env and project files in one tar (deploy log streams live) |
 | `fhcli backups PROJECT` | List the project's backup archives, newest first |
 | `fhcli backup-download PROJECT ID [-o FILE]` | Fetch one archive in chunks |
-| `fhcli backup-upload PROJECT ARCHIVE [--no-follow]` | **Import an archive as a new archived version** — activate it with `rollback` |
+| `fhcli backup-upload PROJECT ARCHIVE [--no-follow]` | **Import an archive as a new archived version** — activate it with `rollback` (admin only) |
 | `fhcli backup-delete PROJECT ID [--remote] [--yes]` | Delete an archive (`--remote` also at the destination) |
-| `fhcli backup-config PROJECT [--enable\|--disable] [--cron EXPR] [--on-deploy] [--target NAME] [--keep N] [--keep-remote N]` | Show or change automatic backups. No options → show |
-| `fhcli backup-targets` | List the destinations declared in the server's `.env` (never their credentials) |
-| `fhcli backup-target-test NAME` | Check a destination is reachable and its credentials work |
-| `fhcli db-backup [--upload]` / `db-backups` / `db-backup-download ID` / `db-backup-delete ID` / `db-backup-config …` | The same, for the **freeholdy database itself** |
+| `fhcli backup-config PROJECT [--enable\|--disable] [--cron EXPR] [--on-deploy] [--target NAME] [--keep N] [--keep-remote N]` | Show or change automatic backups. No options → show (admin only — reading it too) |
+| `fhcli backup-targets` | List the destinations declared in the server's `.env` (never their credentials) (admin only) |
+| `fhcli backup-target-test NAME` | Check a destination is reachable and its credentials work (admin only) |
+| `fhcli db-backup [--upload]` / `db-backups` / `db-backup-download ID` / `db-backup-delete ID` / `db-backup-config …` | The same, for the **freeholdy database itself** (admin only — the whole scope) |
 | `fhcli remove PROJECT [--yes] [--keep-volumes]` | Delete the project (containers, images, nginx, DB row) **and its docker volumes** — `--keep-volumes` leaves the data on disk |
 | `fhcli whoami` | What the configured token may do — its role, and the project a guest token is bound to |
 | `fhcli tokens` | List every API token (admin only) |
@@ -220,15 +220,20 @@ fhcli rollback myapp 7 --restore-data     # activate it, data and all
   destination never fails the backup — the local archive is kept and reports `remote: error`.
 - The freeholdy database is its own scope: `fhcli db-backup`, `db-backups`, `db-backup-config`.
   Restore it on the server with `scripts/restore_db.sh` (it stops the service first).
+- **A guest token gets manual backups only** — `backup`, `backups`, `backup-download` and
+  `backup-delete` on the projects it is scoped to. The schedules, the destinations and the
+  database scope are admin-only, reading them included.
 
 ## Tokens & roles
 
 Every token has a role. **`admin`** (the default) can do everything. **`guest`** is scoped to
 a set of projects: for those it may **redeploy**, restart, read logs and status, manage the
-environment, list versions and roll back — and no other project. It cannot create or delete
-projects, upload files, point a project at a repo, open a shell (`exec`), issue certs, set
-domains, install plugins, or manage tokens; any of those returns `403`, as does naming a
-project outside its scope.
+environment, list versions, roll back, and take, download or delete **manual** backups — and
+no other project. It cannot create or delete projects, upload files, point a project at a repo,
+open a shell (`exec`), issue certs, set domains, install plugins, import a backup archive,
+read or change the automatic-backup settings (`backup-config`, `backup-targets`), touch the
+freeholdy-database scope (`db-backup*`), or manage tokens; any of those returns `403`, as does
+naming a project outside its scope.
 
 `redeploy` is the key part: it re-clones the git URL and branch **the server already
 recorded** for that project, so the runner never supplies a source. That is what keeps a

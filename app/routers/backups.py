@@ -14,11 +14,14 @@ The transfer shape is deliberately the volume routes': a download is fetched as 
 Large archives therefore survive nginx's body limit and any proxy in between, and both
 directions are resumable.
 
-Authorization follows the rule the rest of the API uses. Reading, creating and downloading a
-project's backups is `require_project_access` — a guest already holds that project's data.
-Anything that names a *source* or changes policy is admin: importing an archive (it decides
-what the project's next version contains) and writing the backup config. Every system route
-is admin-only.
+Authorization follows the rule the rest of the API uses, and it splits the feature the way a
+guest actually needs it: **a guest may take manual backups, and nothing more.** Creating,
+listing, downloading and deleting a project's archives is `require_project_access` — a guest
+already holds that project's data. Everything that names a *source* or sets policy is admin:
+importing an archive (it decides what the project's next version contains) and **both** halves
+of the automatic-backup config — reading it as well as writing it, since a schedule, a
+destination and a retention count are the operator's business, not the project owner's. Every
+system route is admin-only, so the freeholdy database scope is invisible to a guest.
 """
 
 import os
@@ -386,9 +389,12 @@ def complete_backup_upload(project_name: str, request: BackupUploadCompleteReque
 
 
 @router.get("/{project_name}/backup-config", response_model=BackupConfigResponse,
-            summary="The project's automatic-backup settings")
+            summary="The project's automatic-backup settings (admin only)")
 def get_project_backup_config(project_name: str, db: Session = Depends(get_db),
-                              _=Depends(require_project_access)):
+                              _=Depends(require_admin)):
+    """Admin-only, matching the `PUT`: the schedule, the destination and the retention counts
+    are the operator's policy, and the destination name is one a guest has no way to act on.
+    A guest gets the manual `POST /projects/{name}/backups` and the archive list instead."""
     return _config_response(db, _get_project(project_name, db))
 
 

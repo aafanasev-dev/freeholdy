@@ -115,6 +115,19 @@ Things that require reading the whole file to understand:
   because the database scope has no project to hang a socket on. Uploading an archive calls
   `chunkedBackupUpload` (the `chunkedVolumeUpload` shape) and then points the user at the versions
   panel: an import creates an **archived version**, and activating it is the ordinary rollback.
+- **`BackupsPanel` is role-gated, and a guest gets manual backups only.** `Dashboard` passes
+  `role` in alongside `token`/`projects`; the panel computes `const isAdmin = role !== "guest"`
+  and hides the `freeholdy database` scope option, the `upload backup` button (importing is
+  admin) and the whole automatic-backups block, replacing the last with a one-line note so the
+  absence reads as intentional. `isDb` is `isAdmin && scope === null`, so the database scope is
+  unreachable rather than merely unlisted. **The load-bearing part is not fetching what a guest
+  may not read**: `load()` puts the archive list and `configPath(scope)` in one `Promise.all`, so
+  the config GET (admin-only on the server) is swapped for `Promise.resolve(null)` for a guest —
+  otherwise its 403 rejects the whole `Promise.all` and the archive table disappears. The
+  `/backups/targets` effect returns early for the same reason. When adding a call here, check
+  `app/routers/backups.py` for its dependency first: `require_project_access` (create, list,
+  download, delete) may be called by anyone the panel is shown to; `require_admin` must be
+  behind `isAdmin` **and** must not be fetched unconditionally.
 - **Container/job status is a fixed vocabulary** rendered by the `SC` (color) and `SI` (glyph)
   maps and the `<Tag>` component: `running | done | exited | aborted | error | no_image |
   not_found | no_job`. These mirror the server's synthesized states — keep the maps in sync if the
@@ -157,7 +170,8 @@ The UI assumes these endpoints and is the place this contract is exercised from 
 - **Backups** (both modes): `GET|POST /projects/{name}/backups`, `GET .../backups/{id}/download`
   (raw `[offset,length)` pieces like a volume download, but with no staging step to discard),
   `DELETE .../backups/{id}?remote=`, the `upload/chunk` + `upload/complete` pair (admin only), and
-  `GET|PUT /projects/{name}/backup-config`. System scope: `GET /backups/targets`,
+  `GET|PUT /projects/{name}/backup-config` (**both admin only** — reading the schedule as well as
+  writing it). System scope, all admin only: `GET /backups/targets`,
   `POST /backups/targets/{name}/test`, and `/backups/database*` mirroring the project routes.
   Creating a backup streams over its own `WS /projects/{name}/backup` (a backup only reads docker,
   so it runs on its own job key and may overlap a deploy); an **import** streams over the project's
