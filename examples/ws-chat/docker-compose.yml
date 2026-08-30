@@ -18,3 +18,11 @@ services:
     build: ./backend
     ports:
       - "8080"
+    volumes:
+      # Chat history lives in a SQLite file on a named volume, so it survives a restart,
+      # a redeploy and a rollback (freeholdy versions code + images, never volume data).
+      # freeholdy lists this volume, reports its size, and can tar it out and back in.
+      - chat-data:/data
+
+volumes:
+  chat-data:

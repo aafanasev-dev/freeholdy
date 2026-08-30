@@ -176,6 +176,20 @@ class ServiceInfo(BaseModel):
     env_count: int = 0                     # variables in this service's own .env file
 
 
+class VolumeInfo(BaseModel):
+    """One docker volume belonging to a project. Derived from docker on every request —
+    nothing about volumes is stored (see app/services/volume_service.py)."""
+    name: str                              # the docker volume name, e.g. ws-chat_chat-data
+    label: str                             # friendly name: the compose key, or an anonymous
+                                           # volume's mount target (/var/lib/postgresql/data)
+    services: List[str] = []               # the project's services that mount it
+    exists: bool = True                    # False = declared in the compose file, not created yet
+    external: bool = False                 # compose `external: true` — never deleted by a teardown
+    anonymous: bool = False                # created by an image's VOLUME instruction (64-hex name)
+    size_bytes: Optional[int] = None       # null unless size_status == "ok"
+    size_status: str = "unknown"           # ok | pending (being measured in the background) | unknown
+
+
 class ProjectResponse(BaseModel):
     name: str
     type: str
@@ -188,6 +202,10 @@ class ProjectResponse(BaseModel):
     git_branch: Optional[str] = None       # None = the repo's default branch
     container: Optional[ContainerInfo] = None   # dockerfile mode
     services: List[ServiceInfo] = []            # compose mode
+    # Sizes here come from volume_service's cache: a cold one reports size_status "pending"
+    # and is filled in the background, so listing projects never blocks on `du` of a large
+    # volume. GET /projects/{name}/volumes always returns measured sizes.
+    volumes: List[VolumeInfo] = []
 
 
 class DockerJobStatusResponse(BaseModel):
@@ -272,7 +290,47 @@ class SslResponse(BaseModel):
 class ProjectDeleteResponse(BaseModel):
     status: str           # ok | partial
     message: str
-    details: List[str]    # per-step log of what was done / skipped
+    details: List[str]    # per-step log of what was done / skipped — names every volume
+                          # removed or kept, since that is the destructive part
+
+
+# ── Volumes ─────────────────────────────────────────────────────────────────────
+
+class VolumesResponse(BaseModel):
+    """GET /projects/{name}/volumes — measured sizes, unlike the project list's cache."""
+    project: str
+    volumes: List[VolumeInfo] = []
+    total_bytes: int = 0          # sum over volumes with a known size
+
+
+class VolumeDownloadResponse(BaseModel):
+    """POST /projects/{name}/volumes/{volume}/download — the tar is staged server-side and
+    fetched in pieces, mirroring the chunked upload in reverse."""
+    status: str                   # ok | error
+    message: str
+    download_id: str
+    filename: str                 # suggested client-side filename
+    size: int                     # bytes of the staged tar
+
+
+class VolumeUploadCompleteRequest(BaseModel):
+    """Body of POST /projects/{name}/volumes/{volume}/upload/complete."""
+    upload_id: str
+    total_size: Optional[int] = None
+
+
+class VolumeRestoreResponse(BaseModel):
+    """The restore runs as a job under the project's own job key, so it reports like a
+    restart: poll /status (or /compose/status), or stream `ws_path`."""
+    status: str                   # running | error
+    operation: str = "volume_restore"
+    message: str
+    volume: str
+    ws_path: Optional[str] = None
+    # Where to poll for this job. The restore registers under the project's own job key, and
+    # that key differs by mode (compose:{name} vs freeholdy_{name}), which the two status
+    # endpoints mirror — so the server names the right one rather than the client guessing.
+    status_path: Optional[str] = None
 
 
 # ── API tokens / roles ──────────────────────────────────────────────────────────

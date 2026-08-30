@@ -58,7 +58,11 @@ function Chat({ user }) {
     ws.onclose = () => setConnected(false);
     ws.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch { return; }
-      if (m.type === "chat" || m.type === "system") setMessages(prev => [...prev, m]);
+      // The backend keeps every chat message in SQLite on a docker volume and replays the
+      // recent ones in the welcome frame — so a reload (or a redeploy) shows the backlog
+      // instead of an empty room. Join/leave notices are presence, not history.
+      if (m.type === "welcome") setMessages(m.history || []);
+      else if (m.type === "chat" || m.type === "system") setMessages(prev => [...prev, m]);
     };
     return () => ws.close();
   }, [user]);

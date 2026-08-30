@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     # Default number of archived versions kept per dockerfile project (blue/green backups).
     # Overridable per-project via PUT /projects/{name}/backup-limit.
     DEFAULT_BACKUP_LIMIT: int = 5
+    # Image used for volume I/O (size, tar, restore). Everything a volume operation does runs
+    # inside `docker run --rm -v {volume}:/v {image}` rather than on the host filesystem: a
+    # volume's Mountpoint under /var/lib/docker/volumes is root-only, so a host-path
+    # implementation would work only when freeholdy runs as root. Needs `du`, `tar` and `sh`.
+    VOLUME_HELPER_IMAGE: str = "alpine"
     CERTBOT_EMAIL: str = "admin@your_domain.com"
     # ACME HTTP-01 webroot. Certs are issued with `certbot certonly --webroot -w
     # CERTBOT_WEBROOT`, so certbot never rewrites nginx config (freeholdy owns those

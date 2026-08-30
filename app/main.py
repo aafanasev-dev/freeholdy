@@ -7,7 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.models.database import init_db, SessionLocal
 from app.services import compose_service, deploy_service
-from app.routers import projects, container, plugins, compose, git, versions, env, logs, tokens
+from app.routers import (
+    projects, container, plugins, compose, git, versions, env, logs, tokens, volumes,
+)
 
 
 @asynccontextmanager
@@ -62,6 +64,7 @@ app.include_router(versions.router,  prefix="/projects", tags=["versions"])
 app.include_router(compose.router,   prefix="/projects", tags=["compose"])
 app.include_router(env.router,       prefix="/projects", tags=["env"])
 app.include_router(logs.router,      prefix="/projects", tags=["logs"])
+app.include_router(volumes.router,   prefix="/projects", tags=["volumes"])
 app.include_router(plugins.router,   prefix="/plugins",  tags=["plugins"])
 app.include_router(git.router,       prefix="/git",      tags=["git"])
 app.include_router(tokens.router,    prefix="/tokens",   tags=["tokens"])

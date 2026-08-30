@@ -56,7 +56,10 @@ sudo ln -s "$(pwd)/cli/fhcli.py" /usr/local/bin/fhcli   # from the repo root
 | `fhcli logs PROJECT [-n N] [-s SERVICE] [-o FILE]` | Last `N` lines the **container** printed (default 200). Compose: the whole stack, or one service with `-s`. Log to stdout, summary to stderr |
 | `fhcli status PROJECT [--follow]` | Status + logs of the last docker **operation** (build/run/stop) |
 | `fhcli abort PROJECT` | Abort the running docker op |
-| `fhcli remove PROJECT [--yes]` | Delete the project (containers, images, nginx, DB row) |
+| `fhcli volumes PROJECT` | List the project's docker volumes with measured sizes and which services mount them |
+| `fhcli volume-download PROJECT VOLUME [-o FILE]` | Archive a volume as a **tar** and download it in chunks (default `{project}-{volume}.tar`). `VOLUME` is the docker name shown by `fhcli volumes` |
+| `fhcli volume-upload PROJECT VOLUME ARCHIVE [--yes] [--no-follow]` | **Replace** a volume's contents with a tar: the project's containers stop, the volume is wiped and extracted into, then they start again |
+| `fhcli remove PROJECT [--yes] [--keep-volumes]` | Delete the project (containers, images, nginx, DB row) **and its docker volumes** — `--keep-volumes` leaves the data on disk |
 | `fhcli whoami` | What the configured token may do — its role, and the project a guest token is bound to |
 | `fhcli tokens` | List every API token (admin only) |
 | `fhcli token-create NAME [--role admin\|guest] [-P PROJECT]…` | Mint a token, printed **once**. `--role guest -P a -P b` scopes it to those projects |
@@ -149,6 +152,31 @@ The file is ordinary dotenv: `KEY=value` per line, `#` comments and blank lines 
 surrounding quotes stripped. Values are passed through verbatim (no shell expansion) and
 must stay on one line. This is separate from any `.env` a plugin writes into the project
 directory for compose `${VAR}` interpolation — freeholdy never touches that file.
+
+## Volumes (project data)
+
+A project's docker volumes are the one thing freeholdy cannot rebuild: images come from
+source and the project directory is re-uploaded on every deploy, but volume data exists only
+once. They are listed per project and move in and out as tar archives.
+
+```bash
+fhcli volumes ws-chat                                   # name, size, which services mount it
+fhcli volume-download ws-chat ws-chat_chat-data -o backup.tar
+tar tvf backup.tar                                      # ./chat.db
+fhcli volume-upload ws-chat ws-chat_chat-data backup.tar
+```
+
+- **Download** archives the volume server-side and streams it back in 1 MiB pieces; the
+  containers keep running, so a database being written to is best archived after a `stop`.
+- **Upload replaces**: the containers stop, the volume's contents are wiped, the archive is
+  extracted, and the containers start again — the volume ends up holding exactly what the tar
+  holds, not a merge. The restore is a normal job, so its log streams like a deploy's.
+- **`fhcli remove` deletes volumes by default.** The confirmation names each one and its size;
+  pass `--keep-volumes` to leave them on disk, where a project deployed under the same name
+  later picks them straight back up.
+- Compose projects show their named volumes (`external:` ones are listed but never deleted);
+  a single-container project shows the anonymous volumes its image's `VOLUME` instruction
+  created.
 
 ## Tokens & roles
 

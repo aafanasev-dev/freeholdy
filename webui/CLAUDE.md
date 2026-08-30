@@ -155,6 +155,27 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   `{loc, msg}` objects rather than a string — `mkApi`'s `unwrap` flattens that to newline-joined
   `msg` text (and strips pydantic's `"Value error, "` prefix), so `e.message` never renders
   `[object Object]`; `Err` is `white-space: pre-wrap` to keep the per-line breakdown readable.
+- **Volumes** (both modes): the `volumes` array on each `ProjectResponse` carries `{name, label,
+  services[], exists, external, anonymous, size_bytes, size_status}` — sizes there come from a
+  server-side cache, so `size_status: "pending"` means "being measured, refresh to see it" and
+  `fmtSize` renders it as `…`. `GET /projects/{name}/volumes` returns measured sizes.
+  Transfers are chunked in both directions: `POST …/volumes/{v}/download` stages a tar and
+  returns `{download_id, filename, size}`, `GET …/download/{id}?offset=&length=` serves raw
+  pieces (`mkApi.bytes`, added because every other method parses JSON), `DELETE …/download/{id}`
+  drops the staged copy; `POST …/volumes/{v}/upload/chunk?upload_id=&offset=` +
+  `.../upload/complete` push one back. The helpers are `fetchVolumeArchive` /
+  `chunkedVolumeUpload`, defined together with `VolumeDownloadModal` / `VolumeUploadModal`.
+  A **restore replaces** the volume's contents and runs as a job under the project's own key,
+  so `complete`'s response flows through `handleOperation` → `LogPane` polling exactly like
+  `restart` (`kind: "compose"` for stacks). `ProjectCard` renders volumes as **their own table
+  below the containers** (VOLUME / DOCKER NAME / SIZE / MOUNTED BY / ACTIONS), each row with an
+  `ActionMenu` offering **download** and (admin) **upload** — they are the project's data, not
+  one of its endpoints, and they outlive every container above them.
+- **Deleting a project deletes its volumes by default.** `DELETE /projects/{name}` takes
+  `?delete_volumes=` and the card always sends it explicitly. `ConfirmModal` gained an `extra`
+  slot, which the delete flow fills with a checkbox (ticked by default) naming every volume and
+  its size, plus a line that switches between "the data in them is gone for good" and "kept on
+  disk; a project deployed under this name again picks them back up".
 - **Container logs** (both modes): `GET /projects/{name}/logs?tail=N` returns the last `N` lines the
   **container** printed (compose: the whole stack, interleaved), and
   `GET /projects/{name}/services/{service}/logs?tail=N` does one service. `LogsResponse` carries

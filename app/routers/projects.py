@@ -39,6 +39,7 @@ from app.services import (
     git_service,
     scan,
     interactive_service,
+    volume_service,
     ws_session,
 )
 
@@ -156,6 +157,9 @@ def project_response(project: Project) -> dict:
         "git_branch": project.git_branch,
         "container": _container_info(project) if project.deploy_mode == "dockerfile" else None,
         "services": [_service_info(s) for s in project.services] if project.deploy_mode == "compose" else [],
+        # Sizes come from volume_service's cache and are filled in the background on a miss
+        # (size_status "pending"), so listing projects never waits on `du` of a big volume.
+        "volumes": volume_service.list_project_volumes(project),
     }
 
 
@@ -372,6 +376,33 @@ def _teardown_dockerfile(project: Project, details: list[str], errors: list[str]
     env_service.remove_project(project.name)  # DB rows cascade off Project
 
 
+def _teardown_volumes(volumes: list[dict], delete: bool,
+                      details: list[str], errors: list[str]) -> None:
+    """Remove (or deliberately keep) the project's volumes — the only irreversible part of a
+    delete, so every volume is named in `details` either way.
+
+    Runs *after* the containers are gone (docker refuses to remove an in-use volume) but on a
+    list resolved *before* teardown: the compose file and the containers that reveal anonymous
+    volumes are both destroyed by it. `external: true` volumes are never removed — the compose
+    file says they are not this project's to delete."""
+    if not volumes:
+        return
+    if not delete:
+        details.append(
+            "Volumes kept on disk: " + ", ".join(v["name"] for v in volumes)
+        )
+        return
+
+    external = [v["name"] for v in volumes if v["external"]]
+    removable = [v["name"] for v in volumes if not v["external"]]
+    if external:
+        details.append("External volumes kept (not owned by this project): " + ", ".join(external))
+    if removable:
+        vol_details, vol_errors = volume_service.remove_volumes(removable)
+        details.extend(vol_details)
+        errors.extend(vol_errors)
+
+
 def _teardown_nginx(project_name: str, details: list[str], errors: list[str]) -> None:
     """Remove a project's nginx config and reload — runs regardless of the docker outcome,
     so a project never ends up with its nginx config lingering after its container is gone."""
@@ -391,19 +422,34 @@ def _teardown_nginx(project_name: str, details: list[str], errors: list[str]) ->
 @router.delete("/{project_name}", response_model=ProjectDeleteResponse)
 def delete_project(
     project_name: str,
+    delete_volumes: bool = True,
     db: Session = Depends(get_db),
     _=Depends(require_admin),
 ):
-    """Full teardown: stop+remove container(s)/image(s), drop the files dir, remove the nginx
-    config, and delete the DB row. Every phase runs even if an earlier one fails, so a project
-    is never left half-deleted (e.g. an nginx config still pointing at an already-removed
-    container)."""
+    """Full teardown: stop+remove container(s)/image(s), drop the files dir, remove the
+    project's docker volumes, remove the nginx config, and delete the DB row. Every phase runs
+    even if an earlier one fails, so a project is never left half-deleted (e.g. an nginx config
+    still pointing at an already-removed container).
+
+    `delete_volumes` (default **true**) is the one destructive choice a caller has here: the
+    data in a volume exists only once, and nothing else in freeholdy can bring it back. Pass
+    `?delete_volumes=false` to leave the volumes on disk — `docker volume ls` still shows them
+    afterwards, and a project redeployed under the same name picks them straight back up.
+    Either way, every volume removed or kept is named in `details`."""
     project = db.query(Project).filter(Project.name == project_name).first()
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
 
     details: list[str] = []
     errors: list[str] = []
+
+    # Resolved before teardown: it destroys the compose file and the containers that are the
+    # only record of which volumes (anonymous ones especially) belong to this project.
+    try:
+        volumes = volume_service.list_project_volumes(project, with_sizes=False)
+    except Exception as e:
+        volumes = []
+        errors.append(f"Volume lookup error: {e}")
 
     # 1. Docker resources (mode-specific, best-effort — failures must not block nginx/DB cleanup).
     try:
@@ -414,10 +460,16 @@ def delete_project(
     except Exception as e:
         errors.append(f"Docker teardown error: {e}")
 
-    # 2. nginx config + reload (always runs).
+    # 2. Volumes — after the containers, which must be gone before docker will remove one.
+    try:
+        _teardown_volumes(volumes, delete_volumes, details, errors)
+    except Exception as e:
+        errors.append(f"Volume teardown error: {e}")
+
+    # 3. nginx config + reload (always runs).
     _teardown_nginx(project_name, details, errors)
 
-    # 3. DB row (cascades to ComposeService and to any guest tokens bound to it).
+    # 4. DB row (cascades to ComposeService and to any guest tokens bound to it).
     db.delete(project)
     db.commit()
     details.append(f"Project '{project_name}' deleted from database")

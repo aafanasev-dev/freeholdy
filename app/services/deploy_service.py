@@ -724,6 +724,124 @@ def compose_restart(name: str, project_dir: str, env_file: Optional[str] = None)
     return docker_service.spawn_job(compose_job_key(name), "compose_up", cmd)
 
 
+# ── Volume restore ──────────────────────────────────────────────────────────────
+
+def _run_stdin_phase(job_key: str, log_path: str, cmd: list, stdin_path: str) -> int:
+    """Like `_run_phase`, but feeds a file to the process on stdin — how a staged tar
+    reaches `tar xf -` inside the helper container."""
+    with open(log_path, "a") as log_fd, open(stdin_path, "rb") as src:
+        proc = subprocess.Popen(cmd, stdin=src, stdout=log_fd, stderr=subprocess.STDOUT, text=True)
+        docker_service.update_job_process(job_key, proc)
+        return proc.wait()
+
+
+def volume_restore(project_id: int, volume: str, tar_path: str) -> str:
+    """Replace a volume's contents with a staged tar: stop the containers, wipe + extract,
+    start them again. Returns the job key.
+
+    Registered under the project's own job key (`compose:{name}` / `freeholdy_{name}`), so
+    `/status`, `/compose/status`, `/abort` and `WS /projects/{name}/deploy` work on it like
+    any deploy, and a restore can never run concurrently with one.
+
+    The stack is stopped first because the archive typically holds a live database file —
+    extracting under a running SQLite/Postgres is how you get a corrupt one. The dockerfile
+    path deliberately `docker start`s the *same* container rather than recreating it (the
+    recreate that `launch_restart` does): an anonymous volume — the kind an image's `VOLUME`
+    instruction creates — belongs to the container that created it, so `docker rm` + `run`
+    would hand the new container a fresh empty volume and orphan the one just restored.
+    """
+    db = SessionLocal()
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        name = project.name
+        mode = project.deploy_mode
+        container_name = project.container_name
+        env_file = env_service.project_env_file(db, project)
+    finally:
+        db.close()
+
+    project_dir = os.path.abspath(compose_service.project_dir(name))
+    job_key = compose_job_key(name) if mode == "compose" else deploy_job_key(name)
+    log_path = _new_log_file()
+    docker_service.register_external_job(
+        job_key, "volume_restore", ["volume-restore", name, volume], None, log_path,
+    )
+    threading.Thread(
+        target=_volume_restore_job,
+        args=(name, mode, container_name, volume, tar_path, project_dir, job_key, log_path, env_file),
+        daemon=True,
+    ).start()
+    return job_key
+
+
+def _volume_restore_job(name: str, mode: str, container_name: Optional[str], volume: str,
+                        tar_path: str, project_dir: str, job_key: str, log_path: str,
+                        env_file: Optional[str] = None) -> None:
+    from app.services import volume_service  # lazy: keeps the import graph one-directional
+
+    def log(msg: str) -> None:
+        _append_log(log_path, msg)
+
+    def fail(exit_code: int, msg: str) -> None:
+        log(msg)
+        docker_service.finish_external_job(job_key, exit_code, aborted=_aborted(job_key))
+
+    try:
+        size = os.path.getsize(tar_path)
+        log(f"── restoring volume '{volume}' from a {size} byte archive ──")
+
+        # 1. Stop whatever is using the volume, so nothing writes during the swap.
+        log("── stopping containers ──")
+        if mode == "compose":
+            code = _run_phase(job_key, log_path, _compose_files_cmd(name, project_dir, "stop", env_file=env_file))
+        elif container_name:
+            code = _run_phase(job_key, log_path, ["docker", "stop", "--time", "10", container_name])
+        else:
+            code = 0
+        if _aborted(job_key):
+            fail(code or 1, "── aborted before the volume was touched ──")
+            return
+        if code != 0:
+            fail(code, f"── stop failed (exit {code}) — volume left untouched ──")
+            return
+
+        # 2. Wipe + extract. Past this point the volume's old contents are gone, so the
+        #    containers are brought back up regardless of the outcome.
+        log("── wiping volume and extracting archive ──")
+        code = _run_stdin_phase(job_key, log_path, volume_service.restore_cmd(volume), tar_path)
+        restore_code = code
+        volume_service.forget_sizes([volume])
+        if code != 0:
+            log(f"── extract failed (exit {code}) — starting containers anyway ──")
+
+        # 3. Bring the project back.
+        log("── starting containers ──")
+        if mode == "compose":
+            pins = os.path.exists(os.path.join(project_dir, PIN_FILE))
+            code = _run_phase(job_key, log_path,
+                              _compose_files_cmd(name, project_dir, "up", "-d", "--no-build",
+                                                 pins=pins, env_file=env_file))
+        elif container_name:
+            code = _run_phase(job_key, log_path, ["docker", "start", container_name])
+        else:
+            code = 0
+        if code != 0:
+            fail(code, f"── containers failed to start (exit {code}) ──")
+            return
+        if restore_code != 0:
+            fail(restore_code, f"── restore failed (exit {restore_code}); containers are back up ──")
+            return
+        log(f"── volume '{volume}' restored ──")
+        docker_service.finish_external_job(job_key, 0)
+    except Exception as e:   # never leave the job stuck "running"
+        fail(1, f"── volume restore error: {e} ──")
+    finally:
+        try:
+            os.unlink(tar_path)
+        except OSError:
+            pass
+
+
 def compose_rollback_to_version(project_id: int, version: int) -> str:
     """Make an archived compose version active again: `down` the current stack, restore the
     version's file snapshot into the project dir, re-provision (service rows, ports,

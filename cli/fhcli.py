@@ -234,6 +234,20 @@ def _post_raw(path: str, data: bytes, params: dict) -> dict:
         sys.exit(1)
 
 
+def _get_bytes(path: str, params: dict) -> bytes:
+    """GET one raw octet-stream piece (a slice of a staged volume archive)."""
+    try:
+        r = requests.get(_url(path), headers=_headers(), params=params, timeout=120)
+        r.raise_for_status()
+        return r.content
+    except requests.exceptions.ConnectionError:
+        console.print(f"[bold red]Connection error:[/] cannot reach {BASE_URL}")
+        sys.exit(1)
+    except requests.exceptions.HTTPError as e:
+        _print_http_error(e.response)
+        sys.exit(1)
+
+
 def _put(path: str, json: dict | None = None) -> dict:
     try:
         r = requests.put(_url(path), headers=_headers(), json=json or {}, timeout=30)
@@ -499,6 +513,18 @@ _STATUS_STYLE = {
     "error":     "bold red",
 }
 
+def _fmt_size(n) -> str:
+    """Bytes as a short human string; '—' when the size is unknown."""
+    if n is None:
+        return "—"
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
 def _status_text(status: str) -> Text:
     style = _STATUS_STYLE.get(status, "white")
     icons = {"running": "▶ ", "exited": "■ ", "no_image": "○ ", "not_found": "○ ", "error": "✗ "}
@@ -589,6 +615,21 @@ def list_projects():
             )
 
         console.print(table)
+        # Volumes are the project's data, so they get their own line rather than a column.
+        # Sizes in the project list come from a cache filled in the background — a "pending"
+        # one resolves on the next call (or immediately via `fhcli volumes NAME`).
+        for vol in project.get("volumes", []):
+            size = ("[dim]sizing…[/]" if vol.get("size_status") == "pending"
+                    else _fmt_size(vol.get("size_bytes")))
+            used_by = ", ".join(vol.get("services") or []) or "—"
+            flags = "".join([
+                "  [yellow]· external[/]" if vol.get("external") else "",
+                "  [dim]· not created[/]" if not vol.get("exists", True) else "",
+            ])
+            console.print(
+                f"  [magenta]▤[/] [bold]{vol['label']}[/]  [dim]{vol['name']}[/]  "
+                f"{size}  [dim]· {used_by}[/]{flags}"
+            )
 
 
 # ── plugins ──────────────────────────────────────────────────────────────────────
@@ -1542,15 +1583,210 @@ def abort_job(project: str):
 
 # ── remove ─────────────────────────────────────────────────────────────────────
 
+# ── volumes ────────────────────────────────────────────────────────────────────
+#
+# A project's docker volumes are the one thing freeholdy cannot rebuild: images come from
+# source and the project dir is re-uploaded, but volume data exists only once. These
+# commands list them and move them in and out as tar archives, chunked like `deploy`.
+
+def _volume_path(project: str, volume: str, *suffix: str) -> str:
+    return "/".join([f"/projects/{project}/volumes/{volume}", *suffix])
+
+
+def _chunked_volume_download(project: str, volume: str, dest: str) -> dict:
+    """Ask the server to archive the volume, pull the staged tar in CHUNK_SIZE pieces, and
+    discard the staging copy. The mirror image of `_chunked_upload`."""
+    with console.status(f"Archiving volume '{volume}' on the server…"):
+        prep = _post(_volume_path(project, volume, "download"))
+    total, download_id = prep["size"], prep["download_id"]
+
+    try:
+        with Progress(
+            TextColumn("[cyan]{task.description}[/]"),
+            BarColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("receiving", total=total)
+            with open(dest, "wb") as out:
+                offset = 0
+                while offset < total:
+                    piece = _get_bytes(
+                        _volume_path(project, volume, "download", download_id),
+                        params={"offset": offset, "length": CHUNK_SIZE},
+                    )
+                    if not piece:
+                        break
+                    out.write(piece)
+                    offset += len(piece)
+                    progress.update(task, advance=len(piece))
+    finally:
+        # Always drop the server-side copy, including after a failed transfer.
+        _delete(_volume_path(project, volume, "download", download_id))
+    return prep
+
+
+def _chunked_volume_upload(project: str, volume: str, src: str) -> dict:
+    """Send a tar in CHUNK_SIZE pieces, then ask the server to restore it into the volume."""
+    upload_id = uuid.uuid4().hex
+    total = os.path.getsize(src)
+    with Progress(
+        TextColumn("[cyan]{task.description}[/]"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("sending", total=total)
+        with open(src, "rb") as fh:
+            offset = 0
+            while True:
+                chunk = fh.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                _post_raw(
+                    _volume_path(project, volume, "upload", "chunk"),
+                    data=chunk,
+                    params={"upload_id": upload_id, "offset": offset},
+                )
+                offset += len(chunk)
+                progress.update(task, advance=len(chunk))
+    return _post(_volume_path(project, volume, "upload", "complete"),
+                 json={"upload_id": upload_id, "total_size": total})
+
+
+@cli.command("volumes")
+@click.argument("project")
+def list_volumes(project: str):
+    """List PROJECT's docker volumes with their sizes.
+
+    Sizes here are always measured (the project list shows cached ones).
+
+    \b
+    Example:
+      fhcli volumes ws-chat
+    """
+    data = _get(f"/projects/{project}/volumes")
+    volumes = data.get("volumes", [])
+    if not volumes:
+        console.print(f"[dim]Project [bold]{project}[/] has no docker volumes.[/]")
+        return
+
+    table = Table(box=box.ROUNDED, title=f"[bold cyan]{project}[/]  [dim]· volumes[/]",
+                  title_justify="left", show_header=True, header_style="bold")
+    table.add_column("Volume", style="magenta", min_width=12)
+    table.add_column("Docker name", style="dim", min_width=20)
+    table.add_column("Size", justify="right", min_width=9)
+    table.add_column("Used by", min_width=14)
+    table.add_column("Notes", min_width=10)
+
+    for vol in volumes:
+        notes = []
+        if vol.get("external"):
+            notes.append("[yellow]external[/]")
+        if not vol.get("exists", True):
+            notes.append("[dim]not created[/]")
+        if vol.get("anonymous"):
+            notes.append("[dim]anonymous[/]")
+        table.add_row(
+            vol["label"],
+            vol["name"],
+            _fmt_size(vol.get("size_bytes")),
+            ", ".join(vol.get("services") or []) or "[dim]—[/]",
+            "  ".join(notes) or "[dim]—[/]",
+        )
+    console.print(table)
+    console.print(f"[dim]total {_fmt_size(data.get('total_bytes'))}[/]")
+
+
+@cli.command("volume-download")
+@click.argument("project")
+@click.argument("volume")
+@click.option("--output", "-o", "output", default=None,
+              help="Where to write the tar (default: {project}-{volume}.tar in the cwd).")
+def volume_download(project: str, volume: str, output: str | None):
+    """Download PROJECT's VOLUME as a tar archive.
+
+    The server tars the volume, the archive is fetched in pieces, and the server-side copy
+    is discarded. VOLUME is the docker name as shown by `fhcli volumes`.
+
+    \b
+    Examples:
+      fhcli volume-download ws-chat ws-chat_chat-data
+      fhcli volume-download ws-chat ws-chat_chat-data -o backup.tar
+    """
+    dest = output or f"{project}-{volume}.tar"
+    prep = _chunked_volume_download(project, volume, dest)
+    console.print(f"[green]✓[/] {prep.get('message', 'archived')} → [bold]{dest}[/] "
+                  f"({_fmt_size(os.path.getsize(dest))})")
+
+
+@cli.command("volume-upload")
+@click.argument("project")
+@click.argument("volume")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--follow/--no-follow",
+    default=True,
+    help="Wait for the restore to complete (default: on).",
+)
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation prompt.")
+def volume_upload(project: str, volume: str, archive: str, follow: bool, yes: bool):
+    """Restore ARCHIVE (a tar) into PROJECT's VOLUME.
+
+    The project's containers are stopped, the volume's contents are REPLACED with the
+    archive, and the containers are started again — so the volume ends up holding exactly
+    what the tar holds, not a merge.
+
+    \b
+    Examples:
+      fhcli volume-upload ws-chat ws-chat_chat-data backup.tar
+      fhcli volume-upload ws-chat ws-chat_chat-data backup.tar --yes
+    """
+    if not yes:
+        console.print(
+            f"[bold yellow]Warning:[/] This replaces everything in volume "
+            f"[bold magenta]{volume}[/] with the contents of [bold]{archive}[/], and "
+            f"restarts [bold cyan]{project}[/]."
+        )
+        click.confirm("Are you sure?", abort=True)
+
+    data = _chunked_volume_upload(project, volume, archive)
+    console.print(f"[green]✓[/] {data.get('message', 'restoring')}")
+    if not follow:
+        console.print(f"Check with: [bold]fhcli status {project}[/]")
+        return
+
+    # The restore runs under the project's own job key, and which status endpoint that is
+    # depends on the deploy mode — the server names it rather than the client guessing.
+    result = _poll_status_path(data.get("status_path") or f"/projects/{project}/status")
+    _print_job_result(result, success_msg="Volume restored", fail_msg="Volume restore failed")
+    if result["status"] != "done":
+        sys.exit(1)
+
+
 @cli.command("remove")
 @click.argument("name")
 @click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation prompt.")
-def remove_project(name: str, yes: bool):
+@click.option(
+    "--delete-volumes/--keep-volumes",
+    default=True,
+    help="Also delete the project's docker volumes (default: delete). "
+         "--keep-volumes leaves the data on disk for a later project of the same name.",
+)
+def remove_project(name: str, yes: bool, delete_volumes: bool):
     """Remove a project: stop containers, remove images, delete nginx config and DB record.
+
+    By default the project's docker volumes go too — that is the only part of a project
+    nothing can rebuild, so `--keep-volumes` leaves them on disk.
 
     \b
     Example:
       fhcli remove myapp
+      fhcli remove myapp --keep-volumes
       fhcli remove myapp --yes
     """
     if not yes:
@@ -1558,10 +1794,18 @@ def remove_project(name: str, yes: bool):
             f"[bold yellow]Warning:[/] This will permanently delete project "
             f"[bold cyan]{name}[/] including containers, images, and nginx config."
         )
+        # Name the volumes explicitly — deleting them is irreversible and on by default.
+        volumes = _get(f"/projects/{name}/volumes").get("volumes", [])
+        if volumes:
+            listed = ", ".join(f"{v['name']} ({_fmt_size(v.get('size_bytes'))})" for v in volumes)
+            if delete_volumes:
+                console.print(f"[bold red]Volumes to be DELETED:[/] {listed}")
+            else:
+                console.print(f"[dim]Volumes kept on disk:[/] {listed}")
         click.confirm("Are you sure?", abort=True)
 
     console.print(f"Removing project [bold cyan]{name}[/]…")
-    data = _delete(f"/projects/{name}")
+    data = _delete(f"/projects/{name}?delete_volumes={'true' if delete_volumes else 'false'}")
 
     icon = "[green]✓[/]" if data["status"] == "ok" else "[yellow]⚠[/]"
     console.print(f"{icon} {data['message']}")

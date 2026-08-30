@@ -80,6 +80,11 @@ const mkApi = (token) => {
     put:  (p, b) => fetch(`${BASE}${p}`, { method: "PUT", headers: h, body: b != null ? JSON.stringify(b) : undefined }).then(unwrap),
     form: (p, fd) => fetch(`${BASE}${p}`, { method: "POST", headers: hf, body: fd }).then(unwrap),
     raw:  (p, body) => fetch(`${BASE}${p}`, { method: "POST", headers: hr, body }).then(unwrap),
+    // Raw bytes, for the pieces of a staged volume archive (unwrap would try to parse JSON).
+    bytes: (p) => fetch(`${BASE}${p}`, { headers: hf }).then(async r => {
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(detailText(e.detail, r.status)); }
+      return new Uint8Array(await r.arrayBuffer());
+    }),
     del:  (p)    => fetch(`${BASE}${p}`, { method: "DELETE", headers: h }).then(unwrap),
   };
 };
@@ -343,6 +348,18 @@ const EnvDisclosure = ({ value, onChange, open, onToggle, count = null, loading 
     )}
   </div>
 );
+
+// Bytes → short human string. "—" when the size is unknown, "…" while it is being measured
+// in the background (the project list's sizes come from a cache — see VolumeInfo.size_status).
+const fmtSize = (n, status) => {
+  if (status === "pending") return "…";
+  if (n == null) return "—";
+  let size = n;
+  for (const unit of ["B", "KB", "MB", "GB", "TB"]) {
+    if (size < 1024 || unit === "TB") return unit === "B" ? `${size} B` : `${size.toFixed(1)} ${unit}`;
+    size /= 1024;
+  }
+};
 
 const Err = ({ msg }) => msg ? (
   <div style={{ color: C.red, fontFamily: C.ff, fontSize: "13px", padding: "6px 10px", background: C.redFill, border: `1px solid ${C.redBd}`, borderRadius: "10px", whiteSpace: "pre-wrap" }}>
@@ -721,9 +738,12 @@ const InstallPluginModal = ({ token, plugin, onClose, onInstalled }) => {
 };
 
 // ── Confirm modal ─────────────────────────────────────────────────────────────
-const ConfirmModal = ({ message, onConfirm, onCancel, loading }) => (
+// `extra` renders between the message and the buttons — the delete flow uses it for the
+// "delete volumes too" checkbox, since volume data is the one thing a delete cannot undo.
+const ConfirmModal = ({ message, onConfirm, onCancel, loading, extra }) => (
   <Modal onClose={onCancel}>
     <div style={{ color: C.red, fontFamily: C.ff, fontSize: "13px", marginBottom: "18px", lineHeight: "1.6" }}>⚠ {message}</div>
+    {extra}
     <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
       <Btn v="ghost" onClick={onCancel} disabled={loading}>cancel</Btn>
       <Btn v="danger" onClick={onConfirm} busy={loading}>confirm delete</Btn>
@@ -1041,6 +1061,149 @@ const LogsModal = ({ token, project, service = null, onClose }) => {
         <Btn v="ghost" onClick={onClose}>close</Btn>
       </div>
       {error && <div style={{ marginTop: "12px" }}><Err msg={error} /></div>}
+    </Modal>
+  );
+};
+
+// ── Volume transfer (tar in / tar out) ────────────────────────────────────────
+//
+// A project's docker volumes hold the data nothing else in freeholdy can rebuild, so they
+// move as tar archives — chunked in both directions like a deploy, so a big volume never
+// depends on one huge request and both directions get a progress bar.
+
+const volumePath = (project, volume, ...rest) =>
+  [`/projects/${project}/volumes/${volume}`, ...rest].join("/");
+
+// prepare → pull the staged tar in CHUNK_SIZE pieces → tell the server to drop its copy.
+const fetchVolumeArchive = async (api, project, volume, onProgress) => {
+  const prep = await api.post(volumePath(project, volume, "download"));
+  const total = prep.size;
+  const parts = [];
+  try {
+    let offset = 0;
+    onProgress && onProgress({ done: 0, total });
+    while (offset < total) {
+      const piece = await api.bytes(
+        `${volumePath(project, volume, "download", prep.download_id)}?offset=${offset}&length=${CHUNK_SIZE}`);
+      if (!piece.length) break;
+      parts.push(piece);
+      offset += piece.length;
+      onProgress && onProgress({ done: offset, total });
+    }
+  } finally {
+    // Drop the server-side staging copy even if the transfer failed.
+    await api.del(volumePath(project, volume, "download", prep.download_id)).catch(() => {});
+  }
+  return { blob: new Blob(parts, { type: "application/x-tar" }), filename: prep.filename };
+};
+
+const chunkedVolumeUpload = async (api, project, volume, file, onProgress) => {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const total = bytes.length;
+  const uploadId = crypto.randomUUID().replace(/-/g, "");
+  onProgress && onProgress({ done: 0, total });
+  for (let offset = 0; offset < total; offset += CHUNK_SIZE) {
+    const end = Math.min(offset + CHUNK_SIZE, total);
+    await api.raw(`${volumePath(project, volume, "upload", "chunk")}?upload_id=${uploadId}&offset=${offset}`,
+                  bytes.subarray(offset, end));
+    onProgress && onProgress({ done: end, total });
+  }
+  return api.post(volumePath(project, volume, "upload", "complete"),
+                  { upload_id: uploadId, total_size: total });
+};
+
+const Bar = ({ done, total }) => (
+  <div style={{ background: C.s3, borderRadius: "999px", height: "6px", overflow: "hidden", marginTop: "10px" }}>
+    <div style={{ background: C.money, height: "100%", width: `${total ? Math.round((done / total) * 100) : 0}%`, transition: "width .15s" }} />
+  </div>
+);
+
+const VolumeDownloadModal = ({ token, project, volume, onClose }) => {
+  const [progress, setProgress] = useState(null);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    setBusy(true); setError(""); setDone("");
+    try {
+      const { blob, filename } = await fetchVolumeArchive(mkApi(token), project, volume.name, setProgress);
+      // A normal page, so a script-driven save works: object URL + a synthetic click.
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      setDone(`${filename} · ${fmtSize(blob.size)}`);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Modal onClose={onClose} width={520}>
+      <ModalHeader title={`DOWNLOAD VOLUME — ${volume.label}`} color={C.purple} onClose={onClose} />
+      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", lineHeight: "1.7" }}>
+        The server archives <code style={{ fontFamily: C.mono, color: C.txt }}>{volume.name}</code> as a
+        tar, then it is fetched in pieces. Containers keep running, so an actively-written
+        database is best archived after a <span style={{ color: C.txt }}>stop</span>.
+      </div>
+      {progress && <Bar done={progress.done} total={progress.total} />}
+      {progress && (
+        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px", marginTop: "6px" }}>
+          {fmtSize(progress.done)} / {fmtSize(progress.total)}
+        </div>
+      )}
+      <div style={{ marginTop: "12px", display: "flex", flexDirection: "column", gap: "8px" }}>
+        <Err msg={error} />
+        <Ok msg={done && `saved ${done}`} />
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "14px" }}>
+        <Btn v="ghost" onClick={onClose} disabled={busy}>close</Btn>
+        <Btn v="primary" onClick={run} busy={busy}>download tar</Btn>
+      </div>
+    </Modal>
+  );
+};
+
+const VolumeUploadModal = ({ token, project, volume, onClose, onRestore }) => {
+  const [file, setFile] = useState(null);
+  const [progress, setProgress] = useState(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef(null);
+
+  const run = async () => {
+    if (!file) return;
+    setBusy(true); setError("");
+    try {
+      const data = await chunkedVolumeUpload(mkApi(token), project, volume.name, file, setProgress);
+      onRestore(data);   // the restore is a job — the card streams it like a restart
+      onClose();
+    } catch (e) { setError(e.message); setBusy(false); }
+  };
+
+  return (
+    <Modal onClose={onClose} width={520}>
+      <ModalHeader title={`UPLOAD VOLUME — ${volume.label}`} color={C.purple} onClose={onClose} />
+      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", lineHeight: "1.7" }}>
+        Restoring <span style={{ color: C.red }}>replaces</span> everything in{" "}
+        <code style={{ fontFamily: C.mono, color: C.txt }}>{volume.name}</code> with the archive:
+        the project's containers stop, the volume is wiped and extracted into, then they start again.
+      </div>
+      <div style={{ marginTop: "12px" }}>
+        <input ref={inputRef} type="file" accept=".tar,.gz,.tgz,application/x-tar"
+               style={{ display: "none" }}
+               onChange={e => { setFile(e.target.files?.[0] || null); setProgress(null); }} />
+        <Btn onClick={() => inputRef.current?.click()} disabled={busy} style={{ width: "100%" }}>
+          {file ? `${file.name} · ${fmtSize(file.size)}` : "select a .tar archive"}
+        </Btn>
+      </div>
+      {progress && <Bar done={progress.done} total={progress.total} />}
+      <div style={{ marginTop: "12px" }}><Err msg={error} /></div>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "14px" }}>
+        <Btn v="ghost" onClick={onClose} disabled={busy}>cancel</Btn>
+        <Btn v="danger" onClick={run} busy={busy} disabled={!file}>replace volume</Btn>
+      </div>
     </Modal>
   );
 };
@@ -1470,6 +1633,9 @@ const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, 
   const [versionsModal, setVersionsModal] = useState(false);
   const [envModal, setEnvModal] = useState(false);
   const [logsModal, setLogsModal] = useState(false);
+  const [volModal, setVolModal] = useState(null);      // null | {kind: "download"|"upload", volume}
+  const [dropVolumes, setDropVolumes] = useState(true); // delete's checkbox — matches the API default
+  const volumes = project.volumes || [];
   const isCompose = project.deploy_mode === "compose";
   const isPending = project.deploy_mode !== "compose" && project.deploy_mode !== "dockerfile";
   const isPlugin = project.type === "plugin";
@@ -1481,10 +1647,22 @@ const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, 
   const remove = async () => {
     setRemoving(true);
     try {
-      await mkApi(token).del(`/projects/${project.name}`);
+      // The server defaults to deleting volumes, so the flag is always explicit here —
+      // what the checkbox shows is what gets sent.
+      await mkApi(token).del(`/projects/${project.name}?delete_volumes=${dropVolumes}`);
       onRemoved(project.name);
     } catch (e) { alert(`Remove failed: ${e.message}`); }
     finally { setRemoving(false); setConfirm(false); }
+  };
+
+  // A volume restore runs as a job under the project's own key, so it reports through the
+  // same LogPane polling as restart/down (compose stacks report on the compose endpoint).
+  const onVolumeRestore = (data) => {
+    onOperation({
+      project: project.name, kind: isCompose ? "compose" : undefined,
+      operation: data.operation || "volume_restore", status: data.status,
+      logs: data.message || "",
+    });
   };
 
   // Project-level docker compose down — streamed via the bottom LogPane. (build + up are
@@ -1620,13 +1798,95 @@ const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, 
           </table>
         </div>
         )}
+
+        {/* Volumes get their own block under the containers: they are the project's data,
+            not one of its endpoints, and they outlive every container above. */}
+        {volumes.length > 0 && (
+          <div style={{ borderTop: `1px solid ${C.bd}`, overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.bd}` }}>
+                  <TH>VOLUME</TH><TH>DOCKER NAME</TH><TH right>SIZE</TH><TH>MOUNTED BY</TH><TH center>ACTIONS</TH>
+                </tr>
+              </thead>
+              <tbody>
+                {volumes.map(v => (
+                  <tr key={v.name} style={{ borderBottom: `1px solid ${C.bd}` }}>
+                    <td style={{ padding: "9px 12px", fontFamily: C.ff, fontSize: "13px", color: C.purple, minWidth: "90px" }}>
+                      ▤ {v.label}
+                      {v.external && (
+                        <span title="Declared external — freeholdy never deletes it"
+                              style={{ color: C.amber, background: C.amberFill, border: `1px solid ${C.amberBd}`, fontSize: "10px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "7px", marginLeft: "7px" }}>external</span>
+                      )}
+                      {!v.exists && (
+                        <span title="Declared in the compose file but not created yet — deploy the project"
+                              style={{ color: C.dim, background: C.s3, border: `1px solid ${C.bd}`, fontSize: "10px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "7px", marginLeft: "7px" }}>not created</span>
+                      )}
+                    </td>
+                    <td style={{ padding: "9px 12px", fontFamily: C.mono, fontSize: "12px", color: C.muted }}>{v.name}</td>
+                    <td style={{ padding: "9px 12px", fontFamily: C.ff, fontSize: "13px", color: C.txt, textAlign: "right", minWidth: "70px" }}
+                        title={v.size_status === "pending" ? "measuring in the background — refresh to see it" : ""}>
+                      {fmtSize(v.size_bytes, v.size_status)}
+                    </td>
+                    <td style={{ padding: "9px 12px", fontFamily: C.ff, fontSize: "12px", color: C.dim }}>
+                      {(v.services || []).join(", ") || "—"}
+                    </td>
+                    <td style={{ padding: "8px 10px", width: "1px", textAlign: "center", whiteSpace: "nowrap" }}>
+                      <ActionMenu label={v.label} items={[
+                        { key: "download", icon: "↓", label: "download", color: C.blue, disabled: !v.exists,
+                          title: "Archive this volume as a tar and download it",
+                          onClick: () => setVolModal({ kind: "download", volume: v }) },
+                        isAdmin && { key: "upload", icon: "↑", label: "upload", color: C.red, disabled: !v.exists,
+                          title: "Replace this volume's contents with a tar archive",
+                          onClick: () => setVolModal({ kind: "upload", volume: v }) },
+                      ]} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {uploadModal && <UploadModal token={token} project={project.name} onClose={() => setUploadModal(false)} onUploaded={() => onRefresh && onRefresh()} onDeploy={onDeploy} />}
       {versionsModal && <VersionsModal token={token} project={project.name} role={role} onClose={() => setVersionsModal(false)} onStream={onStream} onRefresh={onRefresh} />}
       {envModal && <EnvModal token={token} project={project.name} compose onClose={() => setEnvModal(false)} onRefresh={onRefresh} onRestart={restart} />}
       {logsModal && <LogsModal token={token} project={project.name} onClose={() => setLogsModal(false)} />}
-      {confirm && <ConfirmModal message={`Delete "${project.name}"? This stops containers, removes images and nginx config.`} onConfirm={remove} onCancel={() => setConfirm(false)} loading={removing} />}
+      {volModal?.kind === "download" && (
+        <VolumeDownloadModal token={token} project={project.name} volume={volModal.volume}
+                             onClose={() => setVolModal(null)} />
+      )}
+      {volModal?.kind === "upload" && (
+        <VolumeUploadModal token={token} project={project.name} volume={volModal.volume}
+                           onClose={() => setVolModal(null)} onRestore={onVolumeRestore} />
+      )}
+      {confirm && (
+        <ConfirmModal
+          message={`Delete "${project.name}"? This stops containers, removes images and nginx config.`}
+          onConfirm={remove} onCancel={() => setConfirm(false)} loading={removing}
+          extra={volumes.length > 0 && (
+            <div style={{ marginBottom: "18px" }}>
+              <label style={{ display: "flex", alignItems: "flex-start", gap: "9px", cursor: "pointer" }}>
+                <input type="checkbox" checked={dropVolumes} disabled={removing}
+                       onChange={e => setDropVolumes(e.target.checked)}
+                       style={{ marginTop: "3px", accentColor: C.red }} />
+                <span style={{ color: C.txt, fontFamily: C.ff, fontSize: "13px", lineHeight: "1.6" }}>
+                  delete this project's {volumes.length} volume{volumes.length !== 1 ? "s" : ""} too
+                  <div style={{ color: C.dim, fontSize: "12px", marginTop: "4px" }}>
+                    {volumes.map(v => `${v.name} (${fmtSize(v.size_bytes, v.size_status)})`).join(", ")}
+                  </div>
+                  <div style={{ color: dropVolumes ? C.red : C.muted, fontSize: "12px", marginTop: "4px" }}>
+                    {dropVolumes
+                      ? "the data in them is gone for good — download a tar first if you may want it"
+                      : "kept on disk; a project deployed under this name again picks them back up"}
+                  </div>
+                </span>
+              </label>
+            </div>
+          )}
+        />
+      )}
     </>
   );
 };

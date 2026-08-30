@@ -2,7 +2,9 @@
 
 This example runs a realtime WebSocket chat: a static React frontend plus a Node.js
 WebSocket backend, wired together as a two-service `docker compose` stack. No auth —
-just pick a username in the browser.
+just pick a username in the browser. Messages are **kept in a SQLite database on a docker
+volume**, so the history survives a restart, a redeploy and a rollback — which also makes
+this the example to try freeholdy's volume tooling on.
 
 **What you'll get:**
 - `https://web.ws-chat.your_domain.com` — the chat UI
@@ -15,11 +17,11 @@ examples/ws-chat/
 ├── docker-compose.yml    # two services: web (nginx) + websocket (Node)
 ├── frontend/             # React/Vite app → static bundle served by nginx on :80
 │   └── Dockerfile
-└── backend/              # Node.js ws server on :8080
+└── backend/              # Node.js ws server on :8080 (SQLite store on /data)
     └── Dockerfile
 ```
 
-Two things make the wiring work automatically:
+Three things make the wiring work automatically:
 - **Service names become subdomains.** freeholdy exposes each TCP service at
   `{service}.{project}.{domain}`, so the services named `web` and `websocket` land at
   `web.ws-chat.…` and `websocket.ws-chat.…`. The frontend derives the backend URL from
@@ -27,6 +29,11 @@ Two things make the wiring work automatically:
 - **The `websocket` service name triggers WebSocket support.** freeholdy scans the
   compose file and emits nginx upgrade headers for any service whose block/name looks
   like a WebSocket endpoint — here, `websocket`.
+- **The `chat-data` volume holds the chat history.** The compose file mounts it at `/data`
+  in the `websocket` service, where the backend keeps `chat.db` (Node's built-in
+  `node:sqlite` — no native modules, hence the `node:24-alpine` base image). freeholdy
+  creates it as `ws-chat_chat-data`, lists it on the project, and can archive and restore
+  it (see below). A joining client receives the last 200 messages in its `welcome` frame.
 
 ---
 
@@ -167,3 +174,39 @@ fhcli deploy ws-chat ./   # redeploy (rebuild + up) after changing any file
 There is no separate create or build/up step — `fhcli deploy` creates (if new),
 provisions, builds, and runs in one command, and re-running it is how you redeploy after
 a change to the frontend, the backend, or the compose file.
+
+---
+
+## The chat history volume
+
+Say a few things in the chat, then:
+
+```bash
+fhcli volumes ws-chat
+#  chat-data   ws-chat_chat-data   16.0 KB   websocket
+```
+
+Back the history up, break it, and put it back:
+
+```bash
+fhcli volume-download ws-chat ws-chat_chat-data -o chat-backup.tar
+tar tvf chat-backup.tar          # ./chat.db
+
+# …say more things in the chat, then roll the database back:
+fhcli volume-upload ws-chat ws-chat_chat-data chat-backup.tar
+```
+
+The restore stops the stack, replaces the volume's contents with the archive, and starts it
+again — reload the page and the newer messages are gone. `fhcli deploy ws-chat ./` rebuilds
+the images but leaves the volume alone, which is why the history survives a redeploy.
+
+Deleting the project takes the volume with it unless you say otherwise:
+
+```bash
+fhcli remove ws-chat --keep-volumes   # history stays on disk for the next deploy
+fhcli remove ws-chat                  # history is deleted too (the default)
+```
+
+The same things are on the project's card in the web UI: the volume gets its own line with
+its size, a `⋮` menu with **download** / **upload**, and the delete dialog lists the volume
+with a checkbox.
