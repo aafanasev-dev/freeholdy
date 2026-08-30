@@ -1411,6 +1411,10 @@ const VersionsModal = ({ token, project, role, onClose, onStream, onRefresh }) =
   const [error, setError] = useState("");
   const [limit, setLimit] = useState("");
   const [busy, setBusy] = useState({});   // { limit, "rollback:N" }
+  // Rolling back swaps code + images and leaves volume data alone. Ticking this also puts
+  // the version's volumes and env back from a backup archive — only possible for versions
+  // that have one (`backup_count`), which is why the row shows a 💾 marker.
+  const [restoreData, setRestoreData] = useState(false);
   const client = mkApi(token);
 
   const load = async () => {
@@ -1430,14 +1434,17 @@ const VersionsModal = ({ token, project, role, onClose, onStream, onRefresh }) =
     finally { setBusy(b => ({ ...b, limit: false })); }
   };
 
-  const rollback = async (version) => {
+  const rollback = async (version, withData) => {
     setError(""); setBusy(b => ({ ...b, [`rollback:${version}`]: true }));
     try {
-      const d = await client.post(`/projects/${project}/rollback`, { version });
+      const d = await client.post(`/projects/${project}/rollback`,
+                                  { version, restore_data: !!withData });
       onStream({ project, wsPath: d.ws_path });   // stream the rollback log in the InstallPane
       onClose();
     } catch (e) { setError(e.message); setBusy(b => ({ ...b, [`rollback:${version}`]: false })); }
   };
+
+  const anyBackups = (data?.versions || []).some(v => v.backup_count > 0);
 
   const counts = data?.counts || {};
 
@@ -1487,7 +1494,7 @@ const VersionsModal = ({ token, project, role, onClose, onStream, onRefresh }) =
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
-                <TH right>VER</TH><TH>STATE</TH><TH right>PORT</TH><TH>RUNTIME</TH><TH>CREATED</TH><TH right>ACTION</TH>
+                <TH right>VER</TH><TH>STATE</TH><TH right>PORT</TH><TH>RUNTIME</TH><TH>CREATED</TH><TH center>BACKUP</TH><TH right>ACTION</TH>
               </tr>
             </thead>
             <tbody>
@@ -1498,16 +1505,40 @@ const VersionsModal = ({ token, project, role, onClose, onStream, onRefresh }) =
                   <td style={{ ...td, textAlign: "right" }}>{v.local_port ?? "—"}</td>
                   <td style={td}><Tag status={v.container_status} /></td>
                   <td style={{ ...td, color: C.dim }}>{v.created_at ? new Date(v.created_at).toLocaleString() : "—"}</td>
+                  <td style={{ ...td, textAlign: "center" }}>
+                    {v.backup_count > 0
+                      ? <span title={`${v.backup_count} backup archive(s) capture this version — its data can be restored with it`}>💾</span>
+                      : <span style={{ color: C.dim, fontSize: "12px" }}>—</span>}
+                  </td>
                   <td style={{ ...td, textAlign: "right" }}>
                     {v.status === "active"
                       ? <span style={{ color: C.dim, fontSize: "12px" }}>current</span>
-                      : <Btn sm v="blue" onClick={() => rollback(v.version)} busy={busy[`rollback:${v.version}`]} title={`Roll back to v${v.version}`}>rollback</Btn>}
+                      : <Btn sm v="blue"
+                             onClick={() => rollback(v.version, restoreData && v.backup_count > 0)}
+                             busy={busy[`rollback:${v.version}`]}
+                             title={restoreData && v.backup_count > 0
+                               ? `Roll back to v${v.version} and restore its volume data`
+                               : `Roll back to v${v.version}`}>rollback</Btn>}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+      )}
+
+      {anyBackups && (
+        <label style={{ display: "flex", alignItems: "flex-start", gap: "8px", cursor: "pointer", marginTop: "12px", fontFamily: C.ff, fontSize: "13px", color: C.txt }}>
+          <input type="checkbox" checked={restoreData} onChange={e => setRestoreData(e.target.checked)}
+                 style={{ accentColor: C.money, marginTop: "2px" }} />
+          <span>
+            also restore volume data and env when rolling back
+            <span style={{ color: C.dim, display: "block", fontSize: "12px" }}>
+              read from that version's newest backup archive (the 💾 rows). Off by default —
+              a rollback normally swaps code and images and leaves data alone.
+            </span>
+          </span>
+        </label>
       )}
 
       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "14px" }}>
@@ -2403,6 +2434,464 @@ const TokensPanel = ({ token, projects, me, onCancel }) => {
   );
 };
 
+// ── Backups panel (archives + automatic-backup schedules) ─────────────────────
+// A backup is one self-contained tar: the version's image(s), the project's volumes, its
+// env and its project files. Uploading one back does NOT restore anything directly — it
+// imports the archive as a new *archived version*, so activating a backup is the ordinary
+// rollback the versions panel already does. That keeps one answer to "which build is live".
+//
+// The freeholdy database is a scope here too (project === null), served by /backups/database
+// with the same shapes, which is why one panel covers both.
+
+const backupPath = (project, ...rest) =>
+  [project === null ? "/backups/database" : `/projects/${project}/backups`, ...rest].join("/");
+const configPath = (project) =>
+  project === null ? "/backups/database/config" : `/projects/${project}/backup-config`;
+
+// Pull an archive in CHUNK_SIZE pieces. Unlike a volume download there is no staging copy
+// to discard afterwards — the archive is already a file on the server.
+const fetchBackupArchive = async (api, project, row, onProgress) => {
+  const parts = [];
+  let offset = 0;
+  const total = row.size_bytes || 0;
+  for (;;) {
+    const piece = await api.bytes(
+      `${backupPath(project, String(row.id), "download")}?offset=${offset}&length=${CHUNK_SIZE}`);
+    if (!piece.length) break;
+    parts.push(piece);
+    offset += piece.length;
+    onProgress && onProgress({ done: offset, total });
+    if (total && offset >= total) break;
+  }
+  return new Blob(parts, { type: "application/x-tar" });
+};
+
+const chunkedBackupUpload = async (api, project, file, onProgress) => {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const total = bytes.length;
+  const uploadId = crypto.randomUUID().replace(/-/g, "");
+  for (let offset = 0; offset < total; offset += CHUNK_SIZE) {
+    const end = Math.min(offset + CHUNK_SIZE, total);
+    await api.raw(`${backupPath(project, "upload", "chunk")}?upload_id=${uploadId}&offset=${offset}`,
+                  bytes.subarray(offset, end));
+    onProgress && onProgress({ done: end, total });
+  }
+  return api.post(backupPath(project, "upload", "complete"),
+                  { upload_id: uploadId, total_size: total });
+};
+
+const BK_STATUS = { ok: C.green, creating: C.blue, error: C.red };
+const BK_REMOTE = { ok: C.green, pending: C.blue, error: C.red, none: C.dim };
+
+// What the archive holds, as chips — the same information the CLI prints as I/V/E/P.
+const BackupContents = ({ row }) => {
+  const bits = row.project === null
+    ? [["database", true]]
+    : [["image", row.has_images], ["volumes", row.has_volumes],
+       ["env", row.has_env], ["files", row.has_project]];
+  return (
+    <span style={{ display: "inline-flex", gap: "4px", flexWrap: "wrap" }}>
+      {bits.filter(([, on]) => on).map(([label]) => (
+        <span key={label} style={{
+          color: C.muted, background: C.s3, border: `1px solid ${C.bd}`,
+          fontSize: "10px", letterSpacing: "0.06em", padding: "1px 6px", borderRadius: "6px",
+        }}>{label}</span>
+      ))}
+    </span>
+  );
+};
+
+const CRON_PRESETS = [
+  ["hourly", "0 * * * *"],
+  ["daily 03:00", "0 3 * * *"],
+  ["weekly Sun 03:00", "0 3 * * 0"],
+  ["monthly 1st 03:00", "0 3 1 * *"],
+];
+
+const BackupsPanel = ({ token, projects, onCancel, onStream }) => {
+  // `scope` is a project name, or null for the freeholdy database.
+  const [scope, setScope] = useState(projects[0]?.name ?? null);
+  const [data, setData] = useState(null);
+  const [config, setConfig] = useState(null);
+  const [targets, setTargets] = useState([]);
+  const [error, setError] = useState("");
+  const [ok, setOk] = useState("");
+  const [busy, setBusy] = useState({});
+  const [confirm, setConfirm] = useState(null);      // the archive awaiting delete
+  const [transfer, setTransfer] = useState(null);    // { kind, name, done, total }
+  const [versions, setVersions] = useState([]);      // for the "which version" picker
+  const [pickVersion, setPickVersion] = useState("");
+  const [withVolumes, setWithVolumes] = useState(true);
+  const fileRef = useRef(null);
+  const client = mkApi(token);
+
+  const isDb = scope === null;
+  const scopeLabel = isDb ? "freeholdy database" : scope;
+
+  const load = useCallback(async () => {
+    setError("");
+    try {
+      const [list, cfg] = await Promise.all([
+        client.get(backupPath(scope)),
+        client.get(configPath(scope)),
+      ]);
+      setData(list);
+      setConfig(cfg);
+      setWithVolumes(cfg.include_volumes);
+      if (!isDb) {
+        try { setVersions((await client.get(`/projects/${scope}/versions`)).versions || []); }
+        catch { setVersions([]); }
+      } else {
+        setVersions([]);
+      }
+    } catch (e) { setError(e.message); }
+  }, [scope]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => { setData(null); setConfig(null); load(); }, [scope]);   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    client.get("/backups/targets").then(d => setTargets(d.targets || [])).catch(() => setTargets([]));
+  }, []);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A backup runs as a job; poll until the newest row leaves "creating".
+  const pollUntilDone = async () => {
+    for (let i = 0; i < 900; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      try {
+        const list = await client.get(backupPath(scope));
+        setData(list);
+        if (!(list.backups || []).some(b => b.status === "creating")) return list;
+      } catch { /* keep polling — a transient failure is not the end of the backup */ }
+    }
+    return null;
+  };
+
+  const backupNow = async () => {
+    setError(""); setOk(""); setBusy(b => ({ ...b, backup: true }));
+    try {
+      const body = { include_volumes: withVolumes };
+      if (pickVersion) body.version = parseInt(pickVersion, 10);
+      const d = await client.post(backupPath(scope), body);
+      // A project backup has its own WebSocket; the database's has no project to scope one to.
+      if (d.ws_path) onStream({ project: scope, wsPath: d.ws_path });
+      const list = await pollUntilDone();
+      const latest = list?.backups?.[0];
+      if (latest?.status === "error") setError(latest.message || "backup failed");
+      else setOk(`backed up ${scopeLabel}${latest ? ` — ${fmtSize(latest.size_bytes)}` : ""}`);
+      await load();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(b => ({ ...b, backup: false })); }
+  };
+
+  const download = async (row) => {
+    setError(""); setOk("");
+    setTransfer({ kind: "download", name: row.filename, done: 0, total: row.size_bytes || 0 });
+    try {
+      const blob = await fetchBackupArchive(client, scope, row, p => setTransfer(t => ({ ...t, ...p })));
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = row.filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      setOk(`downloaded ${row.filename}`);
+    } catch (e) { setError(e.message); }
+    finally { setTransfer(null); }
+  };
+
+  const upload = async (file) => {
+    if (!file) return;
+    setError(""); setOk("");
+    setTransfer({ kind: "upload", name: file.name, done: 0, total: file.size });
+    try {
+      const d = await chunkedBackupUpload(client, scope, file, p => setTransfer(t => ({ ...t, ...p })));
+      if (d.ws_path) onStream({ project: scope, wsPath: d.ws_path });
+      setOk(`importing as v${d.version} — it appears in the versions panel as archived; ` +
+            `roll back to it to activate`);
+      await load();
+    } catch (e) { setError(e.message); }
+    finally { setTransfer(null); if (fileRef.current) fileRef.current.value = ""; }
+  };
+
+  const remove = async (row) => {
+    setConfirm(null); setError(""); setOk("");
+    try {
+      await client.del(`${backupPath(scope, String(row.id))}?remote=true`);
+      setOk(`deleted ${row.filename}`);
+      await load();
+    } catch (e) { setError(e.message); }
+  };
+
+  const saveConfig = async (patch) => {
+    setError(""); setOk(""); setBusy(b => ({ ...b, config: true }));
+    try {
+      setConfig(await client.put(configPath(scope), patch));
+      setOk("backup settings saved");
+    } catch (e) { setError(e.message); }
+    finally { setBusy(b => ({ ...b, config: false })); }
+  };
+
+  const testTarget = async () => {
+    if (!config?.target_name) return;
+    setError(""); setOk(""); setBusy(b => ({ ...b, test: true }));
+    try {
+      const d = await client.post(`/backups/targets/${config.target_name}/test`);
+      if (d.status === "ok") setOk(d.message); else setError(d.message);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(b => ({ ...b, test: false })); }
+  };
+
+  const TH = ({ children, right }) => (
+    <th style={{ padding: "6px 12px", textAlign: right ? "right" : "left", color: C.dim, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 400, whiteSpace: "nowrap" }}>{children}</th>
+  );
+  const td = { padding: "9px 12px", fontFamily: C.ff, fontSize: "13px", color: C.txt };
+  const sel = {
+    background: C.s2, border: `1px solid ${C.bdB}`, color: C.txt, fontFamily: C.ff,
+    fontSize: "14px", padding: "9px 13px", borderRadius: "10px", outline: "none",
+    width: "100%", boxSizing: "border-box",
+  };
+  const check = (label, checked, onChange, hint) => (
+    <label style={{ display: "flex", alignItems: "flex-start", gap: "8px", cursor: "pointer", fontFamily: C.ff, fontSize: "13px", color: C.txt }}>
+      <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)}
+             style={{ accentColor: C.money, marginTop: "2px" }} />
+      <span>{label}{hint && <span style={{ color: C.dim, display: "block", fontSize: "12px" }}>{hint}</span>}</span>
+    </label>
+  );
+
+  const rows = data?.backups || [];
+
+  return (
+    <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", marginBottom: "12px", boxShadow: C.shadow, overflow: "hidden" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
+        <span style={{ color: C.txt, fontFamily: C.ff, fontSize: "13px", letterSpacing: "0.1em", fontWeight: 600 }}>BACKUPS</span>
+        <Btn v="ghost" sm onClick={onCancel}>✕</Btn>
+      </div>
+
+      <div style={{ padding: "16px" }}>
+        {/* Scope */}
+        <div style={{ display: "flex", gap: "10px", alignItems: "flex-end", flexWrap: "wrap", marginBottom: "14px" }}>
+          <Field label="WHAT TO BACK UP" style={{ flex: "1 1 240px" }}>
+            <select value={scope === null ? "__db__" : scope}
+                    onChange={e => setScope(e.target.value === "__db__" ? null : e.target.value)}
+                    style={sel}>
+              {projects.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+              <option value="__db__">freeholdy database</option>
+            </select>
+          </Field>
+          {!isDb && versions.length > 0 && (
+            <Field label="VERSION" style={{ flex: "0 1 170px" }}>
+              <select value={pickVersion} onChange={e => setPickVersion(e.target.value)} style={sel}>
+                <option value="">active version</option>
+                {versions.map(v => <option key={v.version} value={v.version}>v{v.version} · {v.status}</option>)}
+              </select>
+            </Field>
+          )}
+          <Btn v="primary" onClick={backupNow} busy={busy.backup} style={{ padding: "8px 14px" }}>
+            back up now
+          </Btn>
+          {!isDb && (
+            <>
+              <Btn v="blue" onClick={() => fileRef.current?.click()} disabled={!!transfer}>
+                upload backup
+              </Btn>
+              <input ref={fileRef} type="file" accept=".tar" style={{ display: "none" }}
+                     onChange={e => upload(e.target.files?.[0])} />
+            </>
+          )}
+        </div>
+
+        {!isDb && (
+          <div style={{ marginBottom: "12px" }}>
+            {check("include this project's volumes", withVolumes, setWithVolumes,
+                   "volumes are captured as they are right now — docker keeps no per-version volume state, " +
+                   "so backing up an older version pairs that version's image with today's data")}
+          </div>
+        )}
+
+        {transfer && (
+          <div style={{ marginBottom: "12px" }}>
+            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px" }}>
+              {transfer.kind === "download" ? "downloading" : "uploading"} {transfer.name} —{" "}
+              {fmtSize(transfer.done)} / {fmtSize(transfer.total)}
+            </div>
+            <Bar done={transfer.done} total={transfer.total} />
+          </div>
+        )}
+        {error && <div style={{ marginBottom: "10px" }}><Err msg={error} /></div>}
+        {ok && <div style={{ marginBottom: "10px" }}><Ok msg={ok} /></div>}
+
+        {/* Archives */}
+        {!data ? (
+          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "13px", padding: "10px 0" }}>loading backups…</div>
+        ) : rows.length === 0 ? (
+          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "13px", padding: "10px 0" }}>
+            no backups of {scopeLabel} yet
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto", border: `1px solid ${C.bd}`, borderRadius: "14px" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
+                  <TH>WHEN</TH><TH>VERSION</TH><TH>KIND</TH><TH>SIZE</TH>
+                  <TH>CONTENTS</TH><TH>DESTINATION</TH><TH right>ACTIONS</TH>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(b => (
+                  <tr key={b.id} style={{ borderBottom: `1px solid ${C.bd}` }}>
+                    <td style={{ ...td, color: C.muted, whiteSpace: "nowrap" }}>
+                      {b.created_at ? new Date(b.created_at).toLocaleString() : "—"}
+                    </td>
+                    <td style={td}>
+                      {b.version ? `v${b.version}` : <span style={{ color: C.dim }}>—</span>}
+                      {b.imported && <span title="imported from an uploaded archive"
+                                           style={{ color: C.blue, marginLeft: "5px" }}>↥</span>}
+                    </td>
+                    <td style={{ ...td, color: C.muted }}>{b.kind}</td>
+                    <td style={td}>{fmtSize(b.size_bytes)}</td>
+                    <td style={td}><BackupContents row={b} /></td>
+                    <td style={td}>
+                      {b.target_name
+                        ? <span style={{ color: BK_REMOTE[b.remote_status] || C.dim }}>
+                            {b.target_name} · {b.remote_status}
+                          </span>
+                        : <span style={{ color: C.dim }}>local only</span>}
+                    </td>
+                    <td style={{ ...td, textAlign: "right" }}>
+                      <span style={{ color: BK_STATUS[b.status] || C.dim, fontSize: "12px", marginRight: "8px" }}>
+                        {b.status !== "ok" ? b.status : ""}
+                      </span>
+                      <ActionMenu label={b.filename} items={[
+                        { key: "download", icon: "↓", label: "download", color: C.blue,
+                          disabled: b.status !== "ok" || !!transfer,
+                          title: "Fetch this archive to your machine",
+                          onClick: () => download(b) },
+                        { key: "delete", icon: "🗑", label: "delete", color: C.red,
+                          title: "Delete this archive here and at its destination",
+                          onClick: () => setConfirm(b) },
+                      ]} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {rows.some(b => b.status === "error" || b.remote_status === "error") && (
+          <div style={{ marginTop: "10px", color: C.muted, fontFamily: C.ff, fontSize: "12px", lineHeight: 1.7 }}>
+            {rows.filter(b => b.status === "error" || b.remote_status === "error").map(b => (
+              <div key={b.id}><span style={{ color: C.red }}>!</span> {b.filename}: {b.message}</div>
+            ))}
+          </div>
+        )}
+
+        {/* Automatic backups */}
+        {config && (
+          <div style={{ marginTop: "18px", borderTop: `1px solid ${C.bd}`, paddingTop: "16px" }}>
+            <div style={{ color: C.txt, fontFamily: C.ff, fontSize: "12px", letterSpacing: "0.1em", fontWeight: 600, marginBottom: "10px" }}>
+              AUTOMATIC BACKUPS — {scopeLabel.toUpperCase()}
+            </div>
+
+            <div style={{ marginBottom: "12px" }}>
+              {check("take automatic backups", config.enabled,
+                     v => saveConfig({ enabled: v }),
+                     "both triggers below are ignored while this is off")}
+            </div>
+
+            <div style={{ display: "flex", gap: "10px", alignItems: "flex-end", flexWrap: "wrap", marginBottom: "10px" }}>
+              <Field label="SCHEDULE (CRON)" style={{ flex: "1 1 200px" }}>
+                <TextIn value={config.schedule_cron || ""}
+                        onChange={v => setConfig(c => ({ ...c, schedule_cron: v }))}
+                        placeholder="0 3 * * *" />
+              </Field>
+              <Btn v="primary" busy={busy.config}
+                   onClick={() => saveConfig({ schedule_cron: config.schedule_cron || "" })}>
+                save schedule
+              </Btn>
+            </div>
+            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "12px" }}>
+              {CRON_PRESETS.map(([label, expr]) => (
+                <Btn key={expr} sm v={config.schedule_cron === expr ? "primary" : "ghost"}
+                     onClick={() => { setConfig(c => ({ ...c, schedule_cron: expr })); saveConfig({ schedule_cron: expr }); }}>
+                  {label}
+                </Btn>
+              ))}
+              {config.schedule_cron && (
+                <Btn sm v="ghost" onClick={() => { setConfig(c => ({ ...c, schedule_cron: "" })); saveConfig({ schedule_cron: "" }); }}>
+                  no timer
+                </Btn>
+              )}
+            </div>
+
+            {!isDb && (
+              <div style={{ marginBottom: "12px" }}>
+                {check("also back up after every successful deploy", config.on_deploy,
+                       v => saveConfig({ on_deploy: v }),
+                       "the same trigger that creates a version, so each deploy leaves a restorable archive")}
+              </div>
+            )}
+            {!isDb && (
+              <div style={{ marginBottom: "12px" }}>
+                {check("include volumes in automatic backups", config.include_volumes,
+                       v => saveConfig({ include_volumes: v }))}
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: "10px", alignItems: "flex-end", flexWrap: "wrap" }}>
+              <Field label="DESTINATION" style={{ flex: "1 1 200px" }}>
+                <select value={config.target_name || ""}
+                        onChange={e => saveConfig({ target_name: e.target.value })} style={sel}>
+                  <option value="">local only</option>
+                  {targets.map(t => (
+                    <option key={t.name} value={t.name}>{t.name} — {t.type} · {t.host}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="KEEP HERE" style={{ flex: "0 1 110px" }}>
+                <TextIn value={String(config.keep_local ?? "")}
+                        onChange={v => setConfig(c => ({ ...c, keep_local: v }))}
+                        placeholder="5" />
+              </Field>
+              <Field label="KEEP THERE" style={{ flex: "0 1 110px" }}>
+                <TextIn value={String(config.keep_remote ?? "")}
+                        onChange={v => setConfig(c => ({ ...c, keep_remote: v }))}
+                        placeholder="0 = all" />
+              </Field>
+              <Btn v="primary" busy={busy.config} onClick={() => {
+                const kl = parseInt(config.keep_local, 10);
+                const kr = parseInt(config.keep_remote, 10);
+                if (!Number.isInteger(kl) || kl < 1) return setError("keep here must be a whole number ≥ 1");
+                if (!Number.isInteger(kr) || kr < 0) return setError("keep there must be a whole number ≥ 0");
+                saveConfig({ keep_local: kl, keep_remote: kr });
+              }}>save retention</Btn>
+              {config.target_name && (
+                <Btn v="ghost" busy={busy.test} onClick={testTarget}>test destination</Btn>
+              )}
+            </div>
+
+            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", lineHeight: 1.7, marginTop: "12px" }}>
+              {targets.length === 0
+                ? <>no destinations configured — add a <span style={{ color: C.txt }}>BACKUP_TARGET_*</span> block to the server's <span style={{ color: C.txt }}>.env</span> (see <span style={{ color: C.txt }}>.env.example</span>) and restart freeholdy. Credentials stay on the server; they are never sent here.</>
+                : <>destination credentials live in the server's <span style={{ color: C.txt }}>.env</span> and are never sent to this page.</>}
+              {config.last_run_at && (
+                <div style={{ marginTop: "6px" }}>
+                  last automatic run: <span style={{ color: C.txt }}>{new Date(config.last_run_at).toLocaleString()}</span>
+                  {config.last_message && <span style={{ color: C.dim }}> — {config.last_message}</span>}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {confirm && (
+        <ConfirmModal
+          message={`Delete "${confirm.filename}"? It is removed from this server${confirm.remote_status === "ok" ? " and from its destination" : ""}, and cannot be recovered.`}
+          onConfirm={() => remove(confirm)} onCancel={() => setConfirm(null)} />
+      )}
+    </div>
+  );
+};
+
 // ── Login screen ──────────────────────────────────────────────────────────────
 const LoginScreen = ({ onAuth }) => {
   const [token, setToken] = useState(() => localStorage.getItem("freeholdy_token") || "");
@@ -2479,6 +2968,7 @@ const Dashboard = ({ token, onLogout }) => {
   const [showPlugins, setShowPlugins] = useState(false);
   const [showGitKey, setShowGitKey] = useState(false);
   const [showTokens, setShowTokens] = useState(false);
+  const [showBackups, setShowBackups] = useState(false);
   const [me, setMe] = useState(null);          // { id, name, role, projects[] } — GET /tokens/me
   const [railOpen, setRailOpen] = useState(false);   // mobile: off-canvas nav rail
   const [activeLog, setActiveLog] = useState(null);
@@ -2588,9 +3078,15 @@ const Dashboard = ({ token, onLogout }) => {
 
   const healthColor = health === "ok" ? C.green : health === "unreachable" ? C.red : C.amber;
 
+  // The left-rail panels are mutually exclusive. Keeping the reset in one place means adding
+  // a panel is one setter here rather than an edit inside every other nav item's onClick.
+  const PANELS = [setShowDeploy, setShowPlugins, setShowTokens, setShowBackups];
+  const showOnly = (setter) => PANELS.forEach(set => set(set === setter));
+
   const sectionTitle = showDeploy ? "Deploy project"
     : showPlugins ? "Plugins"
     : showTokens ? "Tokens"
+    : showBackups ? "Backups"
     : `Projects (${projects.length})`;
 
   return (
@@ -2612,18 +3108,22 @@ const Dashboard = ({ token, onLogout }) => {
         )}
         {/* Nav */}
         <div style={{ flex: 1 }}>
-          <NavItem icon="▣" label="Projects" active={!showDeploy && !showPlugins && !showTokens}
-            onClick={() => { setShowDeploy(false); setShowPlugins(false); setShowTokens(false); setRailOpen(false); }} />
+          <NavItem icon="▣" label="Projects" active={!showDeploy && !showPlugins && !showTokens && !showBackups}
+            onClick={() => { showOnly(); setRailOpen(false); }} />
           {/* Creating projects, installing plugins, the server SSH key and token management
-              are all admin-only on the API — a guest never sees them. */}
+              are all admin-only on the API — a guest never sees them. Backups are not: a
+              guest may back up and restore the projects it is scoped to. */}
+          <NavItem icon="🗄" label="Backups" active={showBackups}
+            title="Archive a project (image, volumes, env, files) or the freeholdy database, and schedule automatic backups"
+            onClick={() => { showOnly(setShowBackups); setRailOpen(false); }} />
           {isAdmin && (<>
             <NavItem icon="＋" label="Deploy" active={showDeploy}
-              onClick={() => { setShowPlugins(false); setShowTokens(false); setShowDeploy(true); setRailOpen(false); }} />
+              onClick={() => { showOnly(setShowDeploy); setRailOpen(false); }} />
             <NavItem icon="⧉" label="Plugins" active={showPlugins}
-              onClick={() => { setShowDeploy(false); setShowTokens(false); setShowPlugins(true); setRailOpen(false); }} />
+              onClick={() => { showOnly(setShowPlugins); setRailOpen(false); }} />
             <NavItem icon="⚿" label="Tokens" active={showTokens}
               title="Mint and revoke API tokens, including guest tokens scoped to one project"
-              onClick={() => { setShowDeploy(false); setShowPlugins(false); setShowTokens(true); setRailOpen(false); }} />
+              onClick={() => { showOnly(setShowTokens); setRailOpen(false); }} />
             <NavItem icon="🔑" label="Git key"
               title="Get the server's GitHub SSH public key to add to GitHub for cloning private repos"
               onClick={() => { setShowGitKey(true); setRailOpen(false); }} />
@@ -2683,9 +3183,20 @@ const Dashboard = ({ token, onLogout }) => {
             <TokensPanel token={token} projects={projects} me={me} onCancel={() => setShowTokens(false)} />
           )}
 
-          {/* The deployed-projects list shows only in the Projects view — Deploy / Plugins
-              replace it with their own panel (above). */}
-          {!showDeploy && !showPlugins && !showTokens && (
+          {showBackups && (
+            projects.length === 0 ? (
+              <div style={{ border: `1px dashed ${C.bd}`, borderRadius: "14px", padding: "40px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "13px" }}>
+                nothing to back up yet — deploy a project first
+              </div>
+            ) : (
+              <BackupsPanel token={token} projects={projects} onStream={handleDeployStream}
+                            onCancel={() => setShowBackups(false)} />
+            )
+          )}
+
+          {/* The deployed-projects list shows only in the Projects view — Deploy / Plugins /
+              Tokens / Backups replace it with their own panel (above). */}
+          {!showDeploy && !showPlugins && !showTokens && !showBackups && (
             loading ? (
               <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", padding: "24px 0" }}>loading projects…</div>
             ) : projects.length === 0 ? (

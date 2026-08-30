@@ -833,7 +833,9 @@ else
     warn "ss (iproute2) not available — skipping project port-range overlap check."
 fi
 
-for dir in data dockerfiles nginx_configs projects compose; do
+# data/backups holds backup archives (one subdirectory per project, plus _system for the
+# freeholdy database's own backups) — created here so the first backup does not have to.
+for dir in data data/backups dockerfiles nginx_configs projects compose; do
     mkdir -p "${APP_DIR}/${dir}"
     chown "$SERVICE_USER":"$SERVICE_USER" "${APP_DIR}/${dir}"
 done

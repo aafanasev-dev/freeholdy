@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     # volume's Mountpoint under /var/lib/docker/volumes is root-only, so a host-path
     # implementation would work only when freeholdy runs as root. Needs `du`, `tar` and `sh`.
     VOLUME_HELPER_IMAGE: str = "alpine"
+    # Default number of backup archives kept on disk per scope (project or the database).
+    # Overridable per-scope via PUT /projects/{name}/backup-config.
+    DEFAULT_BACKUP_KEEP: int = 5
+    # Seconds allowed for one archive phase (docker save, a volume tar, a remote upload).
+    BACKUP_TRANSFER_TIMEOUT: int = 3600
     CERTBOT_EMAIL: str = "admin@your_domain.com"
     # ACME HTTP-01 webroot. Certs are issued with `certbot certonly --webroot -w
     # CERTBOT_WEBROOT`, so certbot never rewrites nginx config (freeholdy owns those

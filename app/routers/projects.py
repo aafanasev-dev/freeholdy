@@ -32,6 +32,7 @@ from app.models.schemas import (
 from app.auth import guest_project_names, require_admin, require_project_access, require_token
 from app.config import settings
 from app.services import (
+    backup_service,
     docker_service,
     nginx_service,
     compose_service,
@@ -329,6 +330,7 @@ def _teardown_compose(project: Project, details: list[str], errors: list[str]) -
         details.append(f"Compose directory '{cdir}' removed")
 
     env_service.remove_project(name)  # DB rows cascade off Project
+    backup_service.remove_scope(name)  # archives on disk; the Backup rows cascade off Project
 
 
 def _teardown_dockerfile(project: Project, details: list[str], errors: list[str]) -> None:
@@ -374,6 +376,7 @@ def _teardown_dockerfile(project: Project, details: list[str], errors: list[str]
         details.append(f"Project directory '{pdir}' removed")
 
     env_service.remove_project(project.name)  # DB rows cascade off Project
+    backup_service.remove_scope(project.name)  # archives on disk; rows cascade off Project
 
 
 def _teardown_volumes(volumes: list[dict], delete: bool,

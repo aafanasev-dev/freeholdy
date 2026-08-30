@@ -59,6 +59,18 @@ sudo ln -s "$(pwd)/cli/fhcli.py" /usr/local/bin/fhcli   # from the repo root
 | `fhcli volumes PROJECT` | List the project's docker volumes with measured sizes and which services mount them |
 | `fhcli volume-download PROJECT VOLUME [-o FILE]` | Archive a volume as a **tar** and download it in chunks (default `{project}-{volume}.tar`). `VOLUME` is the docker name shown by `fhcli volumes` |
 | `fhcli volume-upload PROJECT VOLUME ARCHIVE [--yes] [--no-follow]` | **Replace** a volume's contents with a tar: the project's containers stop, the volume is wiped and extracted into, then they start again |
+| `fhcli versions PROJECT` | List the project's blue/green versions (active / inactive / archived) |
+| `fhcli rollback PROJECT VERSION [--restore-data] [--backup ID] [--no-follow]` | Activate an earlier version. `--restore-data` also puts that version's volume data + env back from a backup archive |
+| `fhcli set-backup-limit PROJECT N` | How many archived **versions** to keep (distinct from a backup archive's `--keep`) |
+| `fhcli backup PROJECT [--version N] [--no-volumes] [--upload] [--no-follow]` | **Archive the project** — its version's image(s), volumes, env and project files in one tar (deploy log streams live) |
+| `fhcli backups PROJECT` | List the project's backup archives, newest first |
+| `fhcli backup-download PROJECT ID [-o FILE]` | Fetch one archive in chunks |
+| `fhcli backup-upload PROJECT ARCHIVE [--no-follow]` | **Import an archive as a new archived version** — activate it with `rollback` |
+| `fhcli backup-delete PROJECT ID [--remote] [--yes]` | Delete an archive (`--remote` also at the destination) |
+| `fhcli backup-config PROJECT [--enable\|--disable] [--cron EXPR] [--on-deploy] [--target NAME] [--keep N] [--keep-remote N]` | Show or change automatic backups. No options → show |
+| `fhcli backup-targets` | List the destinations declared in the server's `.env` (never their credentials) |
+| `fhcli backup-target-test NAME` | Check a destination is reachable and its credentials work |
+| `fhcli db-backup [--upload]` / `db-backups` / `db-backup-download ID` / `db-backup-delete ID` / `db-backup-config …` | The same, for the **freeholdy database itself** |
 | `fhcli remove PROJECT [--yes] [--keep-volumes]` | Delete the project (containers, images, nginx, DB row) **and its docker volumes** — `--keep-volumes` leaves the data on disk |
 | `fhcli whoami` | What the configured token may do — its role, and the project a guest token is bound to |
 | `fhcli tokens` | List every API token (admin only) |
@@ -177,6 +189,37 @@ fhcli volume-upload ws-chat ws-chat_chat-data backup.tar
 - Compose projects show their named volumes (`external:` ones are listed but never deleted);
   a single-container project shows the anonymous volumes its image's `VOLUME` instruction
   created.
+
+## Backups
+
+A version protects you from a bad deploy; a **backup** protects you from a lost server. One
+`.tar` holds the version's image(s), every volume, the stored env and the project files — enough
+to bring the project back on a different machine.
+
+```bash
+fhcli backup myapp                        # archive it now
+fhcli backups myapp                       # list archives
+fhcli backup-download myapp 4 -o out.tar  # take it off the box
+fhcli backup-upload myapp out.tar         # → imported as v7 (archived)
+fhcli rollback myapp 7 --restore-data     # activate it, data and all
+```
+
+- **Importing does not overwrite anything.** The archive's images load under the project's next
+  version number and appear in `fhcli versions` as *archived*; activating one is the ordinary
+  `rollback`, so there is only ever one answer to which build is live.
+- `--restore-data` is opt-in: a plain rollback swaps code and images and leaves data alone.
+- **Volumes are captured at backup time**, not at the version's deploy time — docker keeps no
+  per-version volume state, so backing up an older version pairs its image with today's data.
+- Automatic backups have two triggers, a cron schedule and after-every-deploy:
+  ```bash
+  fhcli backup-config myapp --enable --cron '0 3 * * *' --keep 7
+  fhcli backup-config myapp --enable --on-deploy
+  ```
+- Destinations (`rsync` over ssh, or FTP/FTPS) are declared as `BACKUP_TARGET_*` blocks in the
+  **server's** `.env`; `fhcli backup-targets` shows names and hosts, never credentials. A dead
+  destination never fails the backup — the local archive is kept and reports `remote: error`.
+- The freeholdy database is its own scope: `fhcli db-backup`, `db-backups`, `db-backup-config`.
+  Restore it on the server with `scripts/restore_db.sh` (it stops the service first).
 
 ## Tokens & roles
 

@@ -261,9 +261,9 @@ def _put(path: str, json: dict | None = None) -> dict:
         sys.exit(1)
 
 
-def _delete(path: str) -> dict:
+def _delete(path: str, params: dict | None = None) -> dict:
     try:
-        r = requests.delete(_url(path), headers=_headers(), timeout=60)
+        r = requests.delete(_url(path), headers=_headers(), params=params, timeout=60)
         r.raise_for_status()
         return r.json()
     except requests.exceptions.ConnectionError:
@@ -1362,18 +1362,33 @@ def list_versions(project: str):
 @click.argument("version", type=int)
 @click.option("--follow/--no-follow", default=True,
               help="Stream the rollback log until it completes (default: on).")
-def rollback(project: str, version: int, follow: bool):
+@click.option("--restore-data", is_flag=True, default=False,
+              help="Also restore this version's volume contents and env from a backup "
+                   "archive. Off by default — a plain rollback leaves data alone.")
+@click.option("--backup", "backup_id", type=int, default=None, metavar="ID",
+              help="Which archive to restore data from (default: the newest one of this "
+                   "version). See `fhcli backups PROJECT`.")
+def rollback(project: str, version: int, follow: bool, restore_data: bool,
+             backup_id: int | None):
     """Roll back PROJECT to an earlier VERSION (an inactive or archived one).
 
     Compose projects: the current stack is downed, the version's file snapshot restored,
-    and its retained images brought back up (named-volume data is not rolled back).
+    and its retained images brought back up.
+
+    Volume data is NOT rolled back unless you pass --restore-data, which puts the version's
+    volumes and env back from a backup archive once the containers are up.
 
     \b
-    Example:
+    Examples:
       fhcli rollback myapp 2
+      fhcli rollback myapp 2 --restore-data
     """
-    console.print(f"Rolling back [cyan]{project}[/] to [bold]v{version}[/]…")
-    data = _post(f"/projects/{project}/rollback", json={"version": version})
+    console.print(f"Rolling back [cyan]{project}[/] to [bold]v{version}[/]"
+                  + (" [dim](restoring its data too)[/]" if restore_data else "") + "…")
+    body = {"version": version, "restore_data": restore_data}
+    if backup_id is not None:
+        body["backup_id"] = backup_id
+    data = _post(f"/projects/{project}/rollback", json=body)
 
     ws_path = data.get("ws_path")
     if not follow or not ws_path:
@@ -1409,6 +1424,513 @@ def set_backup_limit(project: str, limit: int):
         f"[dim]({counts.get('active', 0)} active / {counts.get('inactive', 0)} inactive / "
         f"{counts.get('archived', 0)} archived)[/]"
     )
+
+
+# ── backups ────────────────────────────────────────────────────────────────────
+#
+# A backup is one self-contained tar: the version's image(s), the project's volumes, its env
+# files and its project tree. `backup-upload` imports one as a NEW ARCHIVED VERSION, so
+# activating a backup is just `fhcli rollback` — there is no separate "activate" verb.
+
+def _backup_path(project: str, *suffix: str) -> str:
+    """Project-scoped backup routes; the database's live under /backups/database."""
+    return "/".join([f"/projects/{project}/backups", *suffix])
+
+
+def _db_backup_path(*suffix: str) -> str:
+    return "/".join(["/backups/database", *suffix])
+
+
+def _chunked_backup_download(path: str, dest: str, total: int) -> None:
+    """Pull an archive in CHUNK_SIZE pieces. Unlike a volume download there is no staging
+    step to clean up — the archive is already a file on the server."""
+    with Progress(
+        TextColumn("[cyan]{task.description}[/]"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("receiving", total=total or None)
+        with open(dest, "wb") as out:
+            offset = 0
+            while True:
+                piece = _get_bytes(path, params={"offset": offset, "length": CHUNK_SIZE})
+                if not piece:
+                    break
+                out.write(piece)
+                offset += len(piece)
+                progress.update(task, advance=len(piece))
+                if total and offset >= total:
+                    break
+
+
+def _chunked_backup_upload(project: str, src: str) -> dict:
+    """Send an archive in CHUNK_SIZE pieces, then ask the server to import it."""
+    upload_id = uuid.uuid4().hex
+    total = os.path.getsize(src)
+    with Progress(
+        TextColumn("[cyan]{task.description}[/]"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("sending", total=total)
+        with open(src, "rb") as fh:
+            offset = 0
+            while True:
+                chunk = fh.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                _post_raw(_backup_path(project, "upload", "chunk"), data=chunk,
+                          params={"upload_id": upload_id, "offset": offset})
+                offset += len(chunk)
+                progress.update(task, advance=len(chunk))
+    return _post(_backup_path(project, "upload", "complete"),
+                 json={"upload_id": upload_id, "total_size": total})
+
+
+_BACKUP_STATUS_STYLE = {"ok": "bold green", "creating": "cyan", "error": "bold red"}
+_REMOTE_STATUS_STYLE = {"ok": "green", "pending": "cyan", "error": "bold red", "none": "dim"}
+
+
+def _backup_table(data: dict, title: str) -> Table:
+    table = Table(box=box.ROUNDED, title=f"[bold cyan]{title}[/]  [dim]· "
+                                        f"{len(data.get('backups', []))} archive(s) · "
+                                        f"{_fmt_size(data.get('total_bytes'))} total[/]",
+                  title_justify="left", show_header=True, header_style="bold")
+    table.add_column("ID",       justify="right", min_width=4)
+    table.add_column("Created",  style="dim",     min_width=19)
+    table.add_column("Version",  justify="right", min_width=7)
+    table.add_column("Kind",     min_width=9)
+    table.add_column("Size",     justify="right", min_width=9)
+    table.add_column("Contents", min_width=12)
+    table.add_column("Status",   min_width=9)
+    table.add_column("Remote",   min_width=10)
+    for b in data.get("backups", []):
+        # A database archive has only the one payload, so the I/V/E/P letters would just be
+        # three dots and a misleading "project files" P.
+        contents = "DB" if b.get("project") is None else "".join([
+            "I" if b.get("has_images") else "·",
+            "V" if b.get("has_volumes") else "·",
+            "E" if b.get("has_env") else "·",
+            "P" if b.get("has_project") else "·",
+        ])
+        kind = b.get("kind", "manual") + (" ←" if b.get("imported") else "")
+        table.add_row(
+            str(b["id"]),
+            (b.get("created_at") or "")[:19].replace("T", " "),
+            f"v{b['version']}" if b.get("version") else "—",
+            kind,
+            _fmt_size(b.get("size_bytes")),
+            contents,
+            Text(b.get("status", "?"), style=_BACKUP_STATUS_STYLE.get(b.get("status"), "white")),
+            Text(b.get("remote_status", "none"),
+                 style=_REMOTE_STATUS_STYLE.get(b.get("remote_status"), "dim")),
+        )
+    return table
+
+
+def _print_backup_list(data: dict, title: str, empty_hint: str) -> None:
+    if not data.get("backups"):
+        console.print(f"[dim]No backups yet — {empty_hint}[/]")
+        return
+    console.print(_backup_table(data, title))
+    if any(b.get("project") is not None for b in data.get("backups", [])):
+        console.print("[dim]Contents: I=images V=volumes E=env P=project files · "
+                      "'←' marks an imported archive[/]")
+    for b in data.get("backups", []):
+        if b.get("status") == "error" or b.get("remote_status") == "error":
+            console.print(f"[red]![/] backup {b['id']}: {b.get('message', '')[:200]}")
+
+
+def _print_backup_config(cfg: dict, scope: str) -> None:
+    lines = [
+        f"  enabled        : {'[green]yes[/]' if cfg.get('enabled') else '[dim]no[/]'}",
+        f"  schedule       : {cfg.get('schedule_cron') or '[dim]none[/]'}",
+        f"  on deploy      : {'yes' if cfg.get('on_deploy') else '[dim]no[/]'}",
+        f"  keep locally   : {cfg.get('keep_local')}",
+        f"  keep remotely  : {cfg.get('keep_remote') or '[dim]all[/]'}",
+        f"  destination    : {cfg.get('target_name') or '[dim]none (local only)[/]'}",
+        f"  include volumes: {'yes' if cfg.get('include_volumes') else '[dim]no[/]'}",
+    ]
+    if cfg.get("last_run_at"):
+        lines.append(f"  last run       : {cfg['last_run_at'][:19].replace('T', ' ')}"
+                     f"  [dim]{cfg.get('last_message', '')[:80]}[/]")
+    console.print(f"[bold cyan]Backup settings — {scope}[/]")
+    console.print("\n".join(lines))
+
+
+def _follow_backup(project: str | None, data: dict) -> None:
+    """Stream a backup job to completion. A project backup has its own WebSocket; the
+    database's has none (there is no project to scope it to), so that one polls the list."""
+    ws_path = data.get("ws_path")
+    if ws_path:
+        code = asyncio.run(_install_ws(ws_path))
+        if code == 0:
+            console.print("\n[green]✓[/] Backup complete")
+        else:
+            console.print(f"\n[red]✗[/] Backup failed (exit {code})")
+            sys.exit(1)
+        return
+    path = _db_backup_path() if project is None else _backup_path(project)
+    with console.status("Backing up…"):
+        for _ in range(600):
+            time.sleep(_POLL_INTERVAL)
+            rows = _get(path).get("backups", [])
+            if rows and rows[0].get("status") != "creating":
+                break
+    rows = _get(path).get("backups", [])
+    latest = rows[0] if rows else {}
+    if latest.get("status") == "ok":
+        console.print(f"[green]✓[/] {latest.get('filename')} "
+                      f"({_fmt_size(latest.get('size_bytes'))})")
+    else:
+        console.print(f"[red]✗[/] {latest.get('message', 'Backup failed')}")
+        sys.exit(1)
+
+
+@cli.command("backup")
+@click.argument("project")
+@click.option("--version", "-V", type=int, default=None, metavar="N",
+              help="Which version's image(s) to capture (default: the active one).")
+@click.option("--volumes/--no-volumes", "include_volumes", default=None,
+              help="Include the project's volumes (default: whatever backup-config says).")
+@click.option("--upload/--no-upload", default=None,
+              help="Ship the archive to the configured destination (default: upload when "
+                   "one is configured).")
+@click.option("--follow/--no-follow", default=True, help="Stream the backup log (default: on).")
+def backup(project: str, version: int | None, include_volumes: bool | None,
+           upload: bool | None, follow: bool):
+    """Back PROJECT up now — image(s), volumes, env and project files in one archive.
+
+    The archive stays on the server (see `fhcli backups`) and is uploaded to the destination
+    named in `fhcli backup-config` when there is one. Fetch it with `fhcli backup-download`.
+
+    Volumes are captured as they are RIGHT NOW: docker keeps no per-version volume state, so
+    backing up an older version pairs that version's image with today's data.
+
+    \b
+    Examples:
+      fhcli backup myapp
+      fhcli backup myapp --version 3 --no-volumes
+    """
+    body = {}
+    if version is not None:
+        body["version"] = version
+    if include_volumes is not None:
+        body["include_volumes"] = include_volumes
+    if upload is not None:
+        body["upload"] = upload
+    data = _post(_backup_path(project), json=body)
+    console.print(f"[green]✓[/] {data.get('message', 'Backup launched')}")
+    if follow:
+        _follow_backup(project, data)
+
+
+@cli.command("backups")
+@click.argument("project")
+def list_backups(project: str):
+    """List PROJECT's backup archives, newest first.
+
+    \b
+    Example:
+      fhcli backups myapp
+    """
+    data = _get(_backup_path(project))
+    _print_backup_list(data, project, f"take one with [bold]fhcli backup {project}[/]")
+
+
+@cli.command("backup-download")
+@click.argument("project")
+@click.argument("backup_id", type=int)
+@click.option("--output", "-o", "output", default=None,
+              help="Where to write the archive (default: the server's own filename).")
+def backup_download(project: str, backup_id: int, output: str | None):
+    """Download one of PROJECT's backup archives (see `fhcli backups` for the ID).
+
+    \b
+    Example:
+      fhcli backup-download myapp 4 -o myapp-backup.tar
+    """
+    listing = _get(_backup_path(project)).get("backups", [])
+    row = next((b for b in listing if b["id"] == backup_id), None)
+    if row is None:
+        console.print(f"[bold red]Error:[/] no backup {backup_id} for '{project}' — "
+                      f"see [bold]fhcli backups {project}[/]")
+        sys.exit(1)
+    dest = output or row["filename"]
+    _chunked_backup_download(_backup_path(project, str(backup_id), "download"), dest,
+                             row.get("size_bytes") or 0)
+    console.print(f"[green]✓[/] {row['filename']} → [bold]{dest}[/] "
+                  f"({_fmt_size(os.path.getsize(dest))})")
+
+
+@cli.command("backup-upload")
+@click.argument("project")
+@click.argument("archive", type=click.Path(exists=True))
+@click.option("--follow/--no-follow", default=True, help="Stream the import log (default: on).")
+def backup_upload(project: str, archive: str, follow: bool):
+    """Import ARCHIVE into PROJECT as a new archived version.
+
+    The archive's images are loaded under the project's next version number and the version
+    appears in `fhcli versions` as *archived*. Nothing is started — activate it exactly like
+    any other version:
+
+    \b
+      fhcli rollback PROJECT N                 # code + images only
+      fhcli rollback PROJECT N --restore-data  # …and the archive's volume data + env
+
+    \b
+    Example:
+      fhcli backup-upload myapp myapp-backup.tar
+    """
+    data = _chunked_backup_upload(project, archive)
+    version = data.get("version")
+    console.print(f"[green]✓[/] {data.get('message', 'Import launched')}")
+    if follow and data.get("ws_path"):
+        code = asyncio.run(_install_ws(data["ws_path"]))
+        if code != 0:
+            console.print(f"\n[red]✗[/] Import failed (exit {code})")
+            sys.exit(1)
+        console.print(f"\n[green]✓[/] Imported as [bold]v{version}[/] (archived)")
+    console.print(f"  Activate with: [bold]fhcli rollback {project} {version} --restore-data[/]")
+
+
+@cli.command("backup-delete")
+@click.argument("project")
+@click.argument("backup_id", type=int)
+@click.option("--remote", is_flag=True, default=False,
+              help="Also delete the copy at the configured destination.")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip the confirmation prompt.")
+def backup_delete(project: str, backup_id: int, remote: bool, yes: bool):
+    """Delete one of PROJECT's backup archives.
+
+    \b
+    Example:
+      fhcli backup-delete myapp 4
+    """
+    if not yes:
+        click.confirm(f"Delete backup {backup_id} of '{project}'"
+                      + (" and its remote copy" if remote else "") + "?", abort=True)
+    data = _delete(_backup_path(project, str(backup_id)), params={"remote": str(remote).lower()})
+    for line in data.get("details", []):
+        console.print(f"  [dim]{line}[/]")
+    console.print(f"[green]✓[/] Backup {backup_id} deleted")
+
+
+def _config_body(enabled, disable, cron, on_deploy, target, keep, keep_remote, volumes) -> dict:
+    body = {}
+    if enabled or disable:
+        body["enabled"] = bool(enabled)
+    if cron is not None:
+        body["schedule_cron"] = cron
+    if on_deploy is not None:
+        body["on_deploy"] = on_deploy
+    if target is not None:
+        body["target_name"] = target
+    if keep is not None:
+        body["keep_local"] = keep
+    if keep_remote is not None:
+        body["keep_remote"] = keep_remote
+    if volumes is not None:
+        body["include_volumes"] = volumes
+    return body
+
+
+_CONFIG_OPTIONS = [
+    click.option("--enable", "enabled", is_flag=True, default=False, help="Turn automatic backups on."),
+    click.option("--disable", is_flag=True, default=False, help="Turn automatic backups off."),
+    click.option("--cron", default=None, metavar="EXPR",
+                 help="Five-field cron schedule, e.g. '0 3 * * *' for 03:00 daily. "
+                      "Pass '' to remove the timer."),
+    click.option("--on-deploy/--no-on-deploy", default=None,
+                 help="Back up after every successful deploy."),
+    click.option("--target", default=None, metavar="NAME",
+                 help="Destination from the server's .env (see `fhcli backup-targets`). "
+                      "Pass '' for local-only."),
+    click.option("--keep", type=int, default=None, metavar="N",
+                 help="How many archives to keep on the server."),
+    click.option("--keep-remote", type=int, default=None, metavar="N",
+                 help="How many to keep at the destination (0 = all)."),
+    click.option("--volumes/--no-volumes", "volumes", default=None,
+                 help="Include volumes in automatic backups."),
+]
+
+
+def _with_config_options(fn):
+    for option in reversed(_CONFIG_OPTIONS):
+        fn = option(fn)
+    return fn
+
+
+@cli.command("backup-config")
+@click.argument("project")
+@_with_config_options
+def backup_config(project: str, enabled: bool, disable: bool, cron, on_deploy, target,
+                  keep, keep_remote, volumes):
+    """Show or change PROJECT's automatic-backup settings.
+
+    With no options it prints the current settings. Two independent triggers: a cron
+    schedule, and a backup after every successful deploy.
+
+    \b
+    Examples:
+      fhcli backup-config myapp
+      fhcli backup-config myapp --enable --cron '0 3 * * *' --target offsite --keep 7
+      fhcli backup-config myapp --enable --on-deploy
+    """
+    body = _config_body(enabled, disable, cron, on_deploy, target, keep, keep_remote, volumes)
+    cfg = (_put(f"/projects/{project}/backup-config", json=body) if body
+           else _get(f"/projects/{project}/backup-config"))
+    _print_backup_config(cfg, project)
+
+
+@cli.command("backup-targets")
+def backup_targets():
+    """List the backup destinations declared in the server's .env.
+
+    Credentials never leave the server — this shows names, types and hosts only. Add a
+    destination by editing the server's .env (see .env.example) and restarting freeholdy.
+
+    \b
+    Example:
+      fhcli backup-targets
+    """
+    data = _get("/backups/targets")
+    targets = data.get("targets", [])
+    if not targets:
+        console.print("[dim]No backup destinations declared. Add a BACKUP_TARGET_* block to "
+                      "the server's .env — see .env.example.[/]")
+        return
+    table = Table(box=box.ROUNDED, title="[bold cyan]Backup destinations[/]",
+                  title_justify="left", show_header=True, header_style="bold")
+    table.add_column("Name", min_width=10)
+    table.add_column("Type", min_width=6)
+    table.add_column("Host", min_width=18)
+    table.add_column("Path", min_width=14)
+    table.add_column("Auth", min_width=10)
+    for t in targets:
+        auth = "ssh key" if t.get("has_ssh_key") else ("password" if t.get("has_password") else "[dim]none[/]")
+        host = t.get("host", "") + (f":{t['port']}" if t.get("port") else "")
+        table.add_row(t["name"], t["type"], f"{t.get('user') + '@' if t.get('user') else ''}{host}",
+                      t.get("path") or "[dim]—[/]", auth)
+    console.print(table)
+    console.print("[dim]Check one with: [bold]fhcli backup-target-test NAME[/][/]")
+
+
+@cli.command("backup-target-test")
+@click.argument("name")
+def backup_target_test(name: str):
+    """Check that destination NAME is reachable and its credentials work.
+
+    \b
+    Example:
+      fhcli backup-target-test offsite
+    """
+    data = _post(f"/backups/targets/{name}/test")
+    if data.get("status") == "ok":
+        console.print(f"[green]✓[/] {data.get('message')}")
+    else:
+        console.print(f"[red]✗[/] {data.get('message')}")
+        sys.exit(1)
+
+
+@cli.command("db-backup")
+@click.option("--upload/--no-upload", default=None,
+              help="Ship the archive to the configured destination.")
+@click.option("--follow/--no-follow", default=True, help="Wait for it to finish (default: on).")
+def db_backup(upload: bool | None, follow: bool):
+    """Back up the freeholdy database itself.
+
+    A consistent SQLite copy, gzipped into an archive under the server's data directory. The
+    server's .env is deliberately NOT included — it holds the destination credentials.
+    Restore one with `scripts/restore_db.sh` on the server (it stops the service first).
+
+    \b
+    Example:
+      fhcli db-backup --upload
+    """
+    body = {} if upload is None else {"upload": upload}
+    data = _post(_db_backup_path(), json=body)
+    console.print(f"[green]✓[/] {data.get('message', 'Backup launched')}")
+    if follow:
+        _follow_backup(None, data)
+
+
+@cli.command("db-backups")
+def db_backups():
+    """List backups of the freeholdy database.
+
+    \b
+    Example:
+      fhcli db-backups
+    """
+    data = _get(_db_backup_path())
+    _print_backup_list(data, "freeholdy database", "take one with [bold]fhcli db-backup[/]")
+
+
+@cli.command("db-backup-download")
+@click.argument("backup_id", type=int)
+@click.option("--output", "-o", "output", default=None,
+              help="Where to write the archive (default: the server's own filename).")
+def db_backup_download(backup_id: int, output: str | None):
+    """Download a database backup archive (see `fhcli db-backups` for the ID).
+
+    \b
+    Example:
+      fhcli db-backup-download 3 -o freeholdy-db.tar
+    """
+    listing = _get(_db_backup_path()).get("backups", [])
+    row = next((b for b in listing if b["id"] == backup_id), None)
+    if row is None:
+        console.print(f"[bold red]Error:[/] no database backup {backup_id} — "
+                      f"see [bold]fhcli db-backups[/]")
+        sys.exit(1)
+    dest = output or row["filename"]
+    _chunked_backup_download(_db_backup_path(str(backup_id), "download"), dest,
+                             row.get("size_bytes") or 0)
+    console.print(f"[green]✓[/] {row['filename']} → [bold]{dest}[/] "
+                  f"({_fmt_size(os.path.getsize(dest))})")
+
+
+@cli.command("db-backup-delete")
+@click.argument("backup_id", type=int)
+@click.option("--remote", is_flag=True, default=False, help="Also delete the remote copy.")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip the confirmation prompt.")
+def db_backup_delete(backup_id: int, remote: bool, yes: bool):
+    """Delete a database backup archive.
+
+    \b
+    Example:
+      fhcli db-backup-delete 3
+    """
+    if not yes:
+        click.confirm(f"Delete database backup {backup_id}?", abort=True)
+    data = _delete(_db_backup_path(str(backup_id)), params={"remote": str(remote).lower()})
+    for line in data.get("details", []):
+        console.print(f"  [dim]{line}[/]")
+    console.print(f"[green]✓[/] Database backup {backup_id} deleted")
+
+
+@cli.command("db-backup-config")
+@_with_config_options
+def db_backup_config(enabled: bool, disable: bool, cron, on_deploy, target, keep,
+                     keep_remote, volumes):
+    """Show or change automatic backups of the freeholdy database.
+
+    \b
+    Examples:
+      fhcli db-backup-config
+      fhcli db-backup-config --enable --cron '0 4 * * *' --target offsite --keep 14
+    """
+    body = _config_body(enabled, disable, cron, on_deploy, target, keep, keep_remote, volumes)
+    cfg = (_put(_db_backup_path("config"), json=body) if body
+           else _get(_db_backup_path("config")))
+    _print_backup_config(cfg, "freeholdy database")
 
 
 # ── exec ───────────────────────────────────────────────────────────────────────

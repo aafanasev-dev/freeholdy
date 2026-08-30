@@ -416,6 +416,9 @@ class VersionInfo(BaseModel):
     local_port: Optional[int] = None     # None once archived (port freed)
     container_status: str = "not_found"  # running | exited | not_found | error
     created_at: datetime
+    # How many backup archives capture this version — drives the web UI's 💾 badge and tells
+    # a client whether "roll back and restore this version's data too" is available at all.
+    backup_count: int = 0
 
 
 class VersionsResponse(BaseModel):
@@ -439,6 +442,11 @@ class SetBackupLimitRequest(BaseModel):
 
 class RollbackRequest(BaseModel):
     version: int
+    # Also put this version's volume contents and env files back, read from a backup archive.
+    # Off by default: a plain rollback swaps code + images and deliberately leaves data alone.
+    restore_data: bool = False
+    # Which archive to read. None picks the newest `ok` backup of this version.
+    backup_id: Optional[int] = None
 
 
 class RollbackResponse(BaseModel):
@@ -483,3 +491,149 @@ class EnvResponse(BaseModel):
                                     # POST /projects/{name}/restart to apply
     status: str = "ok"              # ok | error
     message: str = ""
+
+
+# ── Backups ─────────────────────────────────────────────────────────────────────
+
+def validate_cron_expr(v: str) -> str:
+    """A five-field cron expression, checked with the same library the scheduler evaluates it
+    with — so a schedule the API accepts is one that will actually fire."""
+    from croniter import croniter   # lazy: keeps schemas importable without the dependency
+    expression = (v or "").strip()
+    if not croniter.is_valid(expression):
+        raise ValueError(
+            f"'{expression}' is not a valid cron expression — five fields "
+            f"(minute hour day month weekday), e.g. '0 3 * * *' for 03:00 daily"
+        )
+    return expression
+
+
+class BackupInfo(BaseModel):
+    """One backup archive. `project` is None for the freeholdy database's own backups."""
+    id: int
+    project: Optional[str] = None
+    version: Optional[int] = None        # the ProjectVersion this archive captured
+    kind: str = "manual"                 # manual | scheduled | deploy
+    imported: bool = False               # arrived by upload rather than made here
+    filename: str
+    size_bytes: Optional[int] = None
+    sha256: Optional[str] = None
+    has_images: bool = False
+    has_volumes: bool = False
+    has_env: bool = False
+    has_project: bool = False
+    status: str = "creating"             # creating | ok | error
+    message: str = ""
+    target_name: Optional[str] = None
+    remote_status: str = "none"          # none | pending | ok | error
+    remote_path: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class BackupsResponse(BaseModel):
+    project: Optional[str] = None        # None = the database scope
+    backups: List[BackupInfo] = []       # newest first
+    total_bytes: int = 0
+
+
+class CreateBackupRequest(BaseModel):
+    # Which version's images to capture. None = the active one.
+    version: Optional[int] = None
+    # None falls back to the scope's stored config.
+    include_volumes: Optional[bool] = None
+    # None uploads when a target is configured; False keeps the archive local.
+    upload: Optional[bool] = None
+
+
+class BackupCreateResponse(BaseModel):
+    status: str                          # ok | error
+    message: str
+    backup: Optional[BackupInfo] = None
+    job: Optional[DockerJobStatusResponse] = None
+    ws_path: Optional[str] = None        # WS /projects/{name}/backup
+
+
+class BackupUploadCompleteRequest(BaseModel):
+    upload_id: str
+    total_size: Optional[int] = None
+
+
+class BackupImportResponse(BaseModel):
+    """The result of importing an uploaded archive: a new **archived** version the client
+    activates with the ordinary rollback endpoint."""
+    status: str                          # ok | error
+    message: str
+    version: int                         # the version number the archive was minted as
+    project: str
+    job: Optional[DockerJobStatusResponse] = None
+    ws_path: Optional[str] = None        # WS /projects/{name}/deploy
+
+
+class BackupConfigResponse(BaseModel):
+    project: Optional[str] = None        # None = the database scope
+    enabled: bool = False
+    schedule_cron: Optional[str] = None
+    on_deploy: bool = False
+    keep_local: int = 5
+    keep_remote: int = 0                 # 0 = never prune at the destination
+    target_name: Optional[str] = None
+    include_volumes: bool = True
+    last_run_at: Optional[datetime] = None
+    last_status: Optional[str] = None
+    last_message: str = ""
+
+
+class SetBackupConfigRequest(BaseModel):
+    """Every field is optional — an omitted one keeps its stored value, so a client can
+    toggle one setting without having to read-modify-write the whole config."""
+    enabled: Optional[bool] = None
+    schedule_cron: Optional[str] = None  # "" clears the timer
+    on_deploy: Optional[bool] = None
+    keep_local: Optional[int] = None
+    keep_remote: Optional[int] = None
+    target_name: Optional[str] = None    # "" clears the destination
+    include_volumes: Optional[bool] = None
+
+    @field_validator("schedule_cron")
+    @classmethod
+    def check_cron(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return v
+        return validate_cron_expr(v)
+
+    @field_validator("keep_local")
+    @classmethod
+    def check_keep_local(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 1:
+            raise ValueError("keep_local must be >= 1")
+        return v
+
+    @field_validator("keep_remote")
+    @classmethod
+    def check_keep_remote(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 0:
+            raise ValueError("keep_remote must be >= 0 (0 = keep everything remotely)")
+        return v
+
+
+class BackupTargetInfo(BaseModel):
+    """A destination declared in the server's `.env`. Secrets are never included — the API
+    reports only whether a password or key is present."""
+    name: str
+    type: str                            # rsync | ftp | ftps
+    host: str
+    port: Optional[str] = None
+    user: Optional[str] = None
+    path: Optional[str] = None
+    has_password: bool = False
+    has_ssh_key: bool = False
+
+
+class BackupTargetsResponse(BaseModel):
+    targets: List[BackupTargetInfo] = []
+
+
+class BackupTargetTestResponse(BaseModel):
+    status: str                          # ok | error
+    name: str
+    message: str

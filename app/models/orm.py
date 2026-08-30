@@ -53,6 +53,9 @@ class Project(Base):
     services = relationship("ComposeService", back_populates="project", cascade="all, delete-orphan")
     versions = relationship("ProjectVersion", back_populates="project", cascade="all, delete-orphan")
     env_files = relationship("ProjectEnvFile", back_populates="project", cascade="all, delete-orphan")
+    backups = relationship("Backup", back_populates="project", cascade="all, delete-orphan")
+    backup_config = relationship("BackupConfig", back_populates="project",
+                                 cascade="all, delete-orphan", uselist=False)
     # Guest tokens scoped to this project. Deleting the project unbinds them (the association
     # rows go) but never deletes the tokens — one may still cover other projects.
     tokens = relationship("Token", secondary=token_projects, back_populates="projects")
@@ -167,3 +170,82 @@ class Token(Base):
 
     # Guest scope. Always empty for an admin token, which needs no scoping.
     projects = relationship("Project", secondary=token_projects, back_populates="tokens")
+
+
+class Backup(Base):
+    """One backup archive — a self-contained `.tar` holding a project's images, volumes,
+    env files and project tree (or, for the system scope, the freeholdy database).
+
+    `project_id IS NULL` is the **system scope**: the freeholdy SQLite database itself. That
+    is what lets the database backup reuse the same service functions, retention logic and
+    UI as a project backup instead of growing a parallel implementation.
+
+    `version` is the `ProjectVersion.version` the archive captured. For an imported archive
+    (`imported=True`) it is the version number *minted at import time* — importing a backup
+    loads its images under `freeholdy_{name}:v{N}` and writes an `archived` ProjectVersion,
+    so activating a backup is the ordinary rollback path and the Versions panel stays the
+    single answer to "which build is live".
+
+    The archive lives at `{DATA_DIR}/backups/{project}/{filename}` (`{DATA_DIR}/backups/
+    _system/` for the database). `remote_*` records the copy shipped to the configured
+    `backup_targets` destination; a failed upload never fails the backup — the local copy
+    still exists, and `remote_status` says what happened."""
+    __tablename__ = "backups"
+
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)  # NULL = the freeholdy DB
+    version = Column(Integer, nullable=True)           # ProjectVersion.version captured (NULL for the DB scope)
+    kind = Column(String, nullable=False, default="manual")   # manual | scheduled | deploy
+    imported = Column(Boolean, nullable=False, default=False)  # arrived by upload rather than made here
+    filename = Column(String, nullable=False)
+    size_bytes = Column(Integer, nullable=True)
+    sha256 = Column(String, nullable=True)
+    has_images = Column(Boolean, nullable=False, default=False)
+    has_volumes = Column(Boolean, nullable=False, default=False)
+    has_env = Column(Boolean, nullable=False, default=False)
+    has_project = Column(Boolean, nullable=False, default=False)
+    status = Column(String, nullable=False, default="creating")  # creating | ok | error
+    message = Column(Text, nullable=False, default="")
+    target_name = Column(String, nullable=True)        # the .env-declared destination it was shipped to
+    remote_status = Column(String, nullable=False, default="none")  # none | pending | ok | error
+    remote_path = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    project = relationship("Project", back_populates="backups")
+
+
+class BackupConfig(Base):
+    """Automatic-backup settings for one project, or for the freeholdy database.
+
+    One row per scope (`project_id IS NULL` = the database), enforced by a unique constraint
+    — SQLite treats NULLs as distinct in a UNIQUE index, so the system row's uniqueness is
+    maintained by `backup_service.get_config` doing a get-or-create under one session rather
+    than by the constraint.
+
+    Two independent triggers, both optional: `schedule_cron` (a five-field cron expression
+    evaluated once a minute by `backup_scheduler`) and `on_deploy` (a backup taken after
+    every successful deploy, the same shape as creating a version). `keep_local` caps
+    archives on disk exactly the way `Project.backup_limit` caps archived versions;
+    `keep_remote` does the same at the destination (0 = never prune there).
+
+    `target_name` names a destination declared in the server's `.env` (see
+    `app/services/backup_targets.py`). Credentials never live here."""
+    __tablename__ = "backup_configs"
+    __table_args__ = (UniqueConstraint("project_id"),)
+
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)  # NULL = the freeholdy DB
+    enabled = Column(Boolean, nullable=False, default=False)
+    schedule_cron = Column(String, nullable=True)      # five-field cron, NULL = no timer
+    on_deploy = Column(Boolean, nullable=False, default=False)
+    keep_local = Column(Integer, nullable=False, default=5)
+    keep_remote = Column(Integer, nullable=False, default=0)   # 0 = keep everything remotely
+    target_name = Column(String, nullable=True)
+    include_volumes = Column(Boolean, nullable=False, default=True)
+    last_run_at = Column(DateTime, nullable=True)
+    last_status = Column(String, nullable=True)        # ok | error
+    last_message = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    project = relationship("Project", back_populates="backup_config")

@@ -26,7 +26,7 @@ from app.models.schemas import (
     DockerJobStatusResponse,
 )
 from app.auth import require_admin, require_project_access
-from app.services import docker_service, deploy_service
+from app.services import docker_service, deploy_service, backup_service
 
 router = APIRouter()
 
@@ -67,6 +67,12 @@ def _versions_response(project: Project) -> VersionsResponse:
     counts = {"active": 0, "inactive": 0, "archived": 0}
     infos: list[VersionInfo] = []
     compose = project.deploy_mode == "compose"
+    # How many archives capture each version — a client uses it to offer "restore this
+    # version's data too", which is only possible where a backup exists.
+    backups_by_version: dict = {}
+    for b in project.backups:
+        if b.status == "ok" and b.version is not None:
+            backups_by_version[b.version] = backups_by_version.get(b.version, 0) + 1
     for v in sorted(project.versions, key=lambda x: x.version, reverse=True):
         counts[v.status] = counts.get(v.status, 0) + 1
         if compose:
@@ -82,6 +88,7 @@ def _versions_response(project: Project) -> VersionsResponse:
             local_port=v.local_port,
             container_status=container_status,
             created_at=v.created_at,
+            backup_count=backups_by_version.get(v.version, 0),
         ))
     return VersionsResponse(
         project=project.name,
@@ -135,6 +142,20 @@ def rollback(project_name: str, request: RollbackRequest,
             detail=f"Version {request.version} is already the active version",
         )
 
+    # Data restore is opt-in: resolve the archive up front so a missing one is a 4xx here
+    # rather than a surprise line in the middle of a rollback that already switched nginx.
+    data_backup_id = None
+    if request.restore_data:
+        row = backup_service.find_data_backup(db, project, request.version, request.backup_id)
+        if row is None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"No backup archive is available for v{request.version} of "
+                       f"'{project_name}' — roll back without restore_data, or take a backup "
+                       f"first (POST /projects/{project_name}/backups)",
+            )
+        data_backup_id = row.id
+
     if project.deploy_mode == "compose":
         snap = deploy_service.compose_snapshot_dir(project_name, request.version)
         if not os.path.isdir(snap):
@@ -143,14 +164,18 @@ def rollback(project_name: str, request: RollbackRequest,
                 detail=f"Version {request.version} of '{project_name}' has no file snapshot "
                        f"on disk ({snap}) — it cannot be restored",
             )
-        job_key = deploy_service.compose_rollback_to_version(project.id, request.version)
+        job_key = deploy_service.compose_rollback_to_version(
+            project.id, request.version, data_backup_id=data_backup_id)
     else:
-        job_key = deploy_service.rollback_to_version(project.id, request.version)
+        job_key = deploy_service.rollback_to_version(
+            project.id, request.version, data_backup_id=data_backup_id)
     ws_path = f"/projects/{project_name}/deploy"
     job = docker_service.get_job(job_key)
     return RollbackResponse(
         status="ok",
-        message=f"Rolling back '{project_name}' to v{request.version} — stream {ws_path}",
+        message=f"Rolling back '{project_name}' to v{request.version}"
+                + (" and restoring its data" if data_backup_id else "")
+                + f" — stream {ws_path}",
         job=DockerJobStatusResponse(
             status=job.status if job else "no_job",
             operation=job.operation if job else None,

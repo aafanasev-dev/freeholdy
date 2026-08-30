@@ -244,6 +244,8 @@ Key settings:
 | `HOST` | `0.0.0.0` | freeholdy listen address (the installer sets `127.0.0.1`) |
 | `PORT` | `8000` | freeholdy listen port (the installer defaults to `27182`) |
 | `CORS_ORIGINS` | localhost dev ports | Browser origins allowed to call the API; `https://{BASE_DOMAIN}` and `https://ui.{BASE_DOMAIN}` are injected automatically |
+| `DEFAULT_BACKUP_KEEP` | `5` | Backup archives kept on disk per project (and for the database) |
+| `BACKUP_TARGET_*` | — | Optional remote backup destinations — see [Backups](#backups) |
 
 ---
 
@@ -501,6 +503,112 @@ a Dockerfile); the project becomes compose-mode and the deploy runs `docker comp
 (tear it down with `.../compose/down`). The `fhcli` CLI wraps all of this in one command —
 `fhcli deploy NAME PATH-OR-GIT-URL` auto-creates, provisions, and deploys in one step — see
 `cli/README.md`.
+
+---
+
+## Backups
+
+Versions (blue/green) protect you from a bad deploy. **Backups** protect you from a lost server: a
+backup is one self-contained `.tar` you can take off the box and bring back later — even onto a
+fresh machine.
+
+```
+myapp-v3-20260830-141922.fhbak.tar
+├── manifest.json          project, mode, version, checksums
+├── images/                docker save of the version's image(s) — one per service for compose
+├── volumes/               a tar of every volume the project owns
+├── env/                   the stored .env files
+└── project/               the project tree (compose: that version's snapshot)
+```
+
+### Restoring is a rollback
+
+Uploading an archive does **not** overwrite anything. It loads the archive's images under the
+project's *next* version number and the version shows up in the versions list as **archived** —
+so activating a backup is the same rollback you already use, and there is only ever one answer to
+"which build is live".
+
+```bash
+fhcli backup myapp                       # archive it now (streams the log)
+fhcli backups myapp                      # list archives
+fhcli backup-download myapp 4 -o out.tar # fetch one
+fhcli backup-upload myapp out.tar        # → imported as v7 (archived)
+
+fhcli rollback myapp 7                   # activate it — code + images only
+fhcli rollback myapp 7 --restore-data    # …and put its volume data + env back
+```
+
+`--restore-data` is opt-in on purpose: a plain rollback swaps code and images and leaves your data
+alone. Note that **volumes are captured at backup time**, not at the version's deploy time — docker
+keeps no per-version volume state, so backing up an older version pairs that version's image with
+today's data.
+
+### Automatic backups
+
+Two independent triggers, per project, set with `fhcli backup-config` or on the web UI's **Backups**
+tab:
+
+```bash
+fhcli backup-config myapp --enable --cron '0 3 * * *' --keep 7   # nightly, keep 7
+fhcli backup-config myapp --enable --on-deploy                   # after every successful deploy
+fhcli backup-config myapp                                        # show the current settings
+```
+
+A cron schedule is armed when you save it and fires at the next matching minute; a window missed
+while the server was down is caught up once on the next boot.
+
+### Shipping them off the server
+
+Destinations are declared in freeholdy's own `.env` — **credentials never reach the database, the
+API or the web UI**, which store and show only the destination's name.
+
+```bash
+# rsync over ssh
+BACKUP_TARGET_offsite_TYPE=rsync
+BACKUP_TARGET_offsite_HOST=backup.example.com
+BACKUP_TARGET_offsite_USER=freeholdy
+BACKUP_TARGET_offsite_SSH_KEY=/root/.ssh/backup_ed25519
+BACKUP_TARGET_offsite_PATH=/srv/backups
+
+# FTP (TYPE=ftps, or TLS=true, for an encrypted control channel)
+BACKUP_TARGET_ftpbox_TYPE=ftp
+BACKUP_TARGET_ftpbox_HOST=ftp.example.com
+BACKUP_TARGET_ftpbox_USER=someone
+BACKUP_TARGET_ftpbox_PASSWORD=secret
+BACKUP_TARGET_ftpbox_PATH=/backups
+```
+
+Restart freeholdy after editing `.env`, then:
+
+```bash
+fhcli backup-targets                     # list what the server can see
+fhcli backup-target-test offsite         # check reachability + credentials
+fhcli backup-config myapp --target offsite --keep-remote 30
+```
+
+`rsync` targets need the `rsync` binary on the server (`apt install rsync`); FTP needs nothing extra.
+A destination being down never fails the backup — the local archive is kept and the row reports
+`remote: error` with the transport's own message.
+
+### Backing up freeholdy itself
+
+The freeholdy database (projects, versions, env, tokens) is a backup scope of its own, with the same
+commands and the same schedule options:
+
+```bash
+fhcli db-backup --upload
+fhcli db-backups
+fhcli db-backup-config --enable --cron '0 4 * * *' --target offsite --keep 14
+fhcli db-backup-download 3 -o freeholdy-db.tar
+```
+
+The archive deliberately does **not** include `.env` — that holds your destination credentials.
+Restoring is a script rather than an API call, because the server serving the request is the one
+holding the database open:
+
+```bash
+sudo ./scripts/restore_db.sh freeholdy-db.tar   # stops the service, swaps the file, starts it
+```
 
 ---
 

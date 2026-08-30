@@ -23,7 +23,7 @@ behind nginx (`ui.your_domain.com`); see `README.md`.
 
 ## Architecture
 
-**The entire application is one file: `src/App.jsx` (~2520 lines).** `main.jsx` only mounts it.
+**The entire application is one file: `src/App.jsx` (~3250 lines).** `main.jsx` only mounts it.
 There is no router, no component directory, and no CSS files. When adding UI, add it to `App.jsx`
 following the existing `// ── Section ──` comment dividers and component conventions below — do not
 introduce new files or a styling library unless asked.
@@ -95,12 +95,26 @@ Things that require reading the whole file to understand:
   scale: buttons/inputs/segments/nav items `10px`, cards/panels/modals/log panes `14px`,
   chips/badges/inline code `7px`, progress bars `999px`.
 - **`Dashboard` layout is a fixed left nav rail + shifted main column.** A `<nav className="fh-rail">`
-  (220px, `C.s2`) holds the `freeholdy` brand + version badge, the `NavItem` entries (**Projects**
-  clears the panels, **Deploy**/**Plugins** toggle `showDeploy`/`showPlugins` with a money-green
-  active state, **Git key** opens `GitKeyModal`), and a bottom **Refresh**/**Logout** footer. The content
-  sits in `.fh-main` (`margin-left:220px`) under a slim sticky top bar (section title + `api ●`
-  health dot + `DOMAIN`). Below 820px the rail becomes an off-canvas overlay toggled by `railOpen`
-  (the `.fh-burger` hamburger + a backdrop); the media query lives in the global `<style>` block.
+  (240px, `C.s2`) holds the `freeholdy` brand + version badge, the `NavItem` entries (**Projects**
+  clears the panels; **Backups**, **Deploy**, **Plugins** and **Tokens** each open their own panel
+  with a money-green active state; **Git key** opens `GitKeyModal`), and a bottom
+  **Refresh**/**Logout** footer. The content sits in `.fh-main` (`margin-left:240px`) under a slim
+  sticky top bar (section title + `api ●` health dot + `DOMAIN`). Below 820px the rail becomes an
+  off-canvas overlay toggled by `railOpen` (the `.fh-burger` hamburger + a backdrop); the media
+  query lives in the global `<style>` block.
+- **The rail panels are mutually exclusive, and one helper enforces it.** Each panel is a boolean
+  of `Dashboard` state, and `showOnly(setter)` maps over the `PANELS` array setting exactly one
+  true. Adding a panel is therefore a `useState`, an entry in `PANELS`, a `<NavItem onClick={() =>
+  showOnly(setShowX)}>`, a `sectionTitle` arm and a render branch — **not** an edit inside every
+  other nav item's `onClick`, which is how it used to work and how it drifted.
+- **`BackupsPanel` covers projects and the database with one component.** Its `scope` state is a
+  project name or `null` for the freeholdy database, and `backupPath`/`configPath` map that onto
+  `/projects/{n}/backups*` or `/backups/database*` — the server serves both with the same shapes,
+  so the panel needs no second implementation. Creating a backup streams over
+  `WS /projects/{n}/backup` through the shared `InstallPane` (via `onStream`) *and* polls the list,
+  because the database scope has no project to hang a socket on. Uploading an archive calls
+  `chunkedBackupUpload` (the `chunkedVolumeUpload` shape) and then points the user at the versions
+  panel: an import creates an **archived version**, and activating it is the ordinary rollback.
 - **Container/job status is a fixed vocabulary** rendered by the `SC` (color) and `SI` (glyph)
   maps and the `<Tag>` component: `running | done | exited | aborted | error | no_image |
   not_found | no_job`. These mirror the server's synthesized states — keep the maps in sync if the
@@ -137,7 +151,17 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   both open the shared `VersionsModal` (backup-limit control + versions table). A **rollback** streams
   over `WS /projects/{name}/deploy` — the modal hands the returned `ws_path` up via `onStream`
   (`Dashboard.handleDeployStream`) to the shared `InstallPane`, exactly like a deploy. `mkApi` now also
-  has a `put`.
+  has a `put`. `VersionInfo.backup_count` drives a 💾 marker per row, and the modal's
+  "also restore volume data and env" checkbox — shown only when some version has an archive — adds
+  `restore_data: true` to the rollback body.
+- **Backups** (both modes): `GET|POST /projects/{name}/backups`, `GET .../backups/{id}/download`
+  (raw `[offset,length)` pieces like a volume download, but with no staging step to discard),
+  `DELETE .../backups/{id}?remote=`, the `upload/chunk` + `upload/complete` pair (admin only), and
+  `GET|PUT /projects/{name}/backup-config`. System scope: `GET /backups/targets`,
+  `POST /backups/targets/{name}/test`, and `/backups/database*` mirroring the project routes.
+  Creating a backup streams over its own `WS /projects/{name}/backup` (a backup only reads docker,
+  so it runs on its own job key and may overlap a deploy); an **import** streams over the project's
+  ordinary `WS /projects/{name}/deploy`, because it takes the deploy job key.
 - Compose lifecycle: `.../compose/{down|abort}`, `GET .../compose/status` (no `/build` or `/up`)
 - **Environment variables** (both modes): `GET|PUT|DELETE /projects/{name}/env` for the project-level
   `.env` file (a dockerfile project's container env; a compose stack's shared file) and

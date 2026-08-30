@@ -29,6 +29,11 @@
 #      cleared by a file upload, so POST /projects/{name}/redeploy can re-clone from the
 #      stored origin. Nothing to backfill: an existing project has no recorded origin until
 #      its next git deploy (the .git dir on disk is not read).
+#   7. backups — adds the backups table (one row per archive; project_id NULL = an archive of
+#      the freeholdy database itself) and the backup_configs table (automatic-backup settings
+#      per scope: cron schedule, on-deploy trigger, retention, destination name). Nothing to
+#      backfill: a scope with no config row has automatic backups off, which is exactly the
+#      pre-feature behaviour, and backup_service.get_config creates the row on first access.
 #
 # Usage:
 #   ./migrate_db.sh [path/to/freeholdy.db]
@@ -105,13 +110,23 @@ if [ -n "$has_git_url" ] && [ -n "$has_git_branch" ]; then
     git_origin_done=1
 fi
 
+# The two backup tables. Both are created whole (no column-level upgrades yet), so their
+# presence alone marks migration 7 as applied.
+has_backups="$(sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='backups';")"
+has_backup_configs="$(sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='backup_configs';")"
+backups_done=""
+if [ -n "$has_backups" ] && [ -n "$has_backup_configs" ]; then
+    backups_done=1
+fi
+
 versions_notnull=""
 if [ -n "$has_versions" ]; then
     versions_notnull="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('project_versions') WHERE name='image_name' AND \"notnull\"=1;")"
 fi
 
 if [ -n "$bluegreen_done" ] && [ -n "$compose_done" ] && [ -z "$versions_notnull" ] \
-   && [ -n "$has_env_files" ] && [ -n "$roles_done" ] && [ -n "$git_origin_done" ]; then
+   && [ -n "$has_env_files" ] && [ -n "$roles_done" ] && [ -n "$git_origin_done" ] \
+   && [ -n "$backups_done" ]; then
     echo "Database '$DB' is already up to date — nothing to migrate."
     exit 0
 fi
@@ -263,6 +278,54 @@ fi
 if [ -z "$has_git_branch" ]; then
     echo "  + projects.git_branch"
     SQL="$SQL ALTER TABLE projects ADD COLUMN git_branch VARCHAR;"
+fi
+
+if [ -z "$has_backups" ]; then
+    echo "  + backups table"
+    SQL="$SQL
+    CREATE TABLE backups (
+        id            INTEGER PRIMARY KEY,
+        project_id    INTEGER REFERENCES projects(id),
+        version       INTEGER,
+        kind          VARCHAR NOT NULL DEFAULT 'manual',
+        imported      BOOLEAN NOT NULL DEFAULT 0,
+        filename      VARCHAR NOT NULL,
+        size_bytes    INTEGER,
+        sha256        VARCHAR,
+        has_images    BOOLEAN NOT NULL DEFAULT 0,
+        has_volumes   BOOLEAN NOT NULL DEFAULT 0,
+        has_env       BOOLEAN NOT NULL DEFAULT 0,
+        has_project   BOOLEAN NOT NULL DEFAULT 0,
+        status        VARCHAR NOT NULL DEFAULT 'creating',
+        message       TEXT NOT NULL DEFAULT '',
+        target_name   VARCHAR,
+        remote_status VARCHAR NOT NULL DEFAULT 'none',
+        remote_path   VARCHAR,
+        created_at    DATETIME
+    );
+    CREATE INDEX ix_backups_project ON backups (project_id);"
+fi
+
+if [ -z "$has_backup_configs" ]; then
+    echo "  + backup_configs table"
+    SQL="$SQL
+    CREATE TABLE backup_configs (
+        id              INTEGER PRIMARY KEY,
+        project_id      INTEGER REFERENCES projects(id),
+        enabled         BOOLEAN NOT NULL DEFAULT 0,
+        schedule_cron   VARCHAR,
+        on_deploy       BOOLEAN NOT NULL DEFAULT 0,
+        keep_local      INTEGER NOT NULL DEFAULT 5,
+        keep_remote     INTEGER NOT NULL DEFAULT 0,
+        target_name     VARCHAR,
+        include_volumes BOOLEAN NOT NULL DEFAULT 1,
+        last_run_at     DATETIME,
+        last_status     VARCHAR,
+        last_message    TEXT NOT NULL DEFAULT '',
+        created_at      DATETIME,
+        updated_at      DATETIME
+    );
+    CREATE UNIQUE INDEX ux_backup_configs ON backup_configs (project_id);"
 fi
 
 SQL="$SQL COMMIT;"

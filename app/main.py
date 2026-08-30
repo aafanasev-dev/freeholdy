@@ -6,9 +6,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.models.database import init_db, SessionLocal
-from app.services import compose_service, deploy_service
+from app.services import backup_scheduler, compose_service, deploy_service
 from app.routers import (
     projects, container, plugins, compose, git, versions, env, logs, tokens, volumes,
+    backups,
 )
 
 
@@ -37,7 +38,14 @@ async def lifespan(app: FastAPI):
         logging.getLogger("uvicorn").warning(
             "DEBUG mode: bearer-token auth is DISABLED — do not run like this in production"
         )
-    yield
+    # Automatic backups. One in-process thread evaluating cron expressions once a minute —
+    # it needs no install-time surface, behaves identically in dev, and dies with the
+    # service that owns the jobs it starts.
+    backup_scheduler.start()
+    try:
+        yield
+    finally:
+        backup_scheduler.stop()
 
 
 app = FastAPI(
@@ -65,9 +73,11 @@ app.include_router(compose.router,   prefix="/projects", tags=["compose"])
 app.include_router(env.router,       prefix="/projects", tags=["env"])
 app.include_router(logs.router,      prefix="/projects", tags=["logs"])
 app.include_router(volumes.router,   prefix="/projects", tags=["volumes"])
+app.include_router(backups.router,   prefix="/projects", tags=["backups"])
 app.include_router(plugins.router,   prefix="/plugins",  tags=["plugins"])
 app.include_router(git.router,       prefix="/git",      tags=["git"])
 app.include_router(tokens.router,    prefix="/tokens",   tags=["tokens"])
+app.include_router(backups.system_router, prefix="/backups", tags=["backups"])
 
 
 @app.get("/health", tags=["system"])

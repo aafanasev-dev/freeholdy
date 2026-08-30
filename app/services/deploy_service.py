@@ -246,6 +246,67 @@ def _prune_archived(db, project: Project, log: Callable[[str], None]) -> None:
         db.delete(v)
 
 
+def _backup_after_deploy(project_id: int, version: int,
+                         log: Callable[[str], None]) -> None:
+    """Take a backup of the version just deployed, when the project asked for one.
+
+    The backup runs on its own job key (it only reads docker), so it is launched and left to
+    run rather than awaited — the deploy is already finished and must not be held open, nor
+    reported as failed if a backup destination is down."""
+    from app.services import backup_service   # lazy: backup_service imports this module
+    try:
+        if backup_service.after_deploy(project_id, version):
+            log(f"── on-deploy backup of v{version} started ──")
+    except Exception as exc:
+        log(f"── on-deploy backup could not start: {exc} ──")
+
+
+def _restore_version_data(project_id: int, backup_id: int, job_key: str,
+                          log: Callable[[str], None]) -> None:
+    """Put a version's volume contents and env back from a backup archive, as the tail of a
+    rollback job.
+
+    Runs *inside* the rollback's promote step, so it shares the one job, one log and one exit
+    frame the client is already streaming — rather than being a second job under the same key
+    that would end the stream early. By this point the rolled-back containers are up, so the
+    restore does its own stop → wipe+extract → start; that is also why it reads the project
+    row fresh, after promote committed the new active container name.
+
+    Never raises: a rollback that succeeded must not be reported as failed because its
+    optional data restore could not find its archive.
+    """
+    from app.services import backup_service   # lazy: backup_service imports this module
+
+    db = SessionLocal()
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        row = next((b for b in project.backups if b.id == backup_id), None) if project else None
+        if project is None or row is None or row.status != "ok":
+            log(f"── no usable backup {backup_id} — volume data left as it is ──")
+            return
+        name, mode, container_name = project.name, project.deploy_mode, project.container_name
+        tar_path = backup_service.backup_path(name, row.filename)
+    finally:
+        db.close()
+
+    if not os.path.exists(tar_path):
+        log(f"── backup archive is gone from disk ({tar_path}) — volume data left as it is ──")
+        return
+
+    job = docker_service.get_job(job_key)
+    log_path = job.log_path if job is not None else _new_log_file()
+    work_dir = os.path.join(settings.DATA_DIR, "backups", name,
+                            f".restore-{os.urandom(8).hex()}")
+    project_dir = os.path.abspath(compose_service.project_dir(name))
+    try:
+        backup_service.run_restore_phases(project_id, name, mode, container_name, tar_path,
+                                          project_dir, work_dir, job_key, log_path, log)
+    except Exception as exc:
+        log(f"── data restore failed: {exc} — the version itself is active ──")
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
 def enforce_backup_limit(project_id: int) -> None:
     """Prune archived versions beyond Project.backup_limit right now (used when the limit
     is lowered via PUT /backup-limit). Synchronous — `docker rmi` the oldest images."""
@@ -318,6 +379,7 @@ def bluegreen_deploy(project_id: int, install_script: Optional[str] = None,
             log(f"── v{n} is now active ──")
         finally:
             db2.close()
+        _backup_after_deploy(project_id, n, log)
 
     def cleanup() -> None:
         docker_service.remove_container(container_name)
@@ -326,11 +388,16 @@ def bluegreen_deploy(project_id: int, install_script: Optional[str] = None,
     return _spawn(job_key, cmd, container_name, promote, cleanup)
 
 
-def rollback_to_version(project_id: int, version: int) -> str:
+def rollback_to_version(project_id: int, version: int,
+                       data_backup_id: Optional[int] = None) -> str:
     """Make an existing inactive/archived version active again: recreate its container from
     the retained image (with the project's current environment), switch nginx to it, and
     re-shuffle statuses (does NOT bump version_counter). Streams over the same
-    `WS /projects/{name}/deploy`."""
+    `WS /projects/{name}/deploy`.
+
+    `data_backup_id` additionally restores that backup archive's volume contents and env
+    files once the version is up — the only way a rollback touches data, and off unless the
+    caller asks for it."""
     from app.routers.projects import _next_port  # lazy
 
     db = SessionLocal()
@@ -377,6 +444,8 @@ def rollback_to_version(project_id: int, version: int) -> str:
             log(f"── rolled back to v{version} ──")
         finally:
             db2.close()
+        if data_backup_id is not None:
+            _restore_version_data(project_id, data_backup_id, job_key, log)
 
     return _spawn(job_key, cmd, container_name, promote, cleanup=None)
 
@@ -703,6 +772,7 @@ def _compose_deploy_job(project_id: int, name: str, n: int, prev_version: Option
             docker_service.finish_external_job(job_key, 1)
             return
         log(f"── v{n} is now active ──")
+        _backup_after_deploy(project_id, n, log)
         docker_service.finish_external_job(job_key, 0)
     except Exception as e:  # never leave the job stuck "running"
         fail(1, f"── deploy error: {e} ──")
@@ -878,12 +948,16 @@ def compose_missing_images(name: str, project_dir: str,
     return sorted(svc for svc, image in images.items() if not docker_service.image_exists(image))
 
 
-def compose_rollback_to_version(project_id: int, version: int) -> str:
+def compose_rollback_to_version(project_id: int, version: int,
+                               data_backup_id: Optional[int] = None) -> str:
     """Make an archived compose version active again: `down` the current stack, restore the
     version's file snapshot into the project dir, re-provision (service rows, ports,
     override, nginx/SSL — subdomains and custom domains are preserved), then `up` on the
     retained v{N} image tags. Streams over the same `WS /projects/{name}/deploy`.
-    Does NOT bump version_counter (mirrors the dockerfile rollback)."""
+    Does NOT bump version_counter (mirrors the dockerfile rollback).
+
+    `data_backup_id` additionally restores that archive's volume contents and env once the
+    stack is up — named-volume data is otherwise deliberately left untouched by a rollback."""
     db = SessionLocal()
     try:
         name = db.query(Project).filter(Project.id == project_id).first().name
@@ -898,14 +972,15 @@ def compose_rollback_to_version(project_id: int, version: int) -> str:
     )
     threading.Thread(
         target=_compose_rollback_job,
-        args=(project_id, name, version, project_dir, job_key, log_path),
+        args=(project_id, name, version, project_dir, job_key, log_path, data_backup_id),
         daemon=True,
     ).start()
     return job_key
 
 
 def _compose_rollback_job(project_id: int, name: str, version: int,
-                          project_dir: str, job_key: str, log_path: str) -> None:
+                          project_dir: str, job_key: str, log_path: str,
+                          data_backup_id: Optional[int] = None) -> None:
     from app.routers.compose import provision_compose  # lazy: router imports services
 
     def log(msg: str) -> None:
@@ -986,6 +1061,8 @@ def _compose_rollback_job(project_id: int, name: str, version: int,
         finally:
             db.close()
         log(f"── rolled back to v{version} ──")
+        if data_backup_id is not None:
+            _restore_version_data(project_id, data_backup_id, job_key, log)
         docker_service.finish_external_job(job_key, 0 if healthy else 1)
     except Exception as e:  # never leave the job stuck "running"
         fail(1, f"── rollback error: {e} ──")
