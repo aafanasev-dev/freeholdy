@@ -158,8 +158,8 @@ const Btn = ({ children, onClick, v = "default", sm, disabled, busy, title, styl
     <button onClick={onClick} disabled={disabled || busy} title={title} style={{
       background: vv.bg, color: (disabled || busy) ? C.dim : vv.color,
       border: `1px solid ${(disabled || busy) ? C.bd : vv.bd}`,
-      fontFamily: C.ff, fontSize: sm ? "11px" : "12px", fontWeight: 500,
-      padding: sm ? "3px 9px" : "7px 15px", cursor: (disabled || busy) ? "not-allowed" : "pointer",
+      fontFamily: C.ff, fontSize: sm ? "13px" : "14px", fontWeight: 500,
+      padding: sm ? "4px 11px" : "8px 17px", cursor: (disabled || busy) ? "not-allowed" : "pointer",
       borderRadius: "10px", opacity: (disabled || busy) ? 0.55 : 1,
       whiteSpace: "nowrap", letterSpacing: "0.01em",
       ...st,
@@ -169,15 +169,113 @@ const Btn = ({ children, onClick, v = "default", sm, disabled, busy, title, styl
   );
 };
 
+// ── Action menu (⋮ kebab → anchored dropdown) ──────────────────────────────────
+// The per-container actions on a ContainerRow / ServiceRow, collapsed behind one
+// button. `items` is a list of { key, label, icon, color, badge, disabled, busy,
+// title, onClick }; a null entry renders a divider.
+//
+// The panel is position:fixed against the trigger's viewport rect on purpose — the
+// rows live inside the card's `overflowX: auto` table wrapper, which would clip an
+// absolutely positioned popover once the table scrolls. No ancestor has a CSS
+// transform, so fixed resolves to the viewport as expected.
+const MENU_W = 210;
+
+const ActionMenu = ({ items, label }) => {
+  const [rect, setRect] = useState(null);   // non-null ⇒ open, holds the anchor rect
+  const btnRef = useRef(null);
+  const panelRef = useRef(null);
+  const list = items.filter(it => it !== false && it !== undefined);   // false = gated out; null = divider
+
+  useEffect(() => {
+    if (!rect) return;
+    const close = (e) => {
+      if (e && e.type === "mousedown" &&
+          (panelRef.current?.contains(e.target) || btnRef.current?.contains(e.target))) return;
+      setRect(null);
+    };
+    const onKey = (e) => { if (e.key === "Escape") setRect(null); };
+    // A resize only invalidates the anchor rect — re-measure rather than close, so the
+    // panel survives things like a mobile URL bar collapsing.
+    const reposition = () => { if (btnRef.current) setRect(btnRef.current.getBoundingClientRect()); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", reposition);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", reposition);
+    };
+  }, [rect]);
+
+  // Rough height estimate is enough to decide whether to drop down or flip up.
+  const est = list.reduce((h, it) => h + (it ? 32 : 9), 12);
+  const below = rect ? rect.bottom + 6 : 0;
+  const top = rect ? (below + est > window.innerHeight - 8 ? Math.max(8, rect.top - est - 6) : below) : 0;
+  const left = rect ? Math.max(8, Math.min(rect.right - MENU_W, window.innerWidth - MENU_W - 8)) : 0;
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onClick={() => setRect(r => (r ? null : btnRef.current.getBoundingClientRect()))}
+        title={`Actions for ${label}`}
+        aria-haspopup="menu" aria-expanded={!!rect}
+        style={{
+          background: rect ? C.s3 : "transparent", color: rect ? C.txt : C.muted,
+          border: `1px solid ${rect ? C.bdB : "transparent"}`, borderRadius: "10px",
+          width: "30px", height: "30px", lineHeight: 1, fontSize: "16px",
+          fontFamily: C.ff, cursor: "pointer", padding: 0,
+        }}>⋮</button>
+
+      {rect && (
+        <div ref={panelRef} role="menu" style={{
+          position: "fixed", top, left, width: MENU_W, zIndex: 200,
+          background: C.s1, border: `1px solid ${C.bdB}`, borderRadius: "14px",
+          padding: "6px", boxShadow: "0 18px 48px rgba(0,0,0,.55)",
+        }}>
+          {list.map((it, i) => it === null ? (
+            <div key={`d${i}`} style={{ height: "1px", background: C.bd, margin: "4px 6px" }} />
+          ) : (
+            <button
+              key={it.key} role="menuitem" title={it.title}
+              className={it.disabled || it.busy ? undefined : "fh-item"}
+              disabled={it.disabled || it.busy}
+              onClick={() => { setRect(null); it.onClick(); }}
+              style={{
+                display: "flex", alignItems: "center", gap: "9px", width: "100%",
+                textAlign: "left", background: "transparent", border: "none",
+                borderRadius: "10px", padding: "7px 9px",
+                color: (it.disabled || it.busy) ? C.dim : (it.color || C.txt),
+                fontFamily: C.ff, fontSize: "13px", fontWeight: 500,
+                cursor: (it.disabled || it.busy) ? "not-allowed" : "pointer",
+              }}>
+              <span style={{ width: "18px", textAlign: "center", fontSize: "13px" }}>{it.busy ? "…" : it.icon}</span>
+              <span style={{ flex: 1 }}>{it.label}</span>
+              {it.badge != null && (
+                <span style={{
+                  color: C.blue, background: C.blueFill, border: `1px solid ${C.blueBd}`,
+                  fontSize: "11px", padding: "1px 7px", borderRadius: "7px",
+                }}>{it.badge}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
+};
+
 const Tag = ({ status }) => (
-  <span style={{ display: "inline-flex", alignItems: "center", gap: "5px", fontFamily: C.ff, fontSize: "11px", color: SC[status] || C.muted }}>
-    <span style={{ fontSize: "7px" }}>●</span>{SI[status]} {status}
+  <span style={{ display: "inline-flex", alignItems: "center", gap: "5px", fontFamily: C.ff, fontSize: "13px", color: SC[status] || C.muted }}>
+    <span style={{ fontSize: "9px" }}>●</span>{SI[status]} {status}
   </span>
 );
 
 const Field = ({ label, children, style: st = {} }) => (
   <div style={st}>
-    {label && <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.1em", marginBottom: "5px" }}>{label}</div>}
+    {label && <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", marginBottom: "5px" }}>{label}</div>}
     {children}
   </div>
 );
@@ -188,7 +286,7 @@ const TextIn = ({ value, onChange, placeholder, type = "text", style: st = {} })
     onChange={e => onChange(e.target.value)}
     style={{
       background: C.s2, border: `1px solid ${C.bdB}`, color: C.txt,
-      fontFamily: C.ff, fontSize: "12px", padding: "8px 11px",
+      fontFamily: C.ff, fontSize: "14px", padding: "9px 13px",
       borderRadius: "10px", outline: "none", width: "100%", boxSizing: "border-box", ...st,
     }}
   />
@@ -200,7 +298,7 @@ const TextArea = ({ value, onChange, placeholder, rows = 14, style: st = {} }) =
     onChange={e => onChange(e.target.value)}
     style={{
       background: C.s2, border: `1px solid ${C.bdB}`, color: C.txt,
-      fontFamily: C.mono, fontSize: "11px", lineHeight: 1.65, padding: "10px 11px",
+      fontFamily: C.mono, fontSize: "13px", lineHeight: 1.65, padding: "11px 13px",
       borderRadius: "10px", outline: "none", width: "100%", boxSizing: "border-box",
       resize: "vertical", whiteSpace: "pre", overflowWrap: "normal", overflowX: "auto", ...st,
     }}
@@ -218,27 +316,27 @@ const EnvDisclosure = ({ value, onChange, open, onToggle, count = null, loading 
       width: "100%", padding: "3px 0", background: "transparent", border: "none",
       cursor: "pointer", textAlign: "left",
     }}>
-      <span style={{ color: C.muted, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.1em" }}>
+      <span style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em" }}>
         <span style={{ color: C.dim, marginRight: "6px" }}>{open ? "▾" : "▸"}</span>
         ENVIRONMENT VARIABLES
         {!open && value.trim() && <span style={{ color: C.green, marginLeft: "6px" }}>✓</span>}
       </span>
       {loading ? (
-        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>loading…</span>
+        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px" }}>loading…</span>
       ) : count > 0 ? (
         <span style={{
-          color: C.blue, fontFamily: C.ff, fontSize: "10px", padding: "1px 7px",
+          color: C.blue, fontFamily: C.ff, fontSize: "12px", padding: "1px 7px",
           background: C.blueFill, border: `1px solid ${C.blueBd}`, borderRadius: "7px",
         }}>{count} stored</span>
       ) : (
-        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>optional</span>
+        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px" }}>optional</span>
       )}
     </button>
     {open && (
       <div style={{ marginTop: "8px" }}>
         <TextArea rows={8} value={value} onChange={onChange}
                   placeholder={loading ? "loading…" : "KEY=value\n# comments and blank lines are kept"} />
-        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", marginTop: "5px" }}>
+        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px", lineHeight: "1.6", marginTop: "5px" }}>
           One <code style={{ fontFamily: C.mono }}>KEY=value</code> per line, each on one line. {hint}
         </div>
       </div>
@@ -247,13 +345,13 @@ const EnvDisclosure = ({ value, onChange, open, onToggle, count = null, loading 
 );
 
 const Err = ({ msg }) => msg ? (
-  <div style={{ color: C.red, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: C.redFill, border: `1px solid ${C.redBd}`, borderRadius: "10px", whiteSpace: "pre-wrap" }}>
+  <div style={{ color: C.red, fontFamily: C.ff, fontSize: "13px", padding: "6px 10px", background: C.redFill, border: `1px solid ${C.redBd}`, borderRadius: "10px", whiteSpace: "pre-wrap" }}>
     ✗ {msg}
   </div>
 ) : null;
 
 const Ok = ({ msg }) => msg ? (
-  <div style={{ color: C.green, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px", background: C.greenFill, border: `1px solid ${C.greenBd}`, borderRadius: "10px" }}>
+  <div style={{ color: C.green, fontFamily: C.ff, fontSize: "13px", padding: "6px 10px", background: C.greenFill, border: `1px solid ${C.greenBd}`, borderRadius: "10px" }}>
     ✓ {msg}
   </div>
 ) : null;
@@ -268,7 +366,7 @@ const mdInline = (text, kp) => {
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) out.push(text.slice(last, m.index));
     if (m[2] !== undefined) out.push(<strong key={`${kp}b${i}`} style={{ color: C.txt, fontWeight: 600 }}>{m[2]}</strong>);
-    else if (m[4] !== undefined) out.push(<code key={`${kp}c${i}`} style={{ fontFamily: C.mono, fontSize: "11px", background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "7px", padding: "1px 5px", color: C.txt }}>{m[4]}</code>);
+    else if (m[4] !== undefined) out.push(<code key={`${kp}c${i}`} style={{ fontFamily: C.mono, fontSize: "13px", background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "7px", padding: "1px 5px", color: C.txt }}>{m[4]}</code>);
     else if (m[6] !== undefined) out.push(<a key={`${kp}a${i}`} href={m[7]} target="_blank" rel="noreferrer" style={{ color: C.blue, textDecoration: "none" }}>{m[6]}</a>);
     last = re.lastIndex; i++;
   }
@@ -300,12 +398,12 @@ const Markdown = ({ text }) => {
     while (i < lines.length && lines[i].trim() !== "" && !/^#{1,4}\s+/.test(lines[i]) && !/^\s*[-*]\s+/.test(lines[i]) && !lines[i].trim().startsWith("```")) { buf.push(lines[i]); i++; }
     blocks.push({ type: "p", text: buf.join(" ") });
   }
-  const hSize = { 1: "20px", 2: "15px", 3: "12px", 4: "11px" };
+  const hSize = { 1: "22px", 2: "17px", 3: "14px", 4: "13px" };
   return (
-    <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", lineHeight: "1.7" }}>
+    <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "15px", lineHeight: "1.7" }}>
       {blocks.map((b, k) => {
         if (b.type === "h") return (
-          <div key={k} style={{ color: C.txt, fontWeight: b.level === 1 ? 700 : 600, fontSize: hSize[b.level] || "12px", letterSpacing: b.level >= 3 ? "0.06em" : 0, textTransform: b.level >= 3 ? "uppercase" : "none", margin: k === 0 ? "0 0 10px" : "18px 0 8px" }}>{mdInline(b.text, `h${k}`)}</div>
+          <div key={k} style={{ color: C.txt, fontWeight: b.level === 1 ? 700 : 600, fontSize: hSize[b.level] || "14px", letterSpacing: b.level >= 3 ? "0.06em" : 0, textTransform: b.level >= 3 ? "uppercase" : "none", margin: k === 0 ? "0 0 10px" : "18px 0 8px" }}>{mdInline(b.text, `h${k}`)}</div>
         );
         if (b.type === "ul") return (
           <ul key={k} style={{ margin: "0 0 12px", paddingLeft: "18px" }}>
@@ -313,7 +411,7 @@ const Markdown = ({ text }) => {
           </ul>
         );
         if (b.type === "code") return (
-          <pre key={k} style={{ background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px", fontFamily: C.mono, fontSize: "11px", color: C.txt, overflow: "auto", margin: "0 0 12px", lineHeight: "1.6" }}>{b.text}</pre>
+          <pre key={k} style={{ background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px", fontFamily: C.mono, fontSize: "13px", color: C.txt, overflow: "auto", margin: "0 0 12px", lineHeight: "1.6" }}>{b.text}</pre>
         );
         return <p key={k} style={{ margin: "0 0 12px" }}>{mdInline(b.text, `p${k}`)}</p>;
       })}
@@ -330,8 +428,8 @@ const LogPane = ({ log, onClose, onAbort }) => {
     <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", display: "flex", flexDirection: "column", height: "280px", marginTop: "10px", boxShadow: C.shadow }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 12px", borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-          <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.12em" }}>OP LOG</span>
-          <span style={{ color: C.blue, fontFamily: C.ff, fontSize: "10px" }}>{log.project} → {log.operation}</span>
+          <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.12em" }}>OP LOG</span>
+          <span style={{ color: C.blue, fontFamily: C.ff, fontSize: "12px" }}>{log.project} → {log.operation}</span>
           <Tag status={log.status} />
         </div>
         <div style={{ display: "flex", gap: "6px" }}>
@@ -339,7 +437,7 @@ const LogPane = ({ log, onClose, onAbort }) => {
           <Btn v="ghost" sm onClick={onClose}>✕</Btn>
         </div>
       </div>
-      <div ref={ref} style={{ flex: 1, overflow: "auto", padding: "10px 14px", fontFamily: C.mono, fontSize: "11px", color: C.txt, lineHeight: "1.65", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+      <div ref={ref} style={{ flex: 1, overflow: "auto", padding: "10px 14px", fontFamily: C.mono, fontSize: "13px", color: C.txt, lineHeight: "1.65", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
         {log.logs || <span style={{ color: C.dim }}>waiting for output…</span>}
       </div>
     </div>
@@ -411,8 +509,8 @@ const InstallPane = ({ token, wsPath, project, interactive, onExit, onClose }) =
     <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", display: "flex", flexDirection: "column", height: "280px", marginTop: "10px", boxShadow: C.shadow }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 12px", borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-          <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.12em" }}>INSTALL</span>
-          <span style={{ color: C.blue, fontFamily: C.ff, fontSize: "10px" }}>{project} → {interactive ? "install.sh" : "build"}</span>
+          <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.12em" }}>INSTALL</span>
+          <span style={{ color: C.blue, fontFamily: C.ff, fontSize: "12px" }}>{project} → {interactive ? "install.sh" : "build"}</span>
           <Tag status={status} />
         </div>
         <div style={{ display: "flex", gap: "6px" }}>
@@ -422,7 +520,7 @@ const InstallPane = ({ token, wsPath, project, interactive, onExit, onClose }) =
           <Btn v="ghost" sm onClick={onClose}>✕</Btn>
         </div>
       </div>
-      <div ref={scrollRef} style={{ flex: 1, overflow: "auto", padding: "10px 14px", fontFamily: C.mono, fontSize: "11px", color: C.txt, lineHeight: "1.65", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+      <div ref={scrollRef} style={{ flex: 1, overflow: "auto", padding: "10px 14px", fontFamily: C.mono, fontSize: "13px", color: C.txt, lineHeight: "1.65", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
         {lines || <span style={{ color: C.dim }}>connecting to install session…</span>}
       </div>
       {interactive && (
@@ -434,7 +532,7 @@ const InstallPane = ({ token, wsPath, project, interactive, onExit, onClose }) =
             onKeyDown={e => { if (e.key === "Enter") send(); }}
             style={{
               flex: 1, background: C.s1, border: `1px solid ${C.bdB}`, color: C.txt,
-              fontFamily: C.mono, fontSize: "11px", padding: "6px 10px",
+              fontFamily: C.mono, fontSize: "13px", padding: "6px 10px",
               borderRadius: "10px", outline: "none",
             }}
           />
@@ -456,7 +554,7 @@ const Modal = ({ onClose, width = 460, children }) => (
 
 const ModalHeader = ({ title, color = C.blue, onClose }) => (
   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-    <span style={{ color, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em" }}>{title}</span>
+    <span style={{ color, fontFamily: C.ff, fontSize: "13px", letterSpacing: "0.1em" }}>{title}</span>
     <Btn v="ghost" sm onClick={onClose}>✕</Btn>
   </div>
 );
@@ -488,24 +586,24 @@ const GitKeyModal = ({ token, onClose }) => {
     <Modal onClose={onClose} width={560}>
       <ModalHeader title="GIT SSH KEY" color={C.blue} onClose={onClose} />
       {loading ? (
-        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", padding: "20px", textAlign: "center" }}>loading…</div>
+        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", padding: "20px", textAlign: "center" }}>loading…</div>
       ) : error ? (
         <Err msg={error} />
       ) : (
         <>
-          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", marginBottom: "10px" }}>
+          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", marginBottom: "10px" }}>
             {data.created
               ? "Generated a new GitHub SSH key on the server."
               : "The server already has a GitHub SSH key."}
           </div>
-          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", letterSpacing: "0.08em", marginBottom: "6px" }}>PUBLIC KEY</div>
-          <div style={{ background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px", fontFamily: C.mono, fontSize: "11px", color: C.txt, lineHeight: "1.6", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: "120px", overflow: "auto", marginBottom: "10px" }}>
+          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px", letterSpacing: "0.08em", marginBottom: "6px" }}>PUBLIC KEY</div>
+          <div style={{ background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px", fontFamily: C.mono, fontSize: "13px", color: C.txt, lineHeight: "1.6", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: "120px", overflow: "auto", marginBottom: "10px" }}>
             {data.public_key}
           </div>
           <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "14px" }}>
             <Btn v="blue" sm onClick={copy}>{copied ? "✓ copied" : "📋 copy"}</Btn>
           </div>
-          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", lineHeight: "1.7", whiteSpace: "pre-wrap", background: C.s2, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px" }}>
+          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", lineHeight: "1.7", whiteSpace: "pre-wrap", background: C.s2, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px" }}>
             {data.instructions}
           </div>
         </>
@@ -527,7 +625,7 @@ const ExecTerminal = ({ token, project, service, label, onClose }) => {
 
   useEffect(() => {
     const term = new Terminal({
-      fontFamily: C.mono, fontSize: 12, cursorBlink: true, convertEol: false,
+      fontFamily: C.mono, fontSize: 13, cursorBlink: true, convertEol: false,
       theme: { background: "#0B0F1A", foreground: "#E9EDF5", cursor: "#4EB06B" },
     });
     const fit = new FitAddon();
@@ -579,7 +677,7 @@ const ExecTerminal = ({ token, project, service, label, onClose }) => {
     <Modal onClose={onClose} width={780}>
       <ModalHeader title="EXEC SHELL" color={C.amber} onClose={onClose} />
       <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "10px" }}>
-        <span style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px" }}>{label || project}</span>
+        <span style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px" }}>{label || project}</span>
         <Tag status={status} />
       </div>
       <div ref={mountRef} style={{ height: "420px", background: "#0B0F1A", borderRadius: "14px", padding: "8px 10px", overflow: "hidden" }} />
@@ -607,7 +705,7 @@ const InstallPluginModal = ({ token, plugin, onClose, onInstalled }) => {
   return (
     <Modal onClose={onClose}>
       <ModalHeader title="INSTALL PLUGIN" color={C.txt} onClose={onClose} />
-      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "14px" }}>
+      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", marginBottom: "14px" }}>
         {plugin.name} · {plugin.deploy_mode === "compose" ? "compose" : `port ${plugin.container_port}`}
       </div>
       <Field label="PROJECT NAME" style={{ marginBottom: "12px" }}>
@@ -625,7 +723,7 @@ const InstallPluginModal = ({ token, plugin, onClose, onInstalled }) => {
 // ── Confirm modal ─────────────────────────────────────────────────────────────
 const ConfirmModal = ({ message, onConfirm, onCancel, loading }) => (
   <Modal onClose={onCancel}>
-    <div style={{ color: C.red, fontFamily: C.ff, fontSize: "11px", marginBottom: "18px", lineHeight: "1.6" }}>⚠ {message}</div>
+    <div style={{ color: C.red, fontFamily: C.ff, fontSize: "13px", marginBottom: "18px", lineHeight: "1.6" }}>⚠ {message}</div>
     <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
       <Btn v="ghost" onClick={onCancel} disabled={loading}>cancel</Btn>
       <Btn v="danger" onClick={onConfirm} busy={loading}>confirm delete</Btn>
@@ -758,7 +856,7 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
   const dropStyle = { flex: 1, display: "block", border: `2px dashed ${C.bdB}`, borderRadius: "14px", padding: "16px", textAlign: "center", background: C.s1, cursor: "pointer" };
   const tab = (m, label) => (
     <button onClick={() => { setMode(m); setError(""); setResult(null); }} style={{
-      flex: 1, padding: "8px", cursor: "pointer", fontFamily: C.ff, fontSize: "11px", fontWeight: 600,
+      flex: 1, padding: "8px", cursor: "pointer", fontFamily: C.ff, fontSize: "13px", fontWeight: 600,
       background: mode === m ? C.money : C.s3, color: mode === m ? C.moneyInk : C.muted,
       border: `1px solid ${mode === m ? C.money : C.bd}`, borderRadius: "10px",
     }}>{label}</button>
@@ -767,7 +865,7 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
   return (
     <Modal onClose={onClose} width={540}>
       <ModalHeader title="DEPLOY" color={C.txt} onClose={onClose} />
-      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "14px", lineHeight: "1.6" }}>
+      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", marginBottom: "14px", lineHeight: "1.6" }}>
         {project} · a <span style={{ color: C.txt }}>Dockerfile</span> or <span style={{ color: C.txt }}>docker-compose.yml</span> in the
         deployed root sets the deploy mode and provisions automatically (compose wins).
       </div>
@@ -780,23 +878,23 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
       {mode === "files" ? (
         <>
           {prev && prev.srcKind !== "git" && !entries.length && (
-            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "10px" }}>
+            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", marginBottom: "10px" }}>
               last deploy: <span style={{ color: C.txt }}>{prev.label}</span> — reselect to redeploy
             </div>
           )}
           <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
             <label htmlFor="file-up" style={dropStyle}>
               <input id="file-up" type="file" multiple onChange={e => pickFiles(e.target.files)} style={{ display: "none" }} />
-              <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px" }}>select file(s)</div>
+              <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px" }}>select file(s)</div>
             </label>
             <label htmlFor="folder-up" style={dropStyle}>
               <input id="folder-up" ref={dirRef} type="file" multiple onChange={e => pickFolder(e.target.files)} style={{ display: "none" }} />
-              <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px" }}>select a folder</div>
+              <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px" }}>select a folder</div>
             </label>
           </div>
 
           {entries.length > 0 && !progress && (
-            <div style={{ color: C.green, fontFamily: C.ff, fontSize: "11px", marginBottom: "12px" }}>
+            <div style={{ color: C.green, fontFamily: C.ff, fontSize: "13px", marginBottom: "12px" }}>
               ✓ {entries.length} file(s) selected
             </div>
           )}
@@ -807,7 +905,7 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
                 <div style={{ height: "100%", width: `${progress.total ? Math.round(progress.sent / progress.total * 100) : 0}%`,
                               background: C.green, transition: "width 0.15s ease" }} />
               </div>
-              <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginTop: "5px" }}>
+              <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", marginTop: "5px" }}>
                 sending {(progress.sent / 1048576).toFixed(1)} / {(progress.total / 1048576).toFixed(1)} MB
               </div>
             </div>
@@ -842,7 +940,7 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
         <>
           <Ok msg={result.message} />
           {result.provisioned && (
-            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginTop: "8px" }}>
+            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", marginTop: "8px" }}>
               detected deploy mode: <span style={{ color: C.green }}>{result.deploy_mode}</span>
             </div>
           )}
@@ -865,13 +963,13 @@ const StatusModal = ({ data, project, onClose }) => (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px", marginBottom: "14px" }}>
       {[["operation", data.operation || "—"], ["status", data.status], ["exit code", data.exit_code ?? "—"]].map(([k, v]) => (
         <div key={k} style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "8px 12px" }}>
-          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.1em", marginBottom: "4px" }}>{k.toUpperCase()}</div>
-          <div style={{ color: k === "status" ? (SC[v] || C.txt) : C.txt, fontFamily: C.ff, fontSize: "12px" }}>{String(v)}</div>
+          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", marginBottom: "4px" }}>{k.toUpperCase()}</div>
+          <div style={{ color: k === "status" ? (SC[v] || C.txt) : C.txt, fontFamily: C.ff, fontSize: "14px" }}>{String(v)}</div>
         </div>
       ))}
     </div>
     <Field label="LOGS">
-      <div style={{ background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px", fontFamily: C.mono, fontSize: "11px", color: C.txt, lineHeight: "1.65", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: "220px", overflow: "auto" }}>
+      <div style={{ background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px", fontFamily: C.mono, fontSize: "13px", color: C.txt, lineHeight: "1.65", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: "220px", overflow: "auto" }}>
         {data.logs || <span style={{ color: C.dim }}>(no logs)</span>}
       </div>
     </Field>
@@ -922,14 +1020,14 @@ const LogsModal = ({ token, project, service = null, onClose }) => {
         </Field>
         <Btn v="primary" onClick={fetchLogs} busy={loading}>fetch</Btn>
         <div style={{ flex: 1 }} />
-        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", paddingBottom: "9px" }}>
+        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px", paddingBottom: "9px" }}>
           {service ? "this service's container" : "the container's own output"}
         </span>
       </div>
 
       <div ref={paneRef} style={{
         background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px",
-        fontFamily: C.mono, fontSize: "11px", color: C.txt, lineHeight: "1.65",
+        fontFamily: C.mono, fontSize: "13px", color: C.txt, lineHeight: "1.65",
         whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: "50vh", minHeight: "180px",
         overflow: "auto",
       }}>
@@ -937,7 +1035,7 @@ const LogsModal = ({ token, project, service = null, onClose }) => {
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", marginTop: "12px" }}>
-        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>
+        <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px" }}>
           {content ? `${lines} line(s)` : ""}
         </span>
         <Btn v="ghost" onClick={onClose}>close</Btn>
@@ -952,13 +1050,13 @@ const SslModal = ({ data, project, onClose }) => (
   <Modal onClose={onClose}>
     <ModalHeader title={`SSL — ${project}`} color={C.green} onClose={onClose} />
     <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "12px" }}>
-      <span style={{ color: data.ssl_enabled ? C.green : C.amber, fontFamily: C.ff, fontSize: "13px" }}>
+      <span style={{ color: data.ssl_enabled ? C.green : C.amber, fontFamily: C.ff, fontSize: "15px" }}>
         {data.ssl_enabled ? "✓ enabled" : "⚠ not yet enabled"}
       </span>
     </div>
     {data.message && (
       <Field label="CERTBOT OUTPUT">
-        <div style={{ background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px", fontFamily: C.mono, fontSize: "11px", color: C.txt, lineHeight: "1.6", whiteSpace: "pre-wrap", maxHeight: "200px", overflow: "auto" }}>
+        <div style={{ background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px", fontFamily: C.mono, fontSize: "13px", color: C.txt, lineHeight: "1.6", whiteSpace: "pre-wrap", maxHeight: "200px", overflow: "auto" }}>
           {data.message}
         </div>
       </Field>
@@ -999,14 +1097,14 @@ const DomainModal = ({ token, project, service = null, info, onClose, onDone }) 
   return (
     <Modal onClose={onClose}>
       <ModalHeader title={`CUSTOM DOMAIN — ${title}`} color={C.blue} onClose={onClose} />
-      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "12px", lineHeight: "1.6" }}>
+      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", marginBottom: "12px", lineHeight: "1.6" }}>
         currently served at <span style={{ color: C.blue }}>{info.subdomain || "—"}</span>
         {info.custom_domain && <span style={{ color: C.dim }}> (custom)</span>}
       </div>
       <Field label="CUSTOM DOMAIN (FQDN)" style={{ marginBottom: "8px" }}>
         <TextIn value={domain} onChange={setDomain} placeholder="app.acme.com" />
       </Field>
-      <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", marginBottom: "12px" }}>
+      <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px", lineHeight: "1.6", marginBottom: "12px" }}>
         Point the domain's A record at this server first. SSL is issued on save; if DNS hasn't
         propagated yet the component stays HTTP-only and you can save again later to retry.
       </div>
@@ -1014,7 +1112,7 @@ const DomainModal = ({ token, project, service = null, info, onClose, onDone }) 
       {after && (
         <div style={{ marginBottom: "12px" }}>
           <Ok msg={`now serving ${after.subdomain}`} />
-          <div style={{ color: after.ssl_enabled ? C.green : C.amber, fontFamily: C.ff, fontSize: "11px", marginTop: "8px" }}>
+          <div style={{ color: after.ssl_enabled ? C.green : C.amber, fontFamily: C.ff, fontSize: "13px", marginTop: "8px" }}>
             {after.ssl_enabled ? "✓ SSL enabled" : "⚠ SSL not yet enabled (retry once DNS points here)"}
           </div>
         </div>
@@ -1079,7 +1177,7 @@ const EnvModal = ({ token, project, service = null, compose = false, onClose, on
   return (
     <Modal onClose={onClose} width={660}>
       <ModalHeader title={`ENVIRONMENT — ${title}`} color={C.blue} onClose={onClose} />
-      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginBottom: "12px", lineHeight: "1.6" }}>
+      <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", marginBottom: "12px", lineHeight: "1.6" }}>
         {service
           ? <>this service&apos;s own variables — they override the project-level ones</>
           : compose
@@ -1094,14 +1192,14 @@ const EnvModal = ({ token, project, service = null, compose = false, onClose, on
           placeholder={loaded ? "KEY=value\n# comments and blank lines are kept" : "loading…"}
         />
       </Field>
-      <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", marginBottom: "12px" }}>
+      <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px", lineHeight: "1.6", marginBottom: "12px" }}>
         One <code style={{ fontFamily: C.mono }}>KEY=value</code> per line. Values are passed to the
         container exactly as written — no quoting needed, and they must stay on one line.
       </div>
 
       {!applied && (
         <div style={{
-          color: C.amber, fontFamily: C.ff, fontSize: "11px", padding: "6px 10px",
+          color: C.amber, fontFamily: C.ff, fontSize: "13px", padding: "6px 10px",
           background: C.amberFill, border: `1px solid ${C.amberBd}`, borderRadius: "10px",
           marginBottom: "12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px",
         }}>
@@ -1140,8 +1238,8 @@ const EnvModal = ({ token, project, service = null, compose = false, onClose, on
 const VC = { active: C.green, inactive: C.amber, archived: C.muted };
 const VI = { active: "▶", inactive: "■", archived: "○" };
 const VersionBadge = ({ status }) => (
-  <span style={{ display: "inline-flex", alignItems: "center", gap: "5px", fontFamily: C.ff, fontSize: "11px", color: VC[status] || C.muted }}>
-    <span style={{ fontSize: "7px" }}>●</span>{VI[status] || "•"} {status}
+  <span style={{ display: "inline-flex", alignItems: "center", gap: "5px", fontFamily: C.ff, fontSize: "13px", color: VC[status] || C.muted }}>
+    <span style={{ fontSize: "9px" }}>●</span>{VI[status] || "•"} {status}
   </span>
 );
 
@@ -1181,9 +1279,9 @@ const VersionsModal = ({ token, project, role, onClose, onStream, onRefresh }) =
   const counts = data?.counts || {};
 
   const TH = ({ children, right, center }) => (
-    <th style={{ padding: "4px 10px", textAlign: right ? "right" : center ? "center" : "left", color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.1em", fontWeight: 400, whiteSpace: "nowrap" }}>{children}</th>
+    <th style={{ padding: "6px 12px", textAlign: right ? "right" : center ? "center" : "left", color: C.dim, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 400, whiteSpace: "nowrap" }}>{children}</th>
   );
-  const td = { padding: "7px 10px", fontFamily: C.ff, fontSize: "11px", color: C.txt };
+  const td = { padding: "9px 12px", fontFamily: C.ff, fontSize: "13px", color: C.txt };
 
   return (
     <Modal onClose={onClose} width={660}>
@@ -1194,7 +1292,7 @@ const VersionsModal = ({ token, project, role, onClose, onStream, onRefresh }) =
       <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "12px", marginBottom: "14px", flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "flex-end", gap: "8px" }}>
           {role === "guest" ? (
-            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px" }}>
+            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px" }}>
               backup limit <span style={{ color: C.txt }}>{data?.backup_limit ?? "—"}</span>
             </div>
           ) : (
@@ -1206,7 +1304,7 @@ const VersionsModal = ({ token, project, role, onClose, onStream, onRefresh }) =
             </>
           )}
         </div>
-        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.7" }}>
+        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", lineHeight: "1.7" }}>
           <span style={{ color: C.green }}>{counts.active || 0} active</span>
           {" · "}<span style={{ color: C.amber }}>{counts.inactive || 0} inactive</span>
           {" · "}<span style={{ color: C.muted }}>{counts.archived || 0} archived</span>
@@ -1216,9 +1314,9 @@ const VersionsModal = ({ token, project, role, onClose, onStream, onRefresh }) =
       {error && <div style={{ marginBottom: "10px" }}><Err msg={error} /></div>}
 
       {!data ? (
-        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", padding: "16px 0" }}>loading versions…</div>
+        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "13px", padding: "16px 0" }}>loading versions…</div>
       ) : (data.versions || []).length === 0 ? (
-        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", padding: "16px 0" }}>
+        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "13px", padding: "16px 0" }}>
           no versions yet — deploy this project first.
         </div>
       ) : (
@@ -1239,7 +1337,7 @@ const VersionsModal = ({ token, project, role, onClose, onStream, onRefresh }) =
                   <td style={{ ...td, color: C.dim }}>{v.created_at ? new Date(v.created_at).toLocaleString() : "—"}</td>
                   <td style={{ ...td, textAlign: "right" }}>
                     {v.status === "active"
-                      ? <span style={{ color: C.dim, fontSize: "10px" }}>current</span>
+                      ? <span style={{ color: C.dim, fontSize: "12px" }}>current</span>
                       : <Btn sm v="blue" onClick={() => rollback(v.version)} busy={busy[`rollback:${v.version}`]} title={`Roll back to v${v.version}`}>rollback</Btn>}
                   </td>
                 </tr>
@@ -1259,25 +1357,25 @@ const VersionsModal = ({ token, project, role, onClose, onStream, onRefresh }) =
 // ── Row cells (shared layout) ───────────────────────────────────────────────────
 const Cells = ({ label, info }) => (
   <>
-    <td style={{ padding: "7px 10px", fontFamily: C.ff, fontSize: "11px", color: C.blue, minWidth: "90px" }}>{label}</td>
-    <td style={{ padding: "7px 10px", fontFamily: C.ff, fontSize: "10px" }}>
+    <td style={{ padding: "9px 12px", fontFamily: C.ff, fontSize: "13px", color: C.blue, minWidth: "90px" }}>{label}</td>
+    <td style={{ padding: "9px 12px", fontFamily: C.ff, fontSize: "12px" }}>
       {info.subdomain
         ? <a href={`https://${info.subdomain}`} target="_blank" rel="noreferrer" style={{ color: C.muted, textDecoration: "none" }}>{info.subdomain}</a>
         : <span style={{ color: C.dim }}>—</span>}
       {info.custom_domain && (
-        <span style={{ color: C.blue, background: C.blueFill, border: `1px solid ${C.blueBd}`, fontSize: "8px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "7px", marginLeft: "7px" }}>custom</span>
+        <span style={{ color: C.blue, background: C.blueFill, border: `1px solid ${C.blueBd}`, fontSize: "10px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "7px", marginLeft: "7px" }}>custom</span>
       )}
       {info.exposed === false && (
-        <span style={{ color: C.dim, background: C.s3, border: `1px solid ${C.bd}`, fontSize: "8px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "7px", marginLeft: "7px" }} title="No published TCP port — runs outside nginx (host networking, UDP-only, or internal-only)">unproxied</span>
+        <span style={{ color: C.dim, background: C.s3, border: `1px solid ${C.bd}`, fontSize: "10px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "7px", marginLeft: "7px" }} title="No published TCP port — runs outside nginx (host networking, UDP-only, or internal-only)">unproxied</span>
       )}
     </td>
-    <td style={{ padding: "7px 10px", fontFamily: C.ff, fontSize: "11px", color: C.txt, textAlign: "right", minWidth: "55px" }}>{info.local_port ?? "—"}</td>
-    <td style={{ padding: "7px 10px", textAlign: "center", minWidth: "38px" }}>
+    <td style={{ padding: "9px 12px", fontFamily: C.ff, fontSize: "13px", color: C.txt, textAlign: "right", minWidth: "55px" }}>{info.local_port ?? "—"}</td>
+    <td style={{ padding: "9px 12px", textAlign: "center", minWidth: "38px" }}>
       {info.exposed === false
-        ? <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>—</span>
-        : <span style={{ color: info.ssl_enabled ? C.green : C.dim, fontFamily: C.ff, fontSize: "11px" }}>{info.ssl_enabled ? "✓" : "✗"}</span>}
+        ? <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "13px" }}>—</span>
+        : <span style={{ color: info.ssl_enabled ? C.green : C.dim, fontFamily: C.ff, fontSize: "13px" }}>{info.ssl_enabled ? "✓" : "✗"}</span>}
     </td>
-    <td style={{ padding: "7px 10px", minWidth: "130px" }}><Tag status={info.container_status} /></td>
+    <td style={{ padding: "9px 12px", minWidth: "130px" }}><Tag status={info.container_status} /></td>
   </>
 );
 
@@ -1311,20 +1409,19 @@ const ContainerRow = ({ project, info, token, role, onOperation, onRefresh, onSt
     <>
       <tr style={{ borderBottom: `1px solid ${C.bd}` }}>
         <Cells label={project} info={info} />
-        <td style={{ padding: "6px 8px" }}>
-          <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-            {isAdmin && <Btn sm v="danger" onClick={() => act("stop")} busy={busy.stop} disabled={!isRunning} title="Stop container">stop</Btn>}
-            {isAdmin && <Btn sm v="amber" onClick={() => setModal({ type: "exec" })} disabled={!isRunning} title="Exec command in container">exec</Btn>}
-            {isAdmin && <Btn sm onClick={() => act("ssl")} busy={busy.ssl} title="Issue/renew SSL cert">ssl</Btn>}
-            {isAdmin && <Btn sm v="blue" onClick={() => setModal({ type: "domain" })} title="Set or clear a custom domain">domain</Btn>}
-            <Btn sm v="blue" onClick={() => setModal({ type: "env" })} title="Edit environment variables">
-              env{info.env_count > 0 ? ` ${info.env_count}` : ""}
-            </Btn>
-            <Btn sm v="amber" onClick={() => act("restart")} busy={busy.restart} title="Recreate the container so env changes take effect (no rebuild)">restart</Btn>
-            <Btn sm v="purple" onClick={() => setModal({ type: "versions" })} title="View versions, roll back, set backup limit">versions</Btn>
-            <Btn sm v="ghost" onClick={() => setModal({ type: "logs" })} title="Read the container's own output">logs</Btn>
-            <Btn sm v="ghost" onClick={() => act("status")} busy={busy.status} title="View job status & logs">status</Btn>
-          </div>
+        <td style={{ padding: "8px 10px", width: "1px", textAlign: "center", whiteSpace: "nowrap" }}>
+          <ActionMenu label={project} items={[
+            isAdmin && { key: "exec", icon: "⌨", label: "exec", color: C.amber, disabled: !isRunning, title: "Exec command in container", onClick: () => setModal({ type: "exec" }) },
+            { key: "restart", icon: "↻", label: "restart", color: C.amber, busy: busy.restart, title: "Recreate the container so env changes take effect (no rebuild)", onClick: () => act("restart") },
+            { key: "env", icon: "✎", label: "env", color: C.blue, badge: info.env_count > 0 ? info.env_count : null, title: "Edit environment variables", onClick: () => setModal({ type: "env" }) },
+            { key: "versions", icon: "⧉", label: "versions", color: C.purple, title: "View versions, roll back, set backup limit", onClick: () => setModal({ type: "versions" }) },
+            { key: "logs", icon: "▤", label: "logs", color: C.muted, title: "Read the container's own output", onClick: () => setModal({ type: "logs" }) },
+            { key: "status", icon: "ⓘ", label: "status", color: C.muted, busy: busy.status, title: "View job status & logs", onClick: () => act("status") },
+            isAdmin && { key: "ssl", icon: "🔒", label: "ssl", color: C.txt, busy: busy.ssl, title: "Issue/renew SSL cert", onClick: () => act("ssl") },
+            isAdmin && { key: "domain", icon: "⌂", label: "domain", color: C.blue, title: "Set or clear a custom domain", onClick: () => setModal({ type: "domain" }) },
+            isAdmin && null,
+            isAdmin && { key: "stop", icon: "■", label: "stop", color: C.red, busy: busy.stop, disabled: !isRunning, title: "Stop container", onClick: () => act("stop") },
+          ]} />
         </td>
       </tr>
 
@@ -1348,17 +1445,13 @@ const ServiceRow = ({ project, info, token, role, onOperation, onRefresh, onRest
   return (
     <tr style={{ borderBottom: `1px solid ${C.bd}` }}>
       <Cells label={info.name} info={info} />
-      <td style={{ padding: "6px 8px" }}>
-        <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-          {isAdmin && <Btn sm v="amber" onClick={() => setModal("exec")} disabled={!isRunning} title="Exec command in this service's container">exec</Btn>}
-          {isAdmin && info.exposed !== false && (
-            <Btn sm v="blue" onClick={() => setModal("domain")} title="Set or clear a custom domain">domain</Btn>
-          )}
-          <Btn sm v="blue" onClick={() => setModal("env")} title="Edit this service's environment variables">
-            env{info.env_count > 0 ? ` ${info.env_count}` : ""}
-          </Btn>
-          <Btn sm v="ghost" onClick={() => setModal("logs")} title="Read this service's container output">logs</Btn>
-        </div>
+      <td style={{ padding: "8px 10px", width: "1px", textAlign: "center", whiteSpace: "nowrap" }}>
+        <ActionMenu label={info.name} items={[
+          isAdmin && { key: "exec", icon: "⌨", label: "exec", color: C.amber, disabled: !isRunning, title: "Exec command in this service's container", onClick: () => setModal("exec") },
+          { key: "env", icon: "✎", label: "env", color: C.blue, badge: info.env_count > 0 ? info.env_count : null, title: "Edit this service's environment variables", onClick: () => setModal("env") },
+          { key: "logs", icon: "▤", label: "logs", color: C.muted, title: "Read this service's container output", onClick: () => setModal("logs") },
+          isAdmin && info.exposed !== false && { key: "domain", icon: "⌂", label: "domain", color: C.blue, title: "Set or clear a custom domain", onClick: () => setModal("domain") },
+        ]} />
         {modal === "exec"   && <ExecTerminal token={token} project={project} service={info.name} label={`${project} → ${info.name}`} onClose={() => setModal(null)} />}
         {modal === "logs"   && <LogsModal token={token} project={project} service={info.name} onClose={() => setModal(null)} />}
         {modal === "domain" && <DomainModal token={token} project={project} service={info.name} info={info} onClose={() => setModal(null)} onDone={onRefresh} />}
@@ -1442,7 +1535,7 @@ const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, 
   };
 
   const TH = ({ children, right, center }) => (
-    <th style={{ padding: "4px 10px", textAlign: right ? "right" : center ? "center" : "left", color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.1em", fontWeight: 400, whiteSpace: "nowrap" }}>
+    <th style={{ padding: "6px 12px", textAlign: right ? "right" : center ? "center" : "left", color: C.dim, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 400, whiteSpace: "nowrap" }}>
       {children}
     </th>
   );
@@ -1452,24 +1545,24 @@ const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, 
       <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", marginBottom: "10px", overflow: "hidden", boxShadow: C.shadow }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: C.s2, borderBottom: `1px solid ${C.bd}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <span style={{ color: C.txt, fontFamily: C.ff, fontSize: "14px", fontWeight: 600 }}>{project.name}</span>
+            <span style={{ color: C.txt, fontFamily: C.ff, fontSize: "16px", fontWeight: 600 }}>{project.name}</span>
             {isCompose && (
-              <span style={{ color: C.blue, background: C.blueFill, border: `1px solid ${C.blueBd}`, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px" }}>compose</span>
+              <span style={{ color: C.blue, background: C.blueFill, border: `1px solid ${C.blueBd}`, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px" }}>compose</span>
             )}
             {isPending && (
-              <span style={{ color: C.amber, background: C.amberFill, border: `1px solid ${C.amberBd}`, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px" }}>pending</span>
+              <span style={{ color: C.amber, background: C.amberFill, border: `1px solid ${C.amberBd}`, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px" }}>pending</span>
             )}
             {isPlugin && (
-              <span style={{ color: C.muted, background: C.s3, border: `1px solid ${C.bd}`, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px" }}>plugin</span>
+              <span style={{ color: C.muted, background: C.s3, border: `1px solid ${C.bd}`, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px" }}>plugin</span>
             )}
-            <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>
+            <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px" }}>
               {isCompose ? `${project.services?.length ?? 0} service${project.services?.length !== 1 ? "s" : ""}` : isPending ? "awaiting upload" : "container"}
             </span>
             {project.created_at && (
-              <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>created {new Date(project.created_at).toLocaleDateString()}</span>
+              <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px" }}>created {new Date(project.created_at).toLocaleDateString()}</span>
             )}
             {gitUrl && (
-              <span title={gitUrl} style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", maxWidth: "320px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span title={gitUrl} style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px", maxWidth: "320px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 ⑂ {gitUrl.replace(/^https?:\/\//, "")}{project.git_branch ? ` · ${project.git_branch}` : ""}
               </span>
             )}
@@ -1502,11 +1595,11 @@ const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, 
         </div>
 
         {isPending ? (
-          <div style={{ padding: "18px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
+          <div style={{ padding: "18px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "13px" }}>
             awaiting upload — use <span style={{ color: C.txt }}>upload</span> to add a Dockerfile or docker-compose.yml
           </div>
         ) : isCompose && (project.services || []).length === 0 ? (
-          <div style={{ padding: "18px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
+          <div style={{ padding: "18px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "13px" }}>
             no services recorded — <span style={{ color: C.txt }}>deploy</span> again to register this project's containers
           </div>
         ) : (
@@ -1514,7 +1607,7 @@ const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, 
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${C.bd}` }}>
-                <TH>{isCompose ? "SERVICE" : "CONTAINER"}</TH><TH>SUBDOMAIN</TH><TH right>PORT</TH><TH center>SSL</TH><TH>STATUS</TH><TH>ACTIONS</TH>
+                <TH>{isCompose ? "SERVICE" : "CONTAINER"}</TH><TH>SUBDOMAIN</TH><TH right>PORT</TH><TH center>SSL</TH><TH>STATUS</TH><TH center>ACTIONS</TH>
               </tr>
             </thead>
             <tbody>
@@ -1600,7 +1693,7 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
   const dropStyle = { flex: 1, display: "block", border: `2px dashed ${C.bdB}`, borderRadius: "14px", padding: "14px", textAlign: "center", background: C.s1, cursor: "pointer" };
   const tab = (m, label) => (
     <button onClick={() => { setMode(m); setError(""); setResult(null); }} style={{
-      flex: 1, padding: "8px", cursor: "pointer", fontFamily: C.ff, fontSize: "11px", fontWeight: 600,
+      flex: 1, padding: "8px", cursor: "pointer", fontFamily: C.ff, fontSize: "13px", fontWeight: 600,
       background: mode === m ? C.money : C.s3, color: mode === m ? C.moneyInk : C.muted,
       border: `1px solid ${mode === m ? C.money : C.bd}`, borderRadius: "10px",
     }}>{label}</button>
@@ -1609,14 +1702,14 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
   return (
     <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "18px", marginBottom: "12px", boxShadow: C.shadow }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
-        <span style={{ color: C.txt, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>DEPLOY PROJECT</span>
+        <span style={{ color: C.txt, fontFamily: C.ff, fontSize: "13px", letterSpacing: "0.1em", fontWeight: 600 }}>DEPLOY PROJECT</span>
         <Btn v="ghost" sm onClick={onCancel}>✕</Btn>
       </div>
 
       <div style={{ display: "grid", gap: "12px" }}>
         <Field label="PROJECT NAME (used as the subdomain)">
           <TextIn value={name} onChange={setName} placeholder="myapp" />
-          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px", marginTop: "5px" }}>
+          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px", marginTop: "5px" }}>
             → served at <span style={{ color: C.blue }}>https://{slug || "myapp"}.{DOMAIN}</span>
             <span style={{ color: C.dim }}> · created automatically if new</span>
           </div>
@@ -1632,15 +1725,15 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
             <div style={{ display: "flex", gap: "8px" }}>
               <label htmlFor="dep-file" style={dropStyle}>
                 <input id="dep-file" type="file" multiple onChange={e => pickFiles(e.target.files)} style={{ display: "none" }} />
-                <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px" }}>select file(s)</div>
+                <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px" }}>select file(s)</div>
               </label>
               <label htmlFor="dep-folder" style={dropStyle}>
                 <input id="dep-folder" ref={dirRef} type="file" multiple onChange={e => pickFolder(e.target.files)} style={{ display: "none" }} />
-                <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px" }}>select a folder</div>
+                <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px" }}>select a folder</div>
               </label>
             </div>
             {entries.length > 0 && !progress && (
-              <div style={{ color: C.green, fontFamily: C.ff, fontSize: "11px" }}>✓ {entries.length} file(s) selected</div>
+              <div style={{ color: C.green, fontFamily: C.ff, fontSize: "13px" }}>✓ {entries.length} file(s) selected</div>
             )}
           </>
         ) : (
@@ -1650,10 +1743,10 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
             </Field>
             {recentGit.length > 0 && (
               <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center" }}>
-                <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "10px" }}>recent:</span>
+                <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px" }}>recent:</span>
                 {recentGit.map(r => (
                   <button key={r.gitUrl} onClick={() => useRecent(r)} title={r.branch ? `${r.gitUrl} (${r.branch})` : r.gitUrl} style={{
-                    cursor: "pointer", fontFamily: C.ff, fontSize: "10px", color: C.blue,
+                    cursor: "pointer", fontFamily: C.ff, fontSize: "12px", color: C.blue,
                     background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "7px", padding: "3px 8px",
                     maxWidth: "220px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                   }}>{r.gitUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "")}</button>
@@ -1675,7 +1768,7 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
           </>}
         />
 
-        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.6", background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px" }}>
+        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", lineHeight: "1.6", background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px" }}>
           The server scans the {mode === "git" ? "cloned repo" : "uploaded"} root for a
           <span style={{ color: C.txt }}> Dockerfile</span> or <span style={{ color: C.txt }}>docker-compose.yml</span> (compose
           wins), wires up nginx + SSL, then builds and runs it — streaming the build log below. A
@@ -1688,7 +1781,7 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
             <div style={{ height: "8px", background: C.s3, borderRadius: "999px", overflow: "hidden" }}>
               <div style={{ height: "100%", width: `${progress.total ? Math.round(progress.sent / progress.total * 100) : 0}%`, background: C.green, transition: "width 0.15s ease" }} />
             </div>
-            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", marginTop: "5px" }}>
+            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", marginTop: "5px" }}>
               sending {(progress.sent / 1048576).toFixed(1)} / {(progress.total / 1048576).toFixed(1)} MB
             </div>
           </div>
@@ -1727,7 +1820,7 @@ const PluginPanel = ({ token, onInstalled, onCancel }) => {
   }, [token]);
 
   const chip = (text, accent) => (
-    <span style={{ background: accent ? C.blueFill : C.s3, color: accent ? C.blue : C.muted, border: `1px solid ${accent ? C.blueBd : C.bd}`, borderRadius: "7px", padding: "2px 9px", fontFamily: C.ff, fontSize: "10px" }}>{text}</span>
+    <span style={{ background: accent ? C.blueFill : C.s3, color: accent ? C.blue : C.muted, border: `1px solid ${accent ? C.blueBd : C.bd}`, borderRadius: "7px", padding: "2px 9px", fontFamily: C.ff, fontSize: "12px" }}>{text}</span>
   );
 
   const active = plugins.find(p => p.name === selected) || null;
@@ -1735,16 +1828,16 @@ const PluginPanel = ({ token, onInstalled, onCancel }) => {
   return (
     <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", marginBottom: "12px", boxShadow: C.shadow, overflow: "hidden" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
-        <span style={{ color: C.txt, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>AVAILABLE PLUGINS</span>
+        <span style={{ color: C.txt, fontFamily: C.ff, fontSize: "13px", letterSpacing: "0.1em", fontWeight: 600 }}>AVAILABLE PLUGINS</span>
         <Btn v="ghost" sm onClick={onCancel}>✕</Btn>
       </div>
 
       {loading ? (
-        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", padding: "20px" }}>loading plugins…</div>
+        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", padding: "20px" }}>loading plugins…</div>
       ) : error ? (
         <div style={{ padding: "16px" }}><Err msg={error} /></div>
       ) : plugins.length === 0 ? (
-        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", padding: "20px" }}>no plugins available</div>
+        <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "13px", padding: "20px" }}>no plugins available</div>
       ) : (
         <div style={{ display: "flex", minHeight: "360px" }}>
           {/* Left: plugin name list (~25%) */}
@@ -1758,10 +1851,10 @@ const PluginPanel = ({ token, onInstalled, onCancel }) => {
                   color: sel ? C.money : C.txt,
                   border: `1px solid ${sel ? C.moneyBd : "transparent"}`,
                   borderRadius: "10px", padding: "9px 11px", marginBottom: "2px", cursor: "pointer",
-                  fontFamily: C.ff, fontSize: "13px", fontWeight: sel ? 600 : 500,
+                  fontFamily: C.ff, fontSize: "15px", fontWeight: sel ? 600 : 500,
                 }}>
                   {p.name}
-                  <div style={{ color: sel ? C.money : C.dim, fontSize: "10px", fontWeight: 400, marginTop: "2px", opacity: sel ? 0.8 : 1 }}>
+                  <div style={{ color: sel ? C.money : C.dim, fontSize: "12px", fontWeight: 400, marginTop: "2px", opacity: sel ? 0.8 : 1 }}>
                     {p.deploy_mode === "compose" ? "compose" : "dockerfile"}
                   </div>
                 </button>
@@ -1775,7 +1868,7 @@ const PluginPanel = ({ token, onInstalled, onCancel }) => {
               <>
                 <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "16px", marginBottom: "16px" }}>
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ color: C.txt, fontFamily: C.ff, fontSize: "20px", fontWeight: 700, marginBottom: "8px" }}>{active.name}</div>
+                    <div style={{ color: C.txt, fontFamily: C.ff, fontSize: "22px", fontWeight: 700, marginBottom: "8px" }}>{active.name}</div>
                     <div style={{ display: "flex", alignItems: "center", gap: "7px", flexWrap: "wrap" }}>
                       {chip(active.deploy_mode === "compose" ? "compose" : `port ${active.container_port}`)}
                       {active.has_install && chip("install.sh", true)}
@@ -1818,7 +1911,7 @@ const ProjectPicker = ({ projects, selected, onToggle }) => (
           border: `1px solid ${on ? C.blueBd : C.bd}`,
           color: on ? C.blue : C.muted,
           borderRadius: "8px", padding: "5px 10px", cursor: "pointer",
-          fontFamily: C.ff, fontSize: "11px",
+          fontFamily: C.ff, fontSize: "13px",
         }}>
           <span style={{ marginRight: "6px" }}>{on ? "☑" : "☐"}</span>{p.name}
         </button>
@@ -1891,19 +1984,19 @@ const TokensPanel = ({ token, projects, me, onCancel }) => {
   };
 
   const TH = ({ children, right }) => (
-    <th style={{ padding: "4px 10px", textAlign: right ? "right" : "left", color: C.dim, fontFamily: C.ff, fontSize: "9px", letterSpacing: "0.1em", fontWeight: 400, whiteSpace: "nowrap" }}>{children}</th>
+    <th style={{ padding: "6px 12px", textAlign: right ? "right" : "left", color: C.dim, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 400, whiteSpace: "nowrap" }}>{children}</th>
   );
-  const td = { padding: "7px 10px", fontFamily: C.ff, fontSize: "11px", color: C.txt };
+  const td = { padding: "9px 12px", fontFamily: C.ff, fontSize: "13px", color: C.txt };
   const sel = {
     background: C.s2, border: `1px solid ${C.bdB}`, color: C.txt, fontFamily: C.ff,
-    fontSize: "12px", padding: "8px 11px", borderRadius: "10px", outline: "none",
+    fontSize: "14px", padding: "9px 13px", borderRadius: "10px", outline: "none",
     width: "100%", boxSizing: "border-box",
   };
 
   return (
     <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", marginBottom: "12px", boxShadow: C.shadow, overflow: "hidden" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
-        <span style={{ color: C.txt, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600 }}>API TOKENS</span>
+        <span style={{ color: C.txt, fontFamily: C.ff, fontSize: "13px", letterSpacing: "0.1em", fontWeight: 600 }}>API TOKENS</span>
         <Btn v="ghost" sm onClick={onCancel}>✕</Btn>
       </div>
 
@@ -1925,14 +2018,14 @@ const TokensPanel = ({ token, projects, me, onCancel }) => {
         {role === "guest" && (
           <Field label="PROJECTS THIS TOKEN MAY ACT ON" style={{ marginBottom: "10px" }}>
             {projects.length === 0 ? (
-              <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>deploy a project first</div>
+              <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "13px" }}>deploy a project first</div>
             ) : (
               <ProjectPicker projects={projects} selected={picked} onToggle={toggle} />
             )}
           </Field>
         )}
 
-        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: 1.7, marginBottom: "14px" }}>
+        <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", lineHeight: 1.7, marginBottom: "14px" }}>
           {role === "guest"
             ? <>a <span style={{ color: C.amber }}>guest</span> token can redeploy <span style={{ color: C.txt }}>{picked.join(", ") || "its projects"}</span> from their own git origins, restart them, read their logs, edit their env, list versions and roll back — nothing else, and no other project. It cannot upload files or repoint a project at another repo. It can read those projects' env values, so treat it as a secret.</>
             : <>an <span style={{ color: C.green }}>admin</span> token can do everything, including minting and revoking tokens.</>}
@@ -1942,9 +2035,9 @@ const TokensPanel = ({ token, projects, me, onCancel }) => {
 
         {/* List */}
         {!tokens ? (
-          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", padding: "10px 0" }}>loading tokens…</div>
+          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "13px", padding: "10px 0" }}>loading tokens…</div>
         ) : tokens.length === 0 ? (
-          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", padding: "10px 0" }}>no tokens yet</div>
+          <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "13px", padding: "10px 0" }}>no tokens yet</div>
         ) : (
           <div style={{ overflowX: "auto", border: `1px solid ${C.bd}`, borderRadius: "14px" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -1962,7 +2055,7 @@ const TokensPanel = ({ token, projects, me, onCancel }) => {
                         color: t.role === "guest" ? C.amber : C.green,
                         background: t.role === "guest" ? C.amberFill : C.moneyFill,
                         border: `1px solid ${t.role === "guest" ? C.amberBd : C.bd}`,
-                        fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px",
+                        fontSize: "11px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px",
                       }}>{t.role}</span>
                     </td>
                     <td style={{ ...td, color: (t.projects || []).length ? C.txt : C.dim }}>
@@ -1970,15 +2063,15 @@ const TokensPanel = ({ token, projects, me, onCancel }) => {
                       {t.role === "guest" && t.active && (
                         <button onClick={() => setEditing({ id: t.id, name: t.name, projects: [...(t.projects || [])] })}
                           title="Change which projects this token may act on"
-                          style={{ background: "transparent", border: "none", color: C.blue, cursor: "pointer", fontFamily: C.ff, fontSize: "10px", marginLeft: "8px" }}>edit</button>
+                          style={{ background: "transparent", border: "none", color: C.blue, cursor: "pointer", fontFamily: C.ff, fontSize: "12px", marginLeft: "8px" }}>edit</button>
                       )}
                     </td>
                     <td style={{ ...td, color: C.dim }}>{t.created_at ? new Date(t.created_at).toLocaleString() : "—"}</td>
                     <td style={{ ...td, textAlign: "right" }}>
                       {!t.active
-                        ? <span style={{ color: C.dim, fontSize: "10px" }}>revoked</span>
+                        ? <span style={{ color: C.dim, fontSize: "12px" }}>revoked</span>
                         : t.id === me?.id
-                          ? <span style={{ color: C.dim, fontSize: "10px" }}>this session</span>
+                          ? <span style={{ color: C.dim, fontSize: "12px" }}>this session</span>
                           : <Btn sm v="danger" onClick={() => setConfirm(t)}>revoke</Btn>}
                     </td>
                   </tr>
@@ -1993,21 +2086,21 @@ const TokensPanel = ({ token, projects, me, onCancel }) => {
       {minted && (
         <Modal onClose={() => setMinted(null)} width={560}>
           <ModalHeader title={`TOKEN — ${minted.name}`} color={C.amber} onClose={() => setMinted(null)} />
-          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", marginBottom: "10px" }}>
+          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", marginBottom: "10px" }}>
             Copy it now — it is stored hashed and cannot be shown again.
           </div>
-          <div style={{ background: C.s3, border: `1px solid ${C.bdB}`, borderRadius: "10px", padding: "10px 12px", color: C.txt, fontFamily: C.mono, fontSize: "11px", wordBreak: "break-all" }}>
+          <div style={{ background: C.s3, border: `1px solid ${C.bdB}`, borderRadius: "10px", padding: "10px 12px", color: C.txt, fontFamily: C.mono, fontSize: "13px", wordBreak: "break-all" }}>
             {minted.token}
           </div>
           {minted.role === "guest" && (
-            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: 1.8, marginTop: "12px" }}>
+            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", lineHeight: 1.8, marginTop: "12px" }}>
               give the third party these, e.g. as CI secrets:
-              <div style={{ color: C.txt, fontFamily: C.mono, fontSize: "10px", marginTop: "5px" }}>
+              <div style={{ color: C.txt, fontFamily: C.mono, fontSize: "12px", marginTop: "5px" }}>
                 TOKEN={minted.token}<br />BASE_DOMAIN={DOMAIN}
               </div>
               <div style={{ marginTop: "8px" }}>
                 or send them this link to open the panel for <span style={{ color: C.txt }}>{minted.project}</span> only:
-                <div style={{ color: C.txt, fontFamily: C.mono, fontSize: "10px", marginTop: "5px", wordBreak: "break-all" }}>
+                <div style={{ color: C.txt, fontFamily: C.mono, fontSize: "12px", marginTop: "5px", wordBreak: "break-all" }}>
                   {window.location.origin}/token/{minted.token}
                 </div>
               </div>
@@ -2023,7 +2116,7 @@ const TokensPanel = ({ token, projects, me, onCancel }) => {
       {editing && (
         <Modal onClose={() => setEditing(null)} width={480}>
           <ModalHeader title={`SCOPE — ${editing.name}`} color={C.txt} onClose={() => setEditing(null)} />
-          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", marginBottom: "12px" }}>
+          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", marginBottom: "12px" }}>
             Which projects this token may act on. The token itself does not change, so
             whoever holds it keeps working with the secret they already have.
           </div>
@@ -2071,8 +2164,8 @@ const LoginScreen = ({ onAuth }) => {
     <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div style={{ width: 380, background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "36px", boxShadow: "0 12px 48px rgba(0,0,0,.5)" }}>
         <div style={{ marginBottom: "30px" }}>
-          <div style={{ color: C.brand, fontFamily: C.ff, fontSize: "22px", fontWeight: 700, marginBottom: "6px" }}>freeholdy</div>
-          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "10px", letterSpacing: "0.12em" }}>{DOMAIN.toUpperCase()} CONTROL PANEL</div>
+          <div style={{ color: C.brand, fontFamily: C.ff, fontSize: "24px", fontWeight: 700, marginBottom: "6px" }}>freeholdy</div>
+          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", letterSpacing: "0.12em" }}>{DOMAIN.toUpperCase()} CONTROL PANEL</div>
         </div>
 
         <Field label="API TOKEN" style={{ marginBottom: "10px" }}>
@@ -2085,9 +2178,9 @@ const LoginScreen = ({ onAuth }) => {
           connect →
         </Btn>
 
-        <div style={{ marginTop: "22px", color: C.muted, fontFamily: C.ff, fontSize: "10px", lineHeight: "1.7", borderTop: `1px solid ${C.bd}`, paddingTop: "14px" }}>
+        <div style={{ marginTop: "22px", color: C.muted, fontFamily: C.ff, fontSize: "12px", lineHeight: "1.7", borderTop: `1px solid ${C.bd}`, paddingTop: "14px" }}>
           generate token:
-          <div style={{ marginTop: "6px", color: C.txt, fontFamily: C.mono, fontSize: "10px", background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "7px 9px", wordBreak: "break-all" }}>
+          <div style={{ marginTop: "6px", color: C.txt, fontFamily: C.mono, fontSize: "12px", background: C.s3, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "7px 9px", wordBreak: "break-all" }}>
             python scripts/generate_token.py generate --name web_ui
           </div>
           <div style={{ marginTop: "8px" }}>
@@ -2108,10 +2201,10 @@ const NavItem = ({ icon, label, active, onClick, title }) => (
     color: active ? C.money : C.muted,
     border: "1px solid transparent",
     borderLeft: `3px solid ${active ? C.money : "transparent"}`,
-    borderRadius: "10px", padding: "9px 12px", marginBottom: "2px", cursor: "pointer",
-    fontFamily: C.ff, fontSize: "13px", fontWeight: active ? 600 : 500,
+    borderRadius: "10px", padding: "10px 14px", marginBottom: "2px", cursor: "pointer",
+    fontFamily: C.ff, fontSize: "15px", fontWeight: active ? 600 : 500,
   }}>
-    <span style={{ fontSize: "14px", width: "18px", textAlign: "center" }}>{icon}</span>
+    <span style={{ fontSize: "16px", width: "18px", textAlign: "center" }}>{icon}</span>
     <span>{label}</span>
   </button>
 );
@@ -2244,16 +2337,16 @@ const Dashboard = ({ token, onLogout }) => {
     <div style={{ minHeight: "100vh", background: C.bg, color: C.txt, fontFamily: C.ff }}>
       {/* Left nav rail (Grafana-style) */}
       <nav className={`fh-rail${railOpen ? " open" : ""}`} style={{
-        position: "fixed", top: 0, left: 0, bottom: 0, width: "220px", zIndex: 60,
+        position: "fixed", top: 0, left: 0, bottom: 0, width: "240px", zIndex: 60,
         background: C.s2, borderRight: `1px solid ${C.bd}`,
         display: "flex", flexDirection: "column", padding: "14px 12px", overflowY: "auto",
       }}>
         {/* Brand */}
         <div style={{ display: "flex", alignItems: "center", gap: "9px", padding: "4px 8px 12px" }}>
-          <span style={{ color: C.brand, fontSize: "17px", fontWeight: 700, letterSpacing: "-0.3px" }}>freeholdy</span>
+          <span style={{ color: C.brand, fontSize: "19px", fontWeight: 700, letterSpacing: "-0.3px" }}>freeholdy</span>
         </div>
         {version && (
-          <div style={{ margin: "0 8px 14px", alignSelf: "flex-start", color: C.muted, fontSize: "10px", fontWeight: 600, padding: "3px 8px", border: `1px solid ${C.bd}`, borderRadius: "7px" }}>
+          <div style={{ margin: "0 8px 14px", alignSelf: "flex-start", color: C.muted, fontSize: "12px", fontWeight: 600, padding: "3px 8px", border: `1px solid ${C.bd}`, borderRadius: "7px" }}>
             v{version.version} · {version.type}
           </div>
         )}
@@ -2288,28 +2381,28 @@ const Dashboard = ({ token, onLogout }) => {
       )}
 
       {/* Main column (shifts right of the rail) */}
-      <div className="fh-main" style={{ marginLeft: "220px", minHeight: "100vh" }}>
+      <div className="fh-main" style={{ marginLeft: "240px", minHeight: "100vh" }}>
         {/* Slim top bar */}
-        <div style={{ background: C.s1, borderBottom: `1px solid ${C.bd}`, padding: "0 20px", display: "flex", alignItems: "center", justifyContent: "space-between", height: "48px", position: "sticky", top: 0, zIndex: 50 }}>
+        <div style={{ background: C.s1, borderBottom: `1px solid ${C.bd}`, padding: "0 20px", display: "flex", alignItems: "center", justifyContent: "space-between", height: "54px", position: "sticky", top: 0, zIndex: 50 }}>
           <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-            <button className="fh-burger" onClick={() => setRailOpen(o => !o)} style={{ display: "none", alignItems: "center", justifyContent: "center", background: "transparent", border: `1px solid ${C.bd}`, borderRadius: "10px", color: C.muted, fontSize: "14px", padding: "4px 9px", cursor: "pointer" }}>☰</button>
-            <span style={{ color: C.txt, fontSize: "13px", fontWeight: 600 }}>{sectionTitle}</span>
+            <button className="fh-burger" onClick={() => setRailOpen(o => !o)} style={{ display: "none", alignItems: "center", justifyContent: "center", background: "transparent", border: `1px solid ${C.bd}`, borderRadius: "10px", color: C.muted, fontSize: "16px", padding: "4px 9px", cursor: "pointer" }}>☰</button>
+            <span style={{ color: C.txt, fontSize: "15px", fontWeight: 600 }}>{sectionTitle}</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-            <span style={{ color: healthColor, fontFamily: C.ff, fontSize: "10px", display: "flex", alignItems: "center", gap: "5px" }}>
-              <span style={{ fontSize: "7px" }}>●</span>api {health ?? "checking…"}
+            <span style={{ color: healthColor, fontFamily: C.ff, fontSize: "12px", display: "flex", alignItems: "center", gap: "5px" }}>
+              <span style={{ fontSize: "9px" }}>●</span>api {health ?? "checking…"}
             </span>
             {role === "guest" && (
               <>
                 <span style={{ width: 1, height: 14, background: C.bd, display: "inline-block" }} />
                 <span title={`This token is limited to: ${(me?.projects || []).join(", ") || "nothing"}`}
-                  style={{ color: C.amber, background: C.amberFill, border: `1px solid ${C.amberBd}`, fontSize: "9px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px" }}>
+                  style={{ color: C.amber, background: C.amberFill, border: `1px solid ${C.amberBd}`, fontSize: "11px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px" }}>
                   guest · {(me?.projects || []).length === 1 ? me.projects[0] : `${(me?.projects || []).length} projects`}
                 </span>
               </>
             )}
             <span style={{ width: 1, height: 14, background: C.bd, display: "inline-block" }} />
-            <span style={{ color: C.dim, fontSize: "10px" }}>{DOMAIN}</span>
+            <span style={{ color: C.dim, fontSize: "12px" }}>{DOMAIN}</span>
           </div>
         </div>
 
@@ -2334,9 +2427,9 @@ const Dashboard = ({ token, onLogout }) => {
               replace it with their own panel (above). */}
           {!showDeploy && !showPlugins && !showTokens && (
             loading ? (
-              <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "11px", padding: "24px 0" }}>loading projects…</div>
+              <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", padding: "24px 0" }}>loading projects…</div>
             ) : projects.length === 0 ? (
-              <div style={{ border: `1px dashed ${C.bd}`, borderRadius: "14px", padding: "40px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "11px" }}>
+              <div style={{ border: `1px dashed ${C.bd}`, borderRadius: "14px", padding: "40px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "13px" }}>
                 {isAdmin
                   ? <>no projects yet — use <span style={{ color: C.txt }}>Deploy</span> or <span style={{ color: C.txt }}>Plugins</span> in the sidebar</>
                   : <>this token is not scoped to any project — ask the server's operator</>}
@@ -2409,6 +2502,7 @@ export default function App() {
         button { transition: background .12s, color .12s, opacity .12s, box-shadow .12s; }
         button:hover:not(:disabled) { filter: brightness(1.12); }
         .fh-nav:not(.fh-active):hover { background: #242D40; color: #E9EDF5; }
+        .fh-item:hover:not(:disabled) { background: #242D40; }
         .fh-rail { transition: transform .2s ease; }
         @media (max-width: 820px) {
           .fh-rail { transform: translateX(-100%); }

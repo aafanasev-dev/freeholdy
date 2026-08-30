@@ -23,7 +23,7 @@ behind nginx (`ui.your_domain.com`); see `README.md`.
 
 ## Architecture
 
-**The entire application is one file: `src/App.jsx` (~2060 lines).** `main.jsx` only mounts it.
+**The entire application is one file: `src/App.jsx` (~2520 lines).** `main.jsx` only mounts it.
 There is no router, no component directory, and no CSS files. When adding UI, add it to `App.jsx`
 following the existing `// ── Section ──` comment dividers and component conventions below — do not
 introduce new files or a styling library unless asked.
@@ -63,8 +63,8 @@ Things that require reading the whole file to understand:
 - **All styling is inline.** Colors come from the `C` object; the only class names are the
   handful the one global `<style>` block in `App` needs — the responsive nav-rail media query
   (`.fh-rail`, `.fh-main`, `.fh-burger`), the `.fh-nav` / `.fh-active` nav-item hover rule
-  (`NavItem` can't express `:hover` inline), plus the font import/scrollbar/reset/focus-ring
-  rules. Match this — pass `style` props, reuse `C`, do not write CSS beyond that block.
+  (`NavItem` can't express `:hover` inline), the matching `.fh-item` rule for `ActionMenu`'s
+  rows, plus the font import/scrollbar/reset/focus-ring rules. Match this — pass `style` props, reuse `C`, do not write CSS beyond that block.
 - **Dark blue-slate theme, with three separate accent roles.** `C` is a cool blue-slate palette:
   chrome `bg #0F1421` with panels `s1/s2/s3` (`#161C2B`/`#1C2334`/`#242D40`), light text
   (`C.txt #E9EDF5`), and translucent **tint tokens** (`C.moneyFill/moneyBd`, `blueFill/blueBd`,
@@ -85,6 +85,10 @@ Things that require reading the whole file to understand:
     `Tag`, `Ok`, danger buttons). Mint and money green are deliberately distinct — mint never
     fills a button, money never marks a status.
 
+  The **type scale** is 11px (field labels, table headers, chips) / 12px (meta text, hints,
+  subdomains) / 13px (body text, small buttons, menu rows) / 14px (default buttons, inputs) /
+  15–16px (nav items, top-bar and card titles), with 19–24px wordmarks and Markdown headings.
+  Keep new UI on those steps rather than reintroducing the 9–11px sizes this scale replaced.
   Titles, project names, and inline emphasis are plain `C.txt`. `C.ff` is Inter; `C.mono`
   (JetBrains Mono / Roboto Mono, both fetched by the `@import`) is **only** for log/code output
   (LogPane, ExecTerminal, status/SSL output, the login token command). Corner radii follow a
@@ -235,12 +239,25 @@ call sites in `UploadModal`/`DeployForm` (the source isn't in the deploy respons
 Two row components render the project table; a `pending` project (created, not yet uploaded) renders
 neither — `ProjectCard` shows an "awaiting upload" placeholder and a `pending` chip in the header:
 - `ContainerRow` — dockerfile mode, one row, drives the remaining project-level control endpoints
-  (`stop`, `ssl`, `domain`, `env`, `restart`, `versions`, `logs`, `status`, `exec`). Build + run
+  (`exec`, `restart`, `env`, `versions`, `logs`, `status`, `ssl`, `domain`, `stop`). Build + run
   happen via the deploy/upload flow, not a button.
 - `ServiceRow` — compose mode (name/subdomain/port/ssl/status) plus a per-service **exec**, **env**
-  and **logs** button (and the custom-domain button, exposed services only); the stack's **env**,
+  and **logs** action (and the custom-domain one, exposed services only); the stack's **env**,
   **restart**, **logs** and **down** live on the `ProjectCard` header (build + up happen via the
-  deploy/upload flow). The exec button opens an `ExecTerminal` for that service's container.
+  deploy/upload flow). The exec action opens an `ExecTerminal` for that service's container.
+
+**A row's actions live behind one `⋮` button, not a strip of buttons** (`ActionMenu`, defined next
+to `Btn`). It takes `items` — `{ key, label, icon, color, badge, disabled, busy, title, onClick }`,
+where a `null` entry is a divider and a `false` one is gated out — and renders them in a dropdown.
+The panel is **`position: fixed`**, measured from the trigger's `getBoundingClientRect()` and
+flipped above the button when it would overrun the viewport: the rows sit inside the card's
+`overflowX: auto` table wrapper and the card's own `overflow: hidden`, both of which would clip an
+absolutely positioned popover. `zIndex: 200` puts it over the sticky top bar (50) and the rail (60)
+but under `Modal` (9999), so a modal opened *from* the menu still covers it. It closes on outside
+mousedown, Escape and scroll, and **re-measures** (rather than closing) on resize. A gated-out
+action is omitted entirely — same role rules as before — while a merely unavailable one (`exec` /
+`stop` on a stopped container) stays visible and greyed, so the list doesn't reshuffle. The
+`ProjectCard` **header** buttons are project-level and stay plain buttons.
 
 Note both rows render their modals as `<div>`s directly under `<tbody>` (`ContainerRow`) — React
 logs a `validateDOMNesting` warning for that. It predates the env work (`DomainModal`,
