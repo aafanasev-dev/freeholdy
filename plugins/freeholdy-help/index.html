@@ -339,6 +339,7 @@
     <a href="#deploy-plugins" class="sub">From plugins</a>
     <a href="#plugin-catalog">Plugin catalog</a>
     <a href="#versions-rollback">Versions &amp; rollback</a>
+    <a href="#backups">Backups</a>
     <a href="#env-vars">Environment variables</a>
     <a href="#env-scopes" class="sub">Scopes</a>
     <a href="#env-apply" class="sub">Applying changes</a>
@@ -772,7 +773,71 @@ fhcli set-backup-limit myapp 3  # keep at most 3 archived versions</code></pre>
         <div class="note">
           Rolling back does <strong>not</strong> roll back your data — named volumes keep their
           current contents, so databases and uploads stay where they are. Treat rollback as
-          "ship the old code again", not as a restore point.
+          "ship the old code again", not as a restore point. For the data, take a
+          <a href="#backups">backup</a>.
+        </div>
+      </section>
+
+      <section id="backups">
+        <h1>Backups</h1>
+        <p class="lead">
+          A version protects you from a bad deploy; a <strong>backup</strong> protects you from a
+          lost server. One backup is a single self-contained <code>.tar</code> holding that
+          version's image(s), the contents of the project's volumes, its stored
+          <code>.env</code> files and its project tree — take it off the box and bring the
+          project back later, even on a different machine.
+        </p>
+        <pre><code>fhcli backup myapp                        # archive it now (the log streams live)
+fhcli backups myapp                       # list the archives
+fhcli backup-download myapp 4 -o out.tar  # take one off the server
+fhcli backup-upload myapp out.tar         # bring it back → imported as v7
+fhcli rollback myapp 7 --restore-data     # activate it, data and all</code></pre>
+
+        <h2>Restoring is a rollback</h2>
+        <p>
+          Uploading an archive overwrites nothing. It loads the archive's images under the
+          project's <em>next</em> version number, and that version shows up in the
+          <a href="#versions-rollback">versions list</a> as <strong>archived</strong> — so
+          activating a backup is the same rollback you already use, and there is only ever one
+          answer to "which build is live". A plain rollback swaps code and images and leaves your
+          data alone; add <code>--restore-data</code> to put that archive's volume contents and
+          environment back at the same time.
+        </p>
+
+        <figure>
+          <img src="assets/webui-backups.jpg" width="1568" height="818"
+               alt="The Backups panel: a project picker with a back up now button, a table of two archives showing when each was taken, its kind, size, and chips for the image, env and files it contains, and below it the automatic backups block with a daily 03:00 cron schedule, a back up after every deploy checkbox, a destination picker and retention counts.">
+          <figcaption>
+            The web UI's <strong>Backups</strong> panel. Each archive lists what it actually
+            contains; the lower half is the automatic schedule for that project, and the same
+            panel backs up the freeholdy database itself.
+          </figcaption>
+        </figure>
+
+        <h2>Automatic backups</h2>
+        <p>
+          Two independent triggers per project, set with <code>fhcli backup-config</code> or in the
+          panel above: a <strong>cron schedule</strong> (armed when you save it; a window missed
+          while the server was down is caught up once on the next boot) and
+          <strong>after every successful deploy</strong>. Retention is a count — how many archives
+          to keep here, and how many at the destination. Destinations themselves
+          (<code>rsync</code> over ssh, or FTP/FTPS) are declared as <code>BACKUP_TARGET_*</code>
+          blocks in the <strong>server's own</strong> <code>.env</code>, so their credentials never
+          reach the database, the API or this page — only the destination's name does. The
+          freeholdy database is a backup scope of its own, with the same commands
+          (<code>fhcli db-backup</code>).
+        </p>
+        <p>
+          Schedules, destinations and the database scope are <strong>admin only</strong>. A
+          <a href="#api-guest-tokens">guest token</a> can take, download and delete
+          <em>manual</em> backups of the projects it is scoped to, which is enough for a CI job to
+          snapshot before it ships.
+        </p>
+
+        <div class="note">
+          Volumes are captured <strong>at backup time</strong>, not at the version's deploy time —
+          docker keeps no per-version volume state. Backing up an older version therefore pairs
+          that version's image with today's data.
         </div>
       </section>
 
@@ -982,7 +1047,14 @@ curl "$BASE/projects/myapp/status" -H "Authorization: Bearer $TOKEN"</code></pre
               <tr class="group"><td colspan="3">Versions</td></tr>
               <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/versions</code></td><td>Active / inactive / archived versions with counts.</td></tr>
               <tr><td class="method">PUT</td><td class="path"><code>/projects/{name}/backup-limit</code></td><td><code>{"limit":3}</code> — set the cap and prune right away.</td></tr>
-              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/rollback</code></td><td><code>{"version":2}</code> — make an earlier version live; returns a <code>ws_path</code>.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/rollback</code></td><td><code>{"version":2}</code> — make an earlier version live; returns a <code>ws_path</code>. Add <code>"restore_data":true</code> to put a backup's volumes and env back too.</td></tr>
+
+              <tr class="group"><td colspan="3">Backups</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/backups</code></td><td>The project's archives, newest first, with sizes and contents.</td></tr>
+              <tr><td class="method">POST</td><td class="path"><code>/projects/{name}/backups</code></td><td>Archive it now; returns a <code>ws_path</code> (<code>WS /projects/{name}/backup</code>).</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/backups/{id}/download</code></td><td>Raw <code>[offset, offset+length)</code> pieces of one archive.</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/backup-config</code></td><td>The automatic schedule, destination and retention. <code>PUT</code> changes it. Admin only.</td></tr>
+              <tr><td class="method">GET</td><td class="path"><code>/backups/database</code></td><td>The freeholdy database's own archives; <code>POST</code> takes one. Admin only.</td></tr>
 
               <tr class="group"><td colspan="3">Environment variables</td></tr>
               <tr><td class="method">GET</td><td class="path"><code>/projects/{name}/env</code></td><td>The stored file: <code>content</code>, the <code>keys</code> in it, and <code>applied</code> (false → restart to apply).</td></tr>
@@ -1055,7 +1127,8 @@ curl "$BASE/projects/myapp/status" -H "Authorization: Bearer $TOKEN"</code></pre
                 <td class="path"><code>guest</code></td>
                 <td>Scoped to <strong>one or more</strong> projects: redeploy them from their
                     own git origins, restart them, read their logs, edit their environment,
-                    list their versions and roll them back. Nothing else — and it cannot even
+                    list their versions and roll them back, and take, download or delete
+                    <em>manual</em> backups of them. Nothing else — and it cannot even
                     see that your other projects exist.</td>
               </tr>
             </tbody>
@@ -1127,13 +1200,17 @@ fhcli redeploy myapp</code></pre>
                   <code>redeploy</code> (re-clone its own origin) · watch the build log ·
                   <code>restart</code> · <code>logs</code> · <code>status</code> ·
                   <code>abort</code> · <code>versions</code> · <code>rollback</code> ·
-                  read and write the <code>.env</code>
+                  read and write the <code>.env</code> · <code>backup</code> ·
+                  <code>backups</code> · <code>backup-download</code> ·
+                  <code>backup-delete</code>
                 </td>
                 <td>
                   every project outside its scope (not even listed) · uploading files ·
                   <code>git/add</code> (pointing a project at a repo) · creating or deleting
                   projects · <code>stop</code> · <code>exec</code> (no shell) ·
-                  <code>ssl</code> · <code>domain</code> · the backup limit · the plugin
+                  <code>ssl</code> · <code>domain</code> · the backup limit · the automatic
+                  backup settings, schedule and destinations (<em>reading</em> them included) ·
+                  importing a backup archive · the freeholdy database's own backups · the plugin
                   catalog and installs · the server's git key · minting or revoking tokens
                 </td>
               </tr>
@@ -1305,6 +1382,16 @@ fhcli token-projects 4                           # scope it to nothing</code></p
               <tr><td class="path"><code>versions PROJECT</code></td><td>List the versions and their states.</td></tr>
               <tr><td class="path"><code>rollback PROJECT N</code></td><td>Make version N live again.</td></tr>
               <tr><td class="path"><code>set-backup-limit PROJECT N</code></td><td>Cap the archived versions and prune now.</td></tr>
+
+              <tr class="group"><td colspan="2">Backups</td></tr>
+              <tr><td class="path"><code>backup PROJECT</code></td><td>Archive it now — image(s), volumes, env and files in one tar. <code>--version N</code>, <code>--no-volumes</code>.</td></tr>
+              <tr><td class="path"><code>backups PROJECT</code></td><td>List the archives, newest first, with size and what each contains.</td></tr>
+              <tr><td class="path"><code>backup-download PROJECT ID</code></td><td>Fetch one archive in chunks. <code>-o FILE</code>.</td></tr>
+              <tr><td class="path"><code>backup-upload PROJECT ARCHIVE</code></td><td>Import an archive as a new archived version — activate it with <code>rollback</code>. Admin only.</td></tr>
+              <tr><td class="path"><code>backup-delete PROJECT ID</code></td><td>Delete an archive; <code>--remote</code> also removes it at the destination.</td></tr>
+              <tr><td class="path"><code>backup-config PROJECT</code></td><td>Show or change the automatic schedule, destination and retention. Admin only.</td></tr>
+              <tr><td class="path"><code>backup-targets</code></td><td>List the destinations the server can see, and <code>backup-target-test NAME</code> checks one. Admin only.</td></tr>
+              <tr><td class="path"><code>db-backup</code></td><td>The same for the freeholdy database itself — plus <code>db-backups</code>, <code>db-backup-download</code>, <code>db-backup-delete</code>, <code>db-backup-config</code>. Admin only.</td></tr>
 
               <tr class="group"><td colspan="2">Tokens</td></tr>
               <tr><td class="path"><code>whoami</code></td><td>What the configured token is allowed to do (role, and the project a guest is bound to).</td></tr>

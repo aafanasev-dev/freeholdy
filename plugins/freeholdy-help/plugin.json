@@ -1,6 +1,6 @@
 {
   "name": "freeholdy-help",
-  "description": "The freeholdy user guide — installation, deployment, plugins, versions & rollback, environment variables, logs & shell, the REST API, token roles & guest tokens for CI/CD, the CLI, and AI integration.",
+  "description": "The freeholdy user guide — installation, deployment, plugins, versions & rollback, backups, environment variables, logs & shell, the REST API, token roles & guest tokens for CI/CD, the CLI, and AI integration.",
   "deploy_mode": "dockerfile",
   "container_port": 80,
   "type": "plugin"
