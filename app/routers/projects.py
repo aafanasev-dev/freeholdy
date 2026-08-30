@@ -679,6 +679,18 @@ def launch_restart(db: Session, project: Project) -> tuple[str, str]:
     project_dir = os.path.abspath(compose_service.project_dir(project.name))
 
     if project.deploy_mode == "compose":
+        # A restart never builds, so a stack whose deploy never produced images would be
+        # taken down and left down, reporting docker's bare "No such image: {project}-{svc}".
+        # Refuse instead — the same guard the dockerfile branch below applies to a project
+        # with no container yet.
+        missing = deploy_service.compose_missing_images(project.name, project_dir, env_file)
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Project '{project.name}' has no built image for: "
+                       f"{', '.join(missing)} — it has never been deployed successfully. "
+                       f"Deploy it instead of restarting.",
+            )
         # The override is where a compose service's env is wired in, so regenerate it from
         # the service rows before `up` — otherwise a stack deployed before the env was
         # edited would come back with the old `env_file:` list (or none at all). Only the

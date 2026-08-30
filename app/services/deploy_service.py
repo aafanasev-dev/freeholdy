@@ -842,6 +842,42 @@ def _volume_restore_job(name: str, mode: str, container_name: Optional[str], vol
             pass
 
 
+def compose_missing_images(name: str, project_dir: str,
+                          env_file: Optional[str] = None) -> list[str]:
+    """Services whose image is absent — exactly what an `up --no-build` would fail on.
+
+    A restart (and the `up` that ends a volume restore) never builds, so on a project whose
+    deploy never got as far as producing images it would take the stack down and leave it
+    down, reporting docker's bare `No such image: {project}-{service}:latest`. Callers use
+    this to refuse with something a user can act on.
+
+    Resolves what the next `up` would actually use: the pinned `freeholdy_{name}_{svc}:v{N}`
+    tags when `PIN_FILE` exists, else each service's resolved image from
+    `_resolve_compose_services` (compose's default `{project}-{service}` for a build-only
+    service). Checking images rather than "does the project have version rows" is deliberate:
+    a stack deployed before versioning existed, whose startup backfill did not run, has no
+    rows but perfectly good images, and must keep restarting.
+
+    Never raises — if the stack cannot be resolved at all (a broken compose file, docker
+    down), it returns [] and lets the caller proceed exactly as it did before."""
+    pin_path = os.path.join(project_dir, PIN_FILE)
+    images: dict[str, str] = {}
+    try:
+        if os.path.exists(pin_path):
+            with open(pin_path) as f:
+                doc = yaml.safe_load(f) or {}
+            for svc, spec in (doc.get("services") or {}).items():
+                image = (spec or {}).get("image")
+                if image:
+                    images[str(svc)] = str(image)
+        if not images:
+            images = {svc: spec["image"]
+                      for svc, spec in _resolve_compose_services(name, project_dir, env_file).items()}
+    except (OSError, yaml.YAMLError, RuntimeError, ValueError):
+        return []
+    return sorted(svc for svc, image in images.items() if not docker_service.image_exists(image))
+
+
 def compose_rollback_to_version(project_id: int, version: int) -> str:
     """Make an archived compose version active again: `down` the current stack, restore the
     version's file snapshot into the project dir, re-provision (service rows, ports,

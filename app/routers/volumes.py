@@ -42,7 +42,7 @@ from app.models.schemas import (
     VolumeUploadCompleteRequest,
     VolumesResponse,
 )
-from app.services import volume_service
+from app.services import compose_service, env_service, volume_service
 
 router = APIRouter()
 
@@ -274,6 +274,22 @@ def complete_upload(
             status_code=400,
             detail=f"Volume '{volume}' has not been created yet — deploy the project first",
         )
+
+    # A restore ends by bringing the stack back with `up --no-build`. On a project whose
+    # deploy never produced images that `up` cannot succeed, so the restore would stop a
+    # stack it can then not start — refuse here, before the volume is wiped.
+    if project.deploy_mode == "compose":
+        project_dir = os.path.abspath(compose_service.project_dir(project.name))
+        missing = deploy_service.compose_missing_images(
+            project.name, project_dir, env_service.project_env_file(db, project))
+        if missing:
+            os.remove(path)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Project '{project.name}' has no built image for: "
+                       f"{', '.join(missing)} — deploy it before restoring a volume, or the "
+                       f"stack could not be started again afterwards.",
+            )
 
     deploy_service.volume_restore(project.id, volume, path)
     status_path = (f"/projects/{project_name}/compose/status"
