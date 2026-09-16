@@ -26,7 +26,12 @@ from app.services import (
     nginx_service,
     deploy_service,
 )
-from app.routers.projects import provision_dockerfile, project_response, launch_deploy
+from app.routers.projects import (
+    provision_dockerfile,
+    project_response,
+    launch_deploy,
+    next_display_order,
+)
 from app.routers.compose import provision_compose
 
 router = APIRouter()
@@ -141,7 +146,8 @@ def _create_dockerfile_project(plugin: dict, project_name: str, db: Session) -> 
     from the web UI."""
     if db.query(Project).filter(Project.name == project_name).first():
         raise HTTPException(status_code=409, detail=f"Project '{project_name}' already exists")
-    project = Project(name=project_name, type=plugin["type"], deploy_mode="pending")
+    project = Project(name=project_name, type=plugin["type"], deploy_mode="pending",
+                      display_order=next_display_order(db))
     db.add(project)
     db.flush()
     project = provision_dockerfile(
@@ -191,7 +197,8 @@ def _stage_compose_plugin(plugin: dict, project_name: str, db: Session) -> Tuple
     if db.query(Project).filter(Project.name == project_name).first():
         raise HTTPException(status_code=409, detail=f"Project '{project_name}' already exists")
 
-    project = Project(name=project_name, type=plugin["type"], deploy_mode="compose")
+    project = Project(name=project_name, type=plugin["type"], deploy_mode="compose",
+                      display_order=next_display_order(db))
     db.add(project)
     db.flush()
 

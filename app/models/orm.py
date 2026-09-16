@@ -50,6 +50,13 @@ class Project(Base):
     backup_limit = Column(Integer, nullable=False, default=5)      # max archived versions kept
     version_counter = Column(Integer, nullable=False, default=0)   # last version number assigned
 
+    # ── web UI card order ──
+    # Manual display order. Lower sorts first and ties break on name, so an install whose
+    # rows are all 0 (the migration's default) keeps the old alphabetical listing until
+    # someone drags a card. New projects get a lower value than any existing one, i.e. they
+    # land on top.
+    display_order = Column(Integer, nullable=False, default=0)
+
     services = relationship("ComposeService", back_populates="project", cascade="all, delete-orphan")
     versions = relationship("ProjectVersion", back_populates="project", cascade="all, delete-orphan")
     env_files = relationship("ProjectEnvFile", back_populates="project", cascade="all, delete-orphan")

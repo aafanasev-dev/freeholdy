@@ -14,6 +14,7 @@ from app.auth import require_admin
 from app.services import docker_service, git_service
 from app.routers.projects import (
     project_response,
+    next_display_order,
     apply_deploy_env,
     deploy_from_git,
     deploy_stream_session,
@@ -55,7 +56,8 @@ def add_git_project(
     if existing:
         project = existing
     else:
-        project = Project(name=name, type=ProjectType.user.value, deploy_mode="pending")
+        project = Project(name=name, type=ProjectType.user.value, deploy_mode="pending",
+                          display_order=next_display_order(db))
         db.add(project)
         db.flush()
 

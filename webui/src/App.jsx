@@ -437,12 +437,25 @@ const Markdown = ({ text }) => {
 };
 
 // ── Log pane ──────────────────────────────────────────────────────────────────
-const LogPane = ({ log, onClose, onAbort }) => {
+// The shell both log panes share. Free-standing (below the list) each is its own rounded
+// panel; `attached` it is the continuation of the ProjectCard above it, so only the top
+// border is drawn and the card's own radius + `overflow: hidden` do the clipping.
+const paneShell = (attached) => ({
+  background: C.s1,
+  border: attached ? "none" : `1px solid ${C.bd}`,
+  borderTop: `1px solid ${C.bd}`,
+  borderRadius: attached ? 0 : "14px",
+  display: "flex", flexDirection: "column", height: "280px",
+  marginTop: attached ? 0 : "10px",
+  boxShadow: attached ? "none" : C.shadow,
+});
+
+const LogPane = ({ log, attached, onClose, onAbort }) => {
   const ref = useRef();
   useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [log?.logs]);
   if (!log) return null;
   return (
-    <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", display: "flex", flexDirection: "column", height: "280px", marginTop: "10px", boxShadow: C.shadow }}>
+    <div style={paneShell(attached)}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 12px", borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
           <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.12em" }}>OP LOG</span>
@@ -468,7 +481,7 @@ const LogPane = ({ log, onClose, onAbort }) => {
 // locally); for non-interactive plugins it is read-only and just shows the build. The
 // exit frame reports the build result; reconnecting re-attaches (interactive re-runs
 // install.sh if the project isn't built yet, otherwise re-streams the running build).
-const InstallPane = ({ token, wsPath, project, interactive, onExit, onClose }) => {
+const InstallPane = ({ token, wsPath, project, interactive, attached, onExit, onClose }) => {
   const [lines, setLines] = useState("");
   const [status, setStatus] = useState("connecting");
   const [input, setInput] = useState("");
@@ -523,7 +536,7 @@ const InstallPane = ({ token, wsPath, project, interactive, onExit, onClose }) =
   };
 
   return (
-    <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", display: "flex", flexDirection: "column", height: "280px", marginTop: "10px", boxShadow: C.shadow }}>
+    <div style={paneShell(attached)}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 12px", borderBottom: `1px solid ${C.bd}`, background: C.s2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
           <span style={{ color: C.dim, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.12em" }}>INSTALL</span>
@@ -1656,7 +1669,13 @@ const ServiceRow = ({ project, info, token, role, onOperation, onRefresh, onRest
 };
 
 // ── Project card ──────────────────────────────────────────────────────────────
-const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, onDeploy, onStream }) => {
+// `pane` is the project's own log — an InstallPane (a running deploy/install) or a LogPane
+// (a stop/restart/restore job) — rendered *inside* the card so it reads as the card growing
+// downward. Several cards can show one at the same time.
+// `onDragStart` (admin only) turns the header's ⠿ into a drag handle for manual ordering;
+// Dashboard owns the reordering itself, the card only reports the grab.
+const ProjectCard = ({ project, token, role, pane, dragging, onDragStart, onDragEnd,
+                      onOperation, onRemoved, onRefresh, onDeploy, onStream }) => {
   const [confirm, setConfirm] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState({});
@@ -1666,6 +1685,7 @@ const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, 
   const [logsModal, setLogsModal] = useState(false);
   const [volModal, setVolModal] = useState(null);      // null | {kind: "download"|"upload", volume}
   const [dropVolumes, setDropVolumes] = useState(true); // delete's checkbox — matches the API default
+  const cardRef = useRef(null);                        // drag image: the whole card, not the ⠿
   const volumes = project.volumes || [];
   const isCompose = project.deploy_mode === "compose";
   const isPending = project.deploy_mode !== "compose" && project.deploy_mode !== "dockerfile";
@@ -1751,9 +1771,14 @@ const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, 
 
   return (
     <>
-      <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", marginBottom: "10px", overflow: "hidden", boxShadow: C.shadow }}>
+      <div ref={cardRef} style={{ background: C.s1, border: `1px solid ${dragging ? C.money : C.bd}`, borderRadius: "14px", marginBottom: "10px", overflow: "hidden", boxShadow: C.shadow, opacity: dragging ? 0.6 : 1 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: C.s2, borderBottom: `1px solid ${C.bd}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            {onDragStart && (
+              <span draggable title="drag to reorder"
+                    onDragStart={e => onDragStart(e, cardRef.current)} onDragEnd={onDragEnd}
+                    style={{ color: C.dim, fontSize: "15px", lineHeight: 1, cursor: "grab", userSelect: "none", padding: "0 2px" }}>⠿</span>
+            )}
             <span style={{ color: C.txt, fontFamily: C.ff, fontSize: "16px", fontWeight: 600 }}>{project.name}</span>
             {isCompose && (
               <span style={{ color: C.blue, background: C.blueFill, border: `1px solid ${C.blueBd}`, fontFamily: C.ff, fontSize: "11px", letterSpacing: "0.08em", padding: "1px 7px", borderRadius: "7px" }}>compose</span>
@@ -1878,6 +1903,9 @@ const ProjectCard = ({ project, token, role, onOperation, onRemoved, onRefresh, 
             </table>
           </div>
         )}
+
+        {/* This project's live log, if it has one — the card simply gets taller. */}
+        {pane}
       </div>
 
       {uploadModal && <UploadModal token={token} project={project.name} onClose={() => setUploadModal(false)} onUploaded={() => onRefresh && onRefresh()} onDeploy={onDeploy} />}
@@ -2977,16 +3005,26 @@ const Dashboard = ({ token, onLogout }) => {
   const [health, setHealth] = useState(null);
   const [version, setVersion] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [showDeploy, setShowDeploy] = useState(false);
-  const [showPlugins, setShowPlugins] = useState(false);
+  // The pinned creator bar at the top of the projects list: null | "deploy" | "plugin".
+  // Unlike the rail panels it does NOT replace the list — it expands above the cards.
+  const [creator, setCreator] = useState(null);
   const [showGitKey, setShowGitKey] = useState(false);
   const [showTokens, setShowTokens] = useState(false);
   const [showBackups, setShowBackups] = useState(false);
   const [me, setMe] = useState(null);          // { id, name, role, projects[] } — GET /tokens/me
   const [railOpen, setRailOpen] = useState(false);   // mobile: off-canvas nav rail
   const [activeLog, setActiveLog] = useState(null);
-  const [interactiveLog, setInteractiveLog] = useState(null);  // { project, wsPath, kind }
+  // One live deploy/install stream per project, keyed by project name:
+  // { [project]: { wsPath, interactive } }. Each renders as an InstallPane attached under
+  // that project's own card, so two simultaneous redeploys show two logs.
+  const [streams, setStreams] = useState({});
+  const [dragName, setDragName] = useState(null);   // project being dragged, if any
+  const [orderErr, setOrderErr] = useState("");
   const pollRef = useRef(null);
+  const activeLogRef = useRef(null);
+  const dragNameRef = useRef(null);                 // the drag's source of truth (see startDrag)
+  const dragFromRef = useRef(null);                 // order when the drag started (no-op check)
+  useEffect(() => { activeLogRef.current = activeLog; }, [activeLog]);
 
   const client = useMemo(() => mkApi(token), [token]);
 
@@ -3045,27 +3083,42 @@ const Dashboard = ({ token, onLogout }) => {
     if (log.status === "running") startPolling(log);
   }, [startPolling]);
 
-  const handleInstalled = useCallback((data) => {
-    setProjects(p => [data.project, ...p.filter(x => x.name !== data.project.name)]);
-    // Every install streams over its WebSocket now (interactive drives install.sh first,
-    // non-interactive just watches the build). Hand off to the InstallPane.
+  // A project's own op log (stop/restart/restore) is superseded by a deploy stream on the
+  // same project — but another project's log is not, so only that one is dropped.
+  const dropLogFor = useCallback((name) => {
+    if (activeLogRef.current?.project !== name) return;
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     setActiveLog(null);
-    setInteractiveLog({
-      project: data.project.name,
-      wsPath: data.ws_path,
-      interactive: data.job?.status === "waiting_interactive",
-    });
-    setShowPlugins(false);
   }, []);
 
-  // Stream an already-launched deploy/rollback job (WS /projects/{name}/deploy) in the
-  // InstallPane — used by a rollback from the VersionsModal (no new project object).
-  const handleDeployStream = useCallback(({ project, wsPath }) => {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-    setActiveLog(null);
-    setInteractiveLog({ project, wsPath, interactive: false });
+  const closeStream = useCallback((name) => {
+    setStreams(s => { const { [name]: _gone, ...rest } = s; return rest; });
   }, []);
+
+  const handleInstalled = useCallback((data) => {
+    const name = data.project.name;
+    // A project the list already knows is updated in place — its position is the server's
+    // stored display_order now, so a redeploy must not jump it to the top. A brand new one
+    // does go on top, which is exactly where the server's next_display_order puts it too.
+    setProjects(p => p.some(x => x.name === name)
+      ? p.map(x => (x.name === name ? data.project : x))
+      : [data.project, ...p]);
+    // Every install streams over its WebSocket now (interactive drives install.sh first,
+    // non-interactive just watches the build). Hand off to that project's InstallPane.
+    dropLogFor(name);
+    setStreams(s => ({
+      ...s,
+      [name]: { wsPath: data.ws_path, interactive: data.job?.status === "waiting_interactive" },
+    }));
+    setCreator(null);   // collapse the creator so the new card and its log are visible
+  }, [dropLogFor]);
+
+  // Stream an already-launched deploy/rollback job (WS /projects/{name}/deploy) in the
+  // project's InstallPane — used by a rollback from the VersionsModal (no new project object).
+  const handleDeployStream = useCallback(({ project, wsPath }) => {
+    dropLogFor(project);
+    setStreams(s => ({ ...s, [project]: { wsPath, interactive: false } }));
+  }, [dropLogFor]);
 
   // The build streamed to completion over the install WebSocket — refresh the project
   // list so its status (running / failed) updates. The pane stays open showing the log.
@@ -3091,16 +3144,93 @@ const Dashboard = ({ token, onLogout }) => {
 
   const healthColor = health === "ok" ? C.green : health === "unreachable" ? C.red : C.amber;
 
-  // The left-rail panels are mutually exclusive. Keeping the reset in one place means adding
-  // a panel is one setter here rather than an edit inside every other nav item's onClick.
-  const PANELS = [setShowDeploy, setShowPlugins, setShowTokens, setShowBackups];
-  const showOnly = (setter) => PANELS.forEach(set => set(set === setter));
+  // The left-rail panels are mutually exclusive and replace the projects view. Keeping the
+  // reset in one place means adding a panel is one setter here rather than an edit inside
+  // every other nav item's onClick. Deploy/Plugins are NOT panels any more — they expand
+  // from the bar pinned above the project list, so opening one only closes the panels.
+  const PANELS = [setShowTokens, setShowBackups];
+  const showOnly = (setter) => { PANELS.forEach(set => set(set === setter)); setCreator(null); };
+  const toggleCreator = (kind) => {
+    PANELS.forEach(set => set(false));
+    setCreator(c => (c === kind ? null : kind));
+  };
 
-  const sectionTitle = showDeploy ? "Deploy project"
-    : showPlugins ? "Plugins"
-    : showTokens ? "Tokens"
+  const projectsView = !showTokens && !showBackups;
+  const sectionTitle = showTokens ? "Tokens"
     : showBackups ? "Backups"
     : `Projects (${projects.length})`;
+
+  // ── Manual ordering (HTML5 drag & drop, persisted by PUT /projects/order) ──
+  // The cards reorder live as you drag over them; the arrangement is saved once, on drop.
+  const persistOrder = async (names) => {
+    try { await client.put("/projects/order", { names }); setOrderErr(""); }
+    catch (e) { setOrderErr(`could not save the order: ${e.message}`); fetchProjects(); }
+  };
+
+  // `dragNameRef` is the source of truth during a drag (dragover can fire before React has
+  // re-rendered, and drop + dragend both land here); `dragName` state only drives the styling.
+  const startDrag = (name) => (e, node) => {
+    dragNameRef.current = name;
+    setDragName(name);
+    dragFromRef.current = projects.map(p => p.name).join("\u0000");
+    try {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", name);   // Firefox ignores a drag with no payload
+      if (node) e.dataTransfer.setDragImage(node, 24, 24);
+    } catch { /* older browsers — the drag still works, it just looks plainer */ }
+  };
+
+  const dragOverCard = (name) => (e) => {
+    const dragged = dragNameRef.current;
+    if (!dragged) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dragged === name) return;
+    // Insert before or after the hovered card depending on which half the pointer is in —
+    // a plain swap oscillates when the two cards have different heights.
+    const rect = e.currentTarget.getBoundingClientRect();
+    const after = e.clientY > rect.top + rect.height / 2;
+    setProjects(ps => {
+      const from = ps.findIndex(p => p.name === dragged);
+      let to = ps.findIndex(p => p.name === name);
+      if (from < 0 || to < 0) return ps;
+      if (after) to += 1;
+      if (to > from) to -= 1;      // pulling the dragged card out shifts everything below it
+      if (to === from) return ps;
+      const next = ps.slice();
+      next.splice(to, 0, next.splice(from, 1)[0]);
+      return next;
+    });
+  };
+
+  const endDrag = () => {
+    if (!dragNameRef.current) return;
+    dragNameRef.current = null;
+    setDragName(null);
+    const names = projects.map(p => p.name);
+    if (names.join("\u0000") !== dragFromRef.current) persistOrder(names);
+  };
+
+  // ── Where each project's log pane goes ────────────────────────────────────
+  // A project's pane hangs off its own card. While a rail panel is up (or the project
+  // isn't in this token's list) there is no card to hang it on, so it falls back to a
+  // free-standing pane at the bottom — the old single-pane position.
+  const visibleProjects = new Set(projectsView ? projects.map(p => p.name) : []);
+  const orphanStreams = Object.keys(streams).filter(n => !visibleProjects.has(n));
+
+  const projectPane = (name, attached) => {
+    const stream = streams[name];
+    if (stream) return (
+      <InstallPane token={token} wsPath={stream.wsPath} project={name}
+                   interactive={stream.interactive} attached={attached}
+                   onExit={handleInstallExit} onClose={() => closeStream(name)} />
+    );
+    if (activeLog?.project === name) return (
+      <LogPane log={activeLog} attached={attached} onAbort={handleAbort}
+               onClose={() => { setActiveLog(null); if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } }} />
+    );
+    return null;
+  };
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.txt, fontFamily: C.ff }}>
@@ -3121,7 +3251,7 @@ const Dashboard = ({ token, onLogout }) => {
         )}
         {/* Nav */}
         <div style={{ flex: 1 }}>
-          <NavItem icon="▣" label="Projects" active={!showDeploy && !showPlugins && !showTokens && !showBackups}
+          <NavItem icon="▣" label="Projects" active={projectsView && !creator}
             onClick={() => { showOnly(); setRailOpen(false); }} />
           {/* Creating projects, installing plugins, the server SSH key and token management
               are all admin-only on the API — a guest never sees them. Backups are not: a guest
@@ -3134,10 +3264,12 @@ const Dashboard = ({ token, onLogout }) => {
               : "Archive a project — its image, volumes, env and files"}
             onClick={() => { showOnly(setShowBackups); setRailOpen(false); }} />
           {isAdmin && (<>
-            <NavItem icon="＋" label="Deploy" active={showDeploy}
-              onClick={() => { showOnly(setShowDeploy); setRailOpen(false); }} />
-            <NavItem icon="⧉" label="Plugins" active={showPlugins}
-              onClick={() => { showOnly(setShowPlugins); setRailOpen(false); }} />
+            {/* Deploy and Plugins open the creator pinned above the project list rather than
+                a panel that replaces it — the rail is just the second way in. */}
+            <NavItem icon="＋" label="Deploy" active={creator === "deploy"}
+              onClick={() => { toggleCreator("deploy"); setRailOpen(false); }} />
+            <NavItem icon="⧉" label="Plugins" active={creator === "plugin"}
+              onClick={() => { toggleCreator("plugin"); setRailOpen(false); }} />
             <NavItem icon="⚿" label="Tokens" active={showTokens}
               title="Mint and revoke API tokens, including guest tokens scoped to one project"
               onClick={() => { showOnly(setShowTokens); setRailOpen(false); }} />
@@ -3185,15 +3317,26 @@ const Dashboard = ({ token, onLogout }) => {
 
         {/* Content */}
         <div style={{ maxWidth: 1260, margin: "0 auto", padding: "18px 22px" }}>
-          {showDeploy && (
-            <DeployForm token={token}
-              onDeployed={(data) => { setShowDeploy(false); handleInstalled(data); }}
-              onSynced={fetchProjects}
-              onCancel={() => setShowDeploy(false)} />
+          {/* The creator is pinned to the top of the projects view: the bar is always there,
+              and expanding it pushes the cards down instead of hiding them. */}
+          {projectsView && isAdmin && (
+            <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px", marginBottom: "10px", display: "flex", gap: "8px", flexWrap: "wrap", boxShadow: C.shadow }}>
+              <Btn v={creator === "deploy" ? "primary" : "default"} onClick={() => toggleCreator("deploy")}
+                   title="Deploy a new project from files, a folder or a git URL">＋ deploy project</Btn>
+              <Btn v={creator === "plugin" ? "primary" : "default"} onClick={() => toggleCreator("plugin")}
+                   title="Install a pre-packaged project from the server's plugin catalogue">⧉ add plugin</Btn>
+            </div>
           )}
 
-          {showPlugins && (
-            <PluginPanel token={token} onInstalled={handleInstalled} onCancel={() => setShowPlugins(false)} />
+          {projectsView && creator === "deploy" && (
+            <DeployForm token={token}
+              onDeployed={handleInstalled}
+              onSynced={() => { setCreator(null); fetchProjects(); }}
+              onCancel={() => setCreator(null)} />
+          )}
+
+          {projectsView && creator === "plugin" && (
+            <PluginPanel token={token} onInstalled={handleInstalled} onCancel={() => setCreator(null)} />
           )}
 
           {showTokens && (
@@ -3211,41 +3354,45 @@ const Dashboard = ({ token, onLogout }) => {
             )
           )}
 
-          {/* The deployed-projects list shows only in the Projects view — Deploy / Plugins /
-              Tokens / Backups replace it with their own panel (above). */}
-          {!showDeploy && !showPlugins && !showTokens && !showBackups && (
+          {/* The deployed-projects list shows in the Projects view — Tokens / Backups replace
+              it with their own panel (above); the creator only pushes it down. */}
+          {projectsView && (
             loading ? (
               <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", padding: "24px 0" }}>loading projects…</div>
             ) : projects.length === 0 ? (
               <div style={{ border: `1px dashed ${C.bd}`, borderRadius: "14px", padding: "40px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "13px" }}>
                 {isAdmin
-                  ? <>no projects yet — use <span style={{ color: C.txt }}>Deploy</span> or <span style={{ color: C.txt }}>Plugins</span> in the sidebar</>
+                  ? <>no projects yet — use <span style={{ color: C.txt }}>＋ deploy project</span> or <span style={{ color: C.txt }}>⧉ add plugin</span> above</>
                   : <>this token is not scoped to any project — ask the server's operator</>}
               </div>
-            ) : (
-              projects.map(p => (
-                <ProjectCard key={p.name} project={p} token={token} role={role}
-                  onOperation={handleOperation}
-                  onRefresh={fetchProjects}
-                  onDeploy={handleInstalled}
-                  onStream={handleDeployStream}
-                  onRemoved={(name) => { setProjects(ps => ps.filter(x => x.name !== name)); if (activeLog?.project === name) setActiveLog(null); if (interactiveLog?.project === name) setInteractiveLog(null); }} />
-              ))
-            )
+            ) : (<>
+              <Err msg={orderErr} />
+              {projects.map(p => (
+                // The wrapper carries the drop target; `key` stays the project name so a
+                // reorder moves the DOM node instead of remounting it — which is what keeps
+                // an attached InstallPane's WebSocket alive while you drag.
+                <div key={p.name} onDragOver={isAdmin ? dragOverCard(p.name) : undefined}
+                     onDrop={isAdmin ? (e) => { e.preventDefault(); endDrag(); } : undefined}>
+                  <ProjectCard project={p} token={token} role={role}
+                    dragging={dragName === p.name}
+                    onDragStart={isAdmin ? startDrag(p.name) : undefined}
+                    onDragEnd={endDrag}
+                    pane={projectPane(p.name, true)}
+                    onOperation={handleOperation}
+                    onRefresh={fetchProjects}
+                    onDeploy={handleInstalled}
+                    onStream={handleDeployStream}
+                    onRemoved={(name) => { setProjects(ps => ps.filter(x => x.name !== name)); if (activeLog?.project === name) setActiveLog(null); closeStream(name); }} />
+                </div>
+              ))}
+            </>)
           )}
 
-          {interactiveLog ? (
-            <InstallPane
-              token={token}
-              wsPath={interactiveLog.wsPath}
-              project={interactiveLog.project}
-              interactive={interactiveLog.interactive}
-              onExit={handleInstallExit}
-              onClose={() => setInteractiveLog(null)}
-            />
-          ) : (
-            <LogPane log={activeLog} onClose={() => { setActiveLog(null); if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } }} onAbort={handleAbort} />
-          )}
+          {/* Logs whose card is not on screen — a stream started from the Backups panel, or
+              a project this view is not rendering — keep their free-standing pane here. */}
+          {orphanStreams.map(name => <div key={name}>{projectPane(name, false)}</div>)}
+          {activeLog && !visibleProjects.has(activeLog.project) && !streams[activeLog.project]
+            && projectPane(activeLog.project, false)}
         </div>
       </div>
 

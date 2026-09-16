@@ -200,6 +200,10 @@ class ProjectResponse(BaseModel):
     # Any embedded credentials are stripped on the way out (projects.py::public_git_url).
     git_url: Optional[str] = None
     git_branch: Optional[str] = None       # None = the repo's default branch
+    # Manual card order for the web UI (PUT /projects/order). Lower sorts first; the list
+    # endpoint already returns projects in this order, so a client only needs it to echo
+    # the arrangement back when it reorders.
+    display_order: int = 0
     container: Optional[ContainerInfo] = None   # dockerfile mode
     services: List[ServiceInfo] = []            # compose mode
     # Sizes here come from volume_service's cache: a cold one reports size_status "pending"
@@ -438,6 +442,20 @@ class SetBackupLimitRequest(BaseModel):
         if v < 1:
             raise ValueError("limit must be >= 1")
         return v
+
+
+class ReorderProjectsRequest(BaseModel):
+    """PUT /projects/order — the full desired order of the projects the caller can see.
+
+    A partial list is well defined: the named projects take positions 0..N-1 and every
+    other project is pushed below them, keeping its relative order. That is what lets the
+    web UI send only what it renders (it filters `type: "system"` projects out)."""
+    names: List[str]
+
+
+class ReorderResponse(BaseModel):
+    status: str           # ok
+    message: str
 
 
 class RollbackRequest(BaseModel):

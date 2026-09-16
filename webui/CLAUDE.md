@@ -96,17 +96,48 @@ Things that require reading the whole file to understand:
   chips/badges/inline code `7px`, progress bars `999px`.
 - **`Dashboard` layout is a fixed left nav rail + shifted main column.** A `<nav className="fh-rail">`
   (240px, `C.s2`) holds the `freeholdy` brand + version badge, the `NavItem` entries (**Projects**
-  clears the panels; **Backups**, **Deploy**, **Plugins** and **Tokens** each open their own panel
-  with a money-green active state; **Git key** opens `GitKeyModal`), and a bottom
-  **Refresh**/**Logout** footer. The content sits in `.fh-main` (`margin-left:240px`) under a slim
-  sticky top bar (section title + `api ●` health dot + `DOMAIN`). Below 820px the rail becomes an
-  off-canvas overlay toggled by `railOpen` (the `.fh-burger` hamburger + a backdrop); the media
-  query lives in the global `<style>` block.
+  clears everything; **Backups** and **Tokens** each open their own panel with a money-green active
+  state; **Deploy** and **Plugins** open the creator pinned above the project list rather than a
+  panel; **Git key** opens `GitKeyModal`), and a bottom **Refresh**/**Logout** footer. The content
+  sits in `.fh-main` (`margin-left:240px`) under a slim sticky top bar (section title + `api ●`
+  health dot + `DOMAIN`). Below 820px the rail becomes an off-canvas overlay toggled by `railOpen`
+  (the `.fh-burger` hamburger + a backdrop); the media query lives in the global `<style>` block.
+- **The creator is pinned to the top of the projects view, and it does not hide the list.** One
+  `creator` state (`null | "deploy" | "plugin"`) drives a permanent bar of two toggle buttons
+  (**＋ deploy project** / **⧉ add plugin**, admin-only) rendered above the cards; the selected one
+  expands `DeployForm` / `PluginPanel` directly beneath the bar, pushing the cards down instead of
+  replacing them. `toggleCreator(kind)` closes the rail panels and flips the bar; the rail's
+  Deploy/Plugins items call the same thing, so both entry points behave identically. A deploy that
+  starts (`handleInstalled`) collapses the creator so the new card and its log are on screen.
 - **The rail panels are mutually exclusive, and one helper enforces it.** Each panel is a boolean
-  of `Dashboard` state, and `showOnly(setter)` maps over the `PANELS` array setting exactly one
-  true. Adding a panel is therefore a `useState`, an entry in `PANELS`, a `<NavItem onClick={() =>
-  showOnly(setShowX)}>`, a `sectionTitle` arm and a render branch — **not** an edit inside every
-  other nav item's `onClick`, which is how it used to work and how it drifted.
+  of `Dashboard` state, and `showOnly(setter)` maps over the `PANELS` array (**Tokens** and
+  **Backups** — not Deploy/Plugins, which are the creator now) setting exactly one true and
+  clearing the creator. Adding a panel is therefore a `useState`, an entry in `PANELS`, a
+  `<NavItem onClick={() => showOnly(setShowX)}>`, a `sectionTitle` arm and a render branch — **not**
+  an edit inside every other nav item's `onClick`, which is how it used to work and how it drifted.
+  `projectsView` (= no panel open) gates the creator bar and the project list together.
+- **Every project's log hangs off its own card, and several run at once.** `Dashboard` keeps
+  `streams`, a `{ [project]: { wsPath, interactive } }` map — `handleInstalled` and
+  `handleDeployStream` *add* a key instead of replacing a single pane, so two simultaneous
+  redeploys show two live `InstallPane`s. `projectPane(name, attached)` picks what a project shows:
+  its stream's `InstallPane`, else the `activeLog` `LogPane` when that op belongs to it, else
+  nothing; `ProjectCard` renders the result through its `pane` prop as the **last child inside the
+  card**, so the log reads as the card growing downward. Both panes take `attached` and share
+  `paneShell(attached)`, which drops the radius/margin/shadow for that. Starting a deploy only
+  drops *that* project's op log (`dropLogFor`), never another's. `activeLog` itself is still
+  single — one shared status poll — it just renders in place now. **Orphans fall back to the old
+  bottom position**: a stream whose card is not rendered (a rail panel is up, e.g. a backup started
+  from `BackupsPanel`, or a project this token can't see) draws a free-standing pane after the list.
+- **Card order is manual, persisted, and admin-only.** The header's `⠿` handle (rendered only when
+  `ProjectCard` gets an `onDragStart`) starts a plain HTML5 drag — no DnD library. `startDrag` sets
+  `dragNameRef` (the source of truth; `dragName` state only drives the styling) and uses the card
+  node as the drag image; each card's wrapper `div` handles `dragOverCard`, which reorders
+  `projects` live using the pointer's position relative to the hovered card's midpoint (a plain
+  swap oscillates when cards differ in height); `endDrag` (drop *and* dragend) PUTs
+  `/projects/order` once, and only if the order actually changed. A failed PUT shows `<Err>` and
+  re-fetches to snap back to the server's truth. `key={p.name}` on the wrapper is load-bearing:
+  React moves the DOM node instead of remounting it, which is what keeps an attached
+  `InstallPane`'s WebSocket alive across a reorder.
 - **`BackupsPanel` covers projects and the database with one component.** Its `scope` state is a
   project name or `null` for the freeholdy database, and `backupPath`/`configPath` map that onto
   `/projects/{n}/backups*` or `/backups/database*` — the server serves both with the same shapes,
@@ -139,6 +170,12 @@ The UI assumes these endpoints and is the place this contract is exercised from 
 
 - `GET /health`, `GET /projects`, `DELETE /projects/{name}` (there is **no** `POST /projects`
   create endpoint — a deploy auto-creates the row; see below)
+- **Card order:** `GET /projects` already comes back in the stored order (`display_order`, name as
+  the tie-break) and each item carries its `display_order`. `PUT /projects/order` (`{names: [...]}`,
+  **admin only**) rewrites it — the named projects take 0..N-1 and anything unnamed (the `system`
+  projects the UI filters out) sinks below them, so sending just what is rendered is correct. It
+  returns `{status, message}`, not the project list, because rebuilding that inspects docker for
+  every project's volumes.
 - `GET /plugins` — each item carries `name`, `description`, `about` (Markdown from the plugin's
   `ABOUT.md`, empty when none), `deploy_mode`, `container_port`, `has_install`, `type`. `PluginPanel`
   is a master-detail view: a ~25% name list on the left, a ~75% detail pane on the right that renders
@@ -246,8 +283,8 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   `git@github.com:…`. A `POST /git/add` clone that fails SSH auth returns a 400 whose detail points
   the user here, surfaced in `DeployForm`'s `<Err>` (git tab).
 
-`DeployForm` is the single new-project entry point (toolbar **+ deploy project** button, `showDeploy`
-state), alongside **+ add plugin**. It takes a project name plus a **files/folder ⇄ git URL** toggle,
+`DeployForm` is the single new-project entry point (the pinned creator bar's **＋ deploy project**
+button, `creator === "deploy"`), alongside **⧉ add plugin**. It takes a project name plus a **files/folder ⇄ git URL** toggle,
 and an **`EnvDisclosure`** (`showEnv`) — the shared collapsible env field defined next to `TextArea`,
 whose header is a Field-style label row (caret + `ENVIRONMENT VARIABLES` + a `{n} stored` chip or
 `optional`) rather than a ghost button. That text rides along in the deploy request (`env` in the
@@ -323,8 +360,8 @@ logs a `validateDOMNesting` warning for that. It predates the env work (`DomainM
 `VersionsModal` and `ExecTerminal` all do it); `EnvModal` follows the same placement.
 
 Operation flow (`Dashboard` + `ContainerRow`):
-- Control buttons (`stop`, compose `down`) call the endpoint, then push an `activeLog` into the
-  bottom `LogPane`.
+- Control buttons (`stop`, compose `down`) call the endpoint, then push an `activeLog`, which
+  renders as a `LogPane` attached under that project's own card (`projectPane`).
 - If the action returns `status === "running"`, `Dashboard` **polls status every `POLL_MS`
   (1000ms)** via a single shared `pollRef` interval (`/projects/{name}/status`, or
   `/projects/{name}/compose/status` when `log.kind === "compose"`), streaming logs until status

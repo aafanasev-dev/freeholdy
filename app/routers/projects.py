@@ -14,6 +14,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from sqlalchemy import func
 from sqlalchemy.orm import Session, object_session
 from typing import List
 
@@ -25,6 +26,8 @@ from app.models.schemas import (
     PluginAddResponse,
     UploadResponse,
     UploadCompleteRequest,
+    ReorderProjectsRequest,
+    ReorderResponse,
     DockerJobStatusResponse,
     ProjectType,
     validate_project_slug,
@@ -156,6 +159,7 @@ def project_response(project: Project) -> dict:
         "created_at": project.created_at,
         "git_url": public_git_url(project.git_url),
         "git_branch": project.git_branch,
+        "display_order": project.display_order,
         "container": _container_info(project) if project.deploy_mode == "dockerfile" else None,
         "services": [_service_info(s) for s in project.services] if project.deploy_mode == "compose" else [],
         # Sizes come from volume_service's cache and are filled in the background on a miss
@@ -174,8 +178,44 @@ def list_projects(db: Session = Depends(get_db), token=Depends(require_token)):
     allowed = guest_project_names(token)
     if allowed is not None:
         query = query.filter(Project.name.in_(allowed))
-    projects = query.order_by(Project.name).all()
+    # Manual order first (PUT /projects/order), name as the tie-break — every row is 0
+    # until someone reorders, so an untouched install still lists alphabetically.
+    projects = query.order_by(Project.display_order, Project.name).all()
     return [project_response(p) for p in projects]
+
+
+@router.put("/order", response_model=ReorderResponse,
+            summary="Set the manual display order of projects")
+def reorder_projects(request: ReorderProjectsRequest,
+                     db: Session = Depends(get_db), _=Depends(require_admin)):
+    """Rewrite `display_order` so the named projects appear in the order given.
+
+    Declared before the `/{project_name}` routes so the literal path wins the match. It
+    returns a bare status rather than the project list because `project_response` inspects
+    docker for every project's volumes — far too heavy for something a drag fires.
+    """
+    names = request.names
+    named = set(names)
+    if len(named) != len(names):
+        raise HTTPException(status_code=400, detail="duplicate project names in order")
+
+    projects = {p.name: p for p in db.query(Project).all()}
+    missing = [n for n in names if n not in projects]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Project(s) not found: {', '.join(missing)}")
+
+    for position, name in enumerate(names):
+        projects[name].display_order = position
+
+    # Anything the caller did not name (system projects, which the web UI hides) keeps its
+    # relative order but sinks below the arrangement, so the result is a total order.
+    rest = sorted((p for n, p in projects.items() if n not in named),
+                  key=lambda p: (p.display_order, p.name))
+    for offset, project in enumerate(rest):
+        project.display_order = len(names) + offset
+
+    db.commit()
+    return {"status": "ok", "message": f"Order updated for {len(names)} project(s)"}
 
 
 def provision_dockerfile(
@@ -243,6 +283,18 @@ def _validate_project_name(name: str) -> None:
         raise HTTPException(status_code=422, detail=str(exc))
 
 
+def next_display_order(db: Session) -> int:
+    """The `display_order` a newly created project should get: above every existing one.
+
+    Reordering rewrites the projects it is given to 0..N-1, so handing new rows a value
+    below the current minimum keeps them landing on top (what the web UI showed before the
+    order was persisted) without having to renumber anything else. Used by every row
+    creation site: here, `routers/git.py` and `routers/plugins.py`.
+    """
+    lowest = db.query(func.min(Project.display_order)).scalar()
+    return 0 if lowest is None else lowest - 1
+
+
 def _get_or_create_project(db: Session, name: str) -> Project:
     """Return the project row named `name`, creating an empty ("pending") one if it does not
     exist yet. This is what makes `deploy` auto-create: the first upload/complete for a new
@@ -251,7 +303,8 @@ def _get_or_create_project(db: Session, name: str) -> Project:
     if project:
         return project
     _validate_project_name(name)
-    project = Project(name=name, type=ProjectType.user.value, deploy_mode="pending")
+    project = Project(name=name, type=ProjectType.user.value, deploy_mode="pending",
+                      display_order=next_display_order(db))
     db.add(project)
     # Commit immediately (like the former create endpoint did) so a manifest-less deploy — which
     # never reaches a provision commit — still persists the empty "pending" row, and `get_db`

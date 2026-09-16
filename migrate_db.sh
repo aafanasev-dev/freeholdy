@@ -34,6 +34,10 @@
 #      per scope: cron schedule, on-deploy trigger, retention, destination name). Nothing to
 #      backfill: a scope with no config row has automatic backups off, which is exactly the
 #      pre-feature behaviour, and backup_service.get_config creates the row on first access.
+#   8. project display order — adds projects.display_order, the manual card order the web UI
+#      drag-and-drop writes through PUT /projects/order. Nothing to backfill: the column's
+#      DEFAULT 0 leaves every existing project tied, and the list endpoint breaks ties on
+#      name — i.e. exactly the alphabetical listing that predated the feature.
 #
 # Usage:
 #   ./migrate_db.sh [path/to/freeholdy.db]
@@ -119,6 +123,12 @@ if [ -n "$has_backups" ] && [ -n "$has_backup_configs" ]; then
     backups_done=1
 fi
 
+has_display_order="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('projects') WHERE name='display_order';")"
+order_done=""
+if [ -n "$has_display_order" ]; then
+    order_done=1
+fi
+
 versions_notnull=""
 if [ -n "$has_versions" ]; then
     versions_notnull="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('project_versions') WHERE name='image_name' AND \"notnull\"=1;")"
@@ -126,7 +136,7 @@ fi
 
 if [ -n "$bluegreen_done" ] && [ -n "$compose_done" ] && [ -z "$versions_notnull" ] \
    && [ -n "$has_env_files" ] && [ -n "$roles_done" ] && [ -n "$git_origin_done" ] \
-   && [ -n "$backups_done" ]; then
+   && [ -n "$backups_done" ] && [ -n "$order_done" ]; then
     echo "Database '$DB' is already up to date — nothing to migrate."
     exit 0
 fi
@@ -278,6 +288,13 @@ fi
 if [ -z "$has_git_branch" ]; then
     echo "  + projects.git_branch"
     SQL="$SQL ALTER TABLE projects ADD COLUMN git_branch VARCHAR;"
+fi
+
+# projects.display_order: the web UI's manual card order. DEFAULT 0 backfills every existing
+# row to "unordered", which the name tie-break then lists alphabetically as before.
+if [ -z "$has_display_order" ]; then
+    echo "  + projects.display_order"
+    SQL="$SQL ALTER TABLE projects ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0;"
 fi
 
 if [ -z "$has_backups" ]; then
