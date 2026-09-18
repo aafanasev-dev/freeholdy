@@ -147,6 +147,7 @@ class GitKeyResponse(BaseModel):
 
 class ContainerInfo(BaseModel):
     """The single container of a dockerfile-mode project."""
+    exposed: bool = True                   # False = headless (no EXPOSE): no port, no nginx
     subdomain: Optional[str] = None        # effective hostname served (custom domain if set, else auto subdomain)
     custom_domain: Optional[str] = None    # the override, when one is set
     local_port: Optional[int] = None

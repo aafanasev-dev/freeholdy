@@ -529,6 +529,14 @@ def _fmt_size(n) -> str:
     return f"{size:.1f} TB"
 
 
+def _ssl_icon(part: dict) -> str:
+    """SSL cell for a container/service row. Unexposed ones (a headless worker, an
+    internal compose service) have no endpoint, so "pending" would be misleading."""
+    if part.get("exposed") is False:
+        return "[dim]—[/]"
+    return "[green]✓[/]" if part.get("ssl_enabled") else "[yellow]pending[/]"
+
+
 def _status_text(status: str) -> Text:
     style = _STATUS_STYLE.get(status, "white")
     icons = {"running": "▶ ", "exited": "■ ", "no_image": "○ ", "not_found": "○ ", "error": "✗ "}
@@ -732,12 +740,11 @@ def plugin_add(plugin: str, project: str, follow: bool):
             c = proj.get("container") or {}
             entries = [c] if c else []
         for part in entries:
-            ssl_icon = "[green]✓[/]" if part.get("ssl_enabled") else "[yellow]pending[/]"
             table.add_row(
                 part.get("name", "container"),
-                part.get("subdomain", ""),
-                str(part.get("local_port", "")),
-                ssl_icon,
+                part.get("subdomain") or "—",
+                str(part.get("local_port") or "—"),
+                _ssl_icon(part),
             )
         console.print(table)
 
@@ -1136,9 +1143,8 @@ def _print_git_summary(data: dict) -> None:
     is_compose = proj.get("deploy_mode") == "compose"
     entries = proj.get("services", []) if is_compose else ([proj.get("container")] if proj.get("container") else [])
     for part in entries:
-        ssl_icon = "[green]✓[/]" if part.get("ssl_enabled") else "[yellow]pending[/]"
-        table.add_row(part.get("name", "container"), part.get("subdomain", ""),
-                      str(part.get("local_port", "")), ssl_icon)
+        table.add_row(part.get("name", "container"), part.get("subdomain") or "—",
+                      str(part.get("local_port") or "—"), _ssl_icon(part))
     console.print(table)
 
 

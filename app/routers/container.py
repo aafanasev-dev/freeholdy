@@ -135,12 +135,24 @@ async def exec_session(websocket: WebSocket, project_name: str, cmd: str = ""):
     )
 
 
+def _reject_headless(project) -> None:
+    """400 for a headless project (Dockerfile with no EXPOSE): it has no port, so there is
+    nothing for nginx to proxy and no domain to certify."""
+    if project.local_port is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Project '{project.name}' is headless (its Dockerfile EXPOSEs no port) — "
+                   f"it has no public endpoint. Add an EXPOSE and redeploy to serve it.",
+        )
+
+
 # ── SSL (manual retry) ──────────────────────────────────────────────────────────
 
 @router.post("/{project_name}/ssl", response_model=SslResponse,
              summary="(Re)issue the Let's Encrypt SSL certificate for the project")
 def issue_ssl(project_name: str, db: Session = Depends(get_db), _=Depends(require_admin)):
     project = _get_dockerfile_project(project_name, db)
+    _reject_headless(project)
     success, message = nginx_service.issue_cert(project.effective_domain)
     if success:
         project.ssl_enabled = True
@@ -170,6 +182,7 @@ def set_domain(project_name: str, request: SetDomainRequest,
     from app.routers.projects import assert_domain_available, project_response
 
     project = _get_dockerfile_project(project_name, db)
+    _reject_headless(project)
     if not project.subdomain or not project.local_port:
         raise HTTPException(status_code=400, detail="Project is not provisioned yet — upload a Dockerfile first")
 

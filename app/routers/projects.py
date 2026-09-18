@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import shutil
@@ -106,6 +107,8 @@ def _env_count(project: Project, service: str | None = None) -> int:
 
 def _container_info(project: Project) -> dict:
     return {
+        # A headless project (Dockerfile with no EXPOSE) has no loopback port, so no nginx.
+        "exposed": project.local_port is not None,
         "subdomain": project.effective_domain,
         "custom_domain": project.custom_domain,
         "local_port": project.local_port,
@@ -271,6 +274,39 @@ def provision_dockerfile(
 
     db.commit()
     db.refresh(project)
+    return project
+
+
+def provision_dockerfile_headless(db: Session, project: Project) -> Project:
+    """Wire a project as a *headless* dockerfile project: a container nothing connects to
+    (a bot, a queue worker) whose Dockerfile EXPOSEs no port. It gets docker names but no
+    loopback port, subdomain, nginx vhost or certificate — docker's default bridge network
+    still gives it outbound internet. `local_port IS NULL` is what marks a dockerfile project
+    headless everywhere downstream (deploy, rollback, restart, the ssl/domain routes).
+
+    A project that used to be exposed loses its nginx config here, so re-uploading without
+    EXPOSE really takes the site down rather than leaving a vhost pointing at nothing; adding
+    EXPOSE back later goes through `provision_dockerfile`, which sees `local_port is None` and
+    wires nginx up again. Commits."""
+    name = project.name
+    was_exposed = project.local_port is not None
+    project.deploy_mode = "dockerfile"
+    project.local_port = None
+    project.container_port = None
+    project.subdomain = None
+    project.custom_domain = None
+    project.ssl_enabled = False
+    project.websocket = False
+    project.image_name = project.image_name or f"freeholdy_{name}:latest"
+    project.container_name = project.container_name or f"freeholdy_{name}"
+    db.commit()
+    db.refresh(project)
+    if was_exposed:
+        details: list[str] = []
+        errors: list[str] = []
+        _teardown_nginx(name, details, errors)
+        for err in errors:
+            logging.getLogger("uvicorn").warning("headless provision of '%s': %s", name, err)
     return project
 
 
@@ -586,7 +622,8 @@ def _detect_manifest(base_dir: str) -> tuple[str | None, str | None]:
 
 def _provision_from_dockerfile(db: Session, project: Project, dockerfile_path: str) -> None:
     """Wire a project as dockerfile-mode from a detected Dockerfile: nginx/port setup, then
-    EXPOSE → container_port (400 if absent) and WebSocket detection. Commits."""
+    EXPOSE → container_port and WebSocket detection. No EXPOSE → a headless worker with no
+    port or nginx (`provision_dockerfile_headless`). Commits."""
     valid, message = docker_service.validate_dockerfile(dockerfile_path)
     if not valid:
         raise HTTPException(status_code=400, detail=message)
@@ -596,11 +633,11 @@ def _provision_from_dockerfile(db: Session, project: Project, dockerfile_path: s
 
     port = scan.exposed_port(text)
     if port is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Dockerfile must EXPOSE a port (e.g. `EXPOSE 8080`) so the container "
-                   "port can be determined.",
-        )
+        provision_dockerfile_headless(db, project)
+        project.dockerfile_path = dockerfile_path
+        db.commit()
+        db.refresh(project)
+        return
 
     provision_dockerfile(db, project, container_port=port)
     project.dockerfile_path = dockerfile_path
@@ -634,7 +671,7 @@ async def upload(
       - `docker-compose.yml` (or compose.yaml / compose.yml) → compose mode (wins over a
         Dockerfile), provisioned via `provision_compose`.
       - `Dockerfile` → dockerfile mode: nginx/port setup + EXPOSE → container_port + WebSocket
-        detection.
+        detection; no EXPOSE → a headless worker (no port, no nginx).
 
     A project's mode is fixed by its first provisioning upload; uploading the other manifest
     type later is rejected (remove + recreate to change mode). Uploads with no manifest are a
@@ -920,8 +957,13 @@ def _upload_message(
 ) -> str:
     """Human-readable result line shared by both upload endpoints."""
     if provisioned:
-        return (f"Uploaded {count} file(s); detected {detected_mode} project "
-                f"and provisioned '{project_name}'")
+        message = (f"Uploaded {count} file(s); detected {detected_mode} project "
+                   f"and provisioned '{project_name}'")
+        if detected_mode == "dockerfile" and project.local_port is None:
+            # Say it out loud: a web app that merely forgot its EXPOSE lands here too.
+            message += (" — the Dockerfile EXPOSEs no port, so it runs as a background "
+                        "worker with no nginx endpoint or URL")
+        return message
     if project.deploy_mode in ("dockerfile", "compose"):
         return f"Uploaded {count} file(s) to '{project_name}'"
     return (f"Uploaded {count} file(s); no Dockerfile or docker-compose.yml found "

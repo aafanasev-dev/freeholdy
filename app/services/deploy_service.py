@@ -3,7 +3,10 @@ deploy_service.py — blue/green deploys with archived backups (both deploy mode
 
 Dockerfile mode: every deploy builds a new version `freeholdy_{name}:v{N}` in a container
 `freeholdy_{name}_v{N}` on its own loopback port, runs it, and only then switches nginx
-to it (zero downtime; a failed build never takes the running site down). The previous
+to it (zero downtime; a failed build never takes the running site down). A headless project
+(Dockerfile with no EXPOSE, `local_port IS NULL`) gets no port and no nginx switch. Each
+new container inherits the previous one's volumes (`--volumes-from`), so data in an
+image's anonymous `VOLUME` survives redeploys, rollbacks and restarts. The previous
 version is kept as a stopped `inactive` container for fast rollback; older ones are
 `archived` (image kept, container removed, port freed) up to Project.backup_limit.
 
@@ -70,22 +73,34 @@ def _env_flag(env_file: Optional[str]) -> str:
     return f"--env-file {shlex.quote(env_file)} "
 
 
+def _port_flag(local_port: Optional[int], container_port: Optional[int]) -> str:
+    """`-p 127.0.0.1:{local}:{container} ` for a `docker run` command line, or "" for a
+    headless project (Dockerfile with no EXPOSE): it needs no inbound port at all."""
+    if local_port is None or container_port is None:
+        return ""
+    return f"-p 127.0.0.1:{int(local_port)}:{int(container_port)} "
+
+
 def _deploy_script(
     project_dir: str,
     install_script: Optional[str],
     plugin_dir: Optional[str],
     image_name: str,
     container_name: str,
-    local_port: int,
-    container_port: int,
+    local_port: Optional[int],
+    container_port: Optional[int],
     env_file: Optional[str] = None,
+    volumes_from: Optional[str] = None,
 ) -> list:
     """optional install.sh → docker build → docker run, as one bash job (mirrors
     docker_service.provision_from_plugin, but with version-scoped names).
 
     `env_file` is the project's materialized env file (`env_service.materialize`); when
     present it is passed to `docker run --env-file` so the container starts with the
-    variables stored in the DB. None → the command is exactly what it was before."""
+    variables stored in the DB. None → the command is exactly what it was before.
+    `volumes_from` is the currently active container, whose volumes the new version
+    inherits (`docker_service.volumes_from_lines`); None/absent on a first deploy. A None
+    port (headless project) publishes nothing."""
     q = shlex.quote
     dockerfile = os.path.join(project_dir, "Dockerfile")
     lines = ["set -e"]
@@ -100,9 +115,10 @@ def _deploy_script(
         f"docker build --progress=plain -t {q(image_name)} -f {q(dockerfile)} {q(project_dir)}",
         f'echo "── docker run {container_name} ──"',
         f"docker rm -f {q(container_name)} >/dev/null 2>&1 || true",
-        f"docker run --detach --name {q(container_name)} --restart unless-stopped "
+        *docker_service.volumes_from_lines(volumes_from),
+        f"docker run --detach --name {q(container_name)} --restart unless-stopped $VOLS "
         f"{_env_flag(env_file)}"
-        f"-p 127.0.0.1:{int(local_port)}:{int(container_port)} {q(image_name)}",
+        f"{_port_flag(local_port, container_port)}{q(image_name)}",
     ]
     return ["bash", "-c", "\n".join(lines)]
 
@@ -111,9 +127,10 @@ def _rollback_script(
     target_status: str,
     image_name: str,
     container_name: str,
-    local_port: int,
-    container_port: int,
+    local_port: Optional[int],
+    container_port: Optional[int],
     env_file: Optional[str] = None,
+    volumes_from: Optional[str] = None,
 ) -> list:
     """Bring a rollback target's container up by recreating it from its retained image.
 
@@ -122,16 +139,21 @@ def _rollback_script(
     moment it was created — restarting it that way would silently ignore any env edited
     since. Recreating costs only the container's writable layer (which an `archived`
     rollback already discards) and keeps one rule true everywhere: a container start uses
-    the current environment."""
+    the current environment.
+
+    `volumes_from` is the currently *active* container — it holds the newest data, and the
+    target's own old container is about to be removed anyway. Rolling back swaps code, not
+    data."""
     q = shlex.quote
     what = "restarting" if target_status == "inactive" else "recreating"
     lines = [
         "set -e",
         f'echo "── {what} {container_name} from {image_name} ──"',
         f"docker rm -f {q(container_name)} >/dev/null 2>&1 || true",
-        f"docker run --detach --name {q(container_name)} --restart unless-stopped "
+        *docker_service.volumes_from_lines(volumes_from),
+        f"docker run --detach --name {q(container_name)} --restart unless-stopped $VOLS "
         f"{_env_flag(env_file)}"
-        f"-p 127.0.0.1:{int(local_port)}:{int(container_port)} {q(image_name)}",
+        f"{_port_flag(local_port, container_port)}{q(image_name)}",
     ]
     return ["bash", "-c", "\n".join(lines)]
 
@@ -343,7 +365,11 @@ def bluegreen_deploy(project_id: int, install_script: Optional[str] = None,
         n = project.version_counter + 1
         first = project.version_counter == 0
         image_name, container_name = version_names(name, n)
-        green_port = project.local_port if first else _next_port(db, set())
+        # Headless (no EXPOSE): no port on any version, and nothing for nginx to switch.
+        headless = project.local_port is None
+        green_port = None if headless else (project.local_port if first else _next_port(db, set()))
+        # The running version, whose volumes the new one inherits.
+        active_container = None if first else project.container_name
         project_dir = os.path.abspath(compose_service.project_dir(name))
         container_port = project.container_port
         # Write the DB-stored env to disk so the new container starts with it.
@@ -356,7 +382,7 @@ def bluegreen_deploy(project_id: int, install_script: Optional[str] = None,
     cmd = _deploy_script(
         project_dir, install_script, plugin_dir,
         image_name, container_name, green_port, container_port,
-        env_file=env_file,
+        env_file=env_file, volumes_from=active_container,
     )
 
     def promote(log: Callable[[str], None]) -> None:
@@ -368,7 +394,7 @@ def bluegreen_deploy(project_id: int, install_script: Optional[str] = None,
                 container_name=container_name, local_port=green_port, status="active",
             ))
             p.version_counter = n
-            if not first:
+            if not first and green_port is not None:
                 _switch_nginx(p, green_port, log)
             p.local_port = green_port
             p.container_name = container_name
@@ -409,13 +435,18 @@ def rollback_to_version(project_id: int, version: int,
         target_status = target.status
         image_name = target.image_name
         container_name = target.container_name
-        # inactive → reuse its reserved port; archived → allocate a fresh one.
+        # inactive → reuse its reserved port; archived → allocate a fresh one. A headless
+        # project (no EXPOSE) has no port and no nginx either way.
+        headless = project.local_port is None
         new_port = None
-        if target_status == "inactive":
+        if headless:
+            target_port = None
+        elif target_status == "inactive" and target.local_port is not None:
             target_port = target.local_port
         else:
             new_port = _next_port(db, set())
             target_port = new_port
+        active_container = project.container_name if project.container_name != target.container_name else None
         env_service.materialize(db, project)
         env_file = env_service.project_env_file(db, project)
     finally:
@@ -423,7 +454,7 @@ def rollback_to_version(project_id: int, version: int,
 
     job_key = deploy_job_key(name)
     cmd = _rollback_script(target_status, image_name, container_name, target_port,
-                           container_port, env_file=env_file)
+                           container_port, env_file=env_file, volumes_from=active_container)
 
     def promote(log: Callable[[str], None]) -> None:
         db2 = SessionLocal()
@@ -432,8 +463,11 @@ def rollback_to_version(project_id: int, version: int,
             tgt = next(v for v in p.versions if v.version == version)
             if new_port is not None:
                 tgt.local_port = new_port
-            port = tgt.local_port
-            _switch_nginx(p, port, log)
+            elif target_port is None:
+                tgt.local_port = None   # headless now: release a port it held when it was exposed
+            port = tgt.local_port if target_port is not None else None
+            if port is not None:
+                _switch_nginx(p, port, log)
             p.local_port = port
             p.container_name = tgt.container_name
             p.image_name = tgt.image_name

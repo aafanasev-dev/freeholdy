@@ -329,33 +329,68 @@ def build_image(dockerfile_path: str, image_name: str, job_key: str) -> DockerJo
     return _spawn(job_key, "build", cmd)
 
 
+def volumes_from_lines(source: Optional[str]) -> list:
+    """Bash lines setting `$VOLS` to `--volumes-from <source>` when that container exists.
+
+    Every version, rollback and restart runs in a *new* container, and `docker run` on an
+    image with a `VOLUME` instruction attaches a brand-new empty anonymous volume — so
+    without this each deploy would start from empty data. `--volumes-from` mounts the
+    source's volumes (anonymous ones included) at the same paths, which overrides the
+    image's `VOLUME` there. A missing source (first deploy, container removed by hand)
+    leaves `$VOLS` empty: exactly the old behaviour. Use `$VOLS` unquoted in the run line."""
+    if not source:
+        return ['VOLS=""']
+    q = shlex.quote
+    return [
+        f"if docker container inspect {q(source)} >/dev/null 2>&1; then "
+        f'VOLS="--volumes-from {source}"; echo "── carrying volumes over from {source} ──"; '
+        f'else VOLS=""; fi',
+    ]
+
+
 def start_container(
     container_name: str,
     image_name: str,
-    local_port: int,
-    container_port: int,
+    local_port: Optional[int],
+    container_port: Optional[int],
     job_key: str,
     env_file: Optional[str] = None,
 ) -> DockerJob:
-    """Remove any stopped container then 'docker run' in the background.
+    """Recreate a container from its image in the background (a restart that picks up the
+    current env file — a container's environment is fixed when it is created).
 
-    `env_file` is the project's materialized env file (`env_service.materialize`)."""
-    # Synchronous remove — fast, must complete before docker run.
-    subprocess.run(
-        ["docker", "rm", "-f", container_name],
-        capture_output=True,
-        text=True,
-    )
-    cmd = [
-        "docker", "run",
-        "--detach",
-        "--name", container_name,
-        "--restart", "unless-stopped",
-        *(["--env-file", env_file] if env_file and os.path.exists(env_file) else []),
-        "-p", f"127.0.0.1:{local_port}:{container_port}",
-        image_name,
+    The old container is renamed aside rather than removed first, so the new one can take
+    over its volumes with `--volumes-from` (an anonymous volume would otherwise be orphaned
+    and the container would come back empty); it is removed once the new one runs, or
+    renamed back and started again if `docker run` fails. A None port (headless project)
+    publishes nothing. `env_file` is the project's materialized env file
+    (`env_service.materialize`)."""
+    q = shlex.quote
+    old = f"{container_name}__old"
+    env = f"--env-file {q(env_file)} " if env_file and os.path.exists(env_file) else ""
+    ports = (f"-p 127.0.0.1:{int(local_port)}:{int(container_port)} "
+             if local_port is not None and container_port is not None else "")
+    lines = [
+        f"docker rm -f {q(old)} >/dev/null 2>&1 || true",
+        f"HAD_OLD=0",
+        f"if docker container inspect {q(container_name)} >/dev/null 2>&1; then",
+        f"  docker stop --time 10 {q(container_name)} >/dev/null",
+        f"  docker rename {q(container_name)} {q(old)}",
+        f"  HAD_OLD=1",
+        f"fi",
+        *volumes_from_lines(old),
+        f"if docker run --detach --name {q(container_name)} --restart unless-stopped $VOLS "
+        f"{env}{ports}{q(image_name)}; then",
+        f"  docker rm -f {q(old)} >/dev/null 2>&1 || true",
+        f"else",
+        f"  rc=$?",
+        f'  echo "── docker run failed — putting the previous container back ──"',
+        f"  docker rm -f {q(container_name)} >/dev/null 2>&1 || true",
+        f"  if [ \"$HAD_OLD\" = 1 ]; then docker rename {q(old)} {q(container_name)} && docker start {q(container_name)}; fi",
+        f"  exit $rc",
+        f"fi",
     ]
-    return _spawn(job_key, "start", cmd)
+    return _spawn(job_key, "start", ["bash", "-c", "\n".join(lines)])
 
 
 def stop_container(container_name: str, job_key: str) -> DockerJob:

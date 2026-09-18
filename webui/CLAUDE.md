@@ -372,4 +372,7 @@ A project's name is its subdomain label — a dockerfile project is served at `{
 takes **only a name** (plus the files/git source) — there is no deploy-mode or port input. The deploy
 mode is auto-detected server-side from the deployed source (a `docker-compose.yml` wins over a
 `Dockerfile`), and a dockerfile project's container port is read from the Dockerfile's `EXPOSE`
-instruction, so the Dockerfile must declare one (the deploy is rejected otherwise).
+instruction. A Dockerfile with **no** `EXPOSE` deploys as a headless worker (a bot, a queue
+consumer): `ContainerInfo.exposed` is `false`, `subdomain`/`local_port` are null, the shared `Cells`
+render the `unproxied` chip and `—` for SSL (the same path compose's unexposed services take), and
+`ContainerRow` omits its `ssl` and `domain` actions.

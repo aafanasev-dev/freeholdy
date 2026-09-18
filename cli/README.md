@@ -80,7 +80,9 @@ sudo ln -s "$(pwd)/cli/fhcli.py" /usr/local/bin/fhcli   # from the repo root
 
 The deploy mode is **auto-detected** from your source: a `docker-compose.yml` in the
 deployed root makes it a compose project (it wins over a `Dockerfile`), a bare
-`Dockerfile` makes it a single-container project. A Dockerfile must `EXPOSE` its port.
+`Dockerfile` makes it a single-container project, served at the port it `EXPOSE`s. A
+Dockerfile with no `EXPOSE` deploys as a **headless worker** (a bot, a queue consumer): it
+runs and reaches the internet, but gets no nginx endpoint, subdomain or certificate.
 There is no separate `create` step — `deploy` creates the project on first use.
 
 ## Dockerfile workflow example
@@ -89,7 +91,7 @@ There is no separate `create` step — `deploy` creates the project on first use
 # Check connectivity
 fhcli health
 
-# Deploy a folder (must contain a Dockerfile that EXPOSEs a port) — the project is
+# Deploy a folder containing a Dockerfile (with an EXPOSE for a web app) — the project is
 # created automatically on first deploy.
 fhcli deploy myapp ./myapp        # detects the Dockerfile, reads EXPOSE, wires nginx + SSL,
                                   # then builds + runs it — streaming the deploy log live.

@@ -1573,7 +1573,7 @@ const Cells = ({ label, info }) => (
         <span style={{ color: C.blue, background: C.blueFill, border: `1px solid ${C.blueBd}`, fontSize: "10px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "7px", marginLeft: "7px" }}>custom</span>
       )}
       {info.exposed === false && (
-        <span style={{ color: C.dim, background: C.s3, border: `1px solid ${C.bd}`, fontSize: "10px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "7px", marginLeft: "7px" }} title="No published TCP port — runs outside nginx (host networking, UDP-only, or internal-only)">unproxied</span>
+        <span style={{ color: C.dim, background: C.s3, border: `1px solid ${C.bd}`, fontSize: "10px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "7px", marginLeft: "7px" }} title="No published TCP port — not behind nginx (background worker, host networking, UDP-only, or internal-only)">unproxied</span>
       )}
     </td>
     <td style={{ padding: "9px 12px", fontFamily: C.ff, fontSize: "13px", color: C.txt, textAlign: "right", minWidth: "55px" }}>{info.local_port ?? "—"}</td>
@@ -1624,8 +1624,8 @@ const ContainerRow = ({ project, info, token, role, onOperation, onRefresh, onSt
             { key: "versions", icon: "⧉", label: "versions", color: C.purple, title: "View versions, roll back, set backup limit", onClick: () => setModal({ type: "versions" }) },
             { key: "logs", icon: "▤", label: "logs", color: C.muted, title: "Read the container's own output", onClick: () => setModal({ type: "logs" }) },
             { key: "status", icon: "ⓘ", label: "status", color: C.muted, busy: busy.status, title: "View job status & logs", onClick: () => act("status") },
-            isAdmin && { key: "ssl", icon: "🔒", label: "ssl", color: C.txt, busy: busy.ssl, title: "Issue/renew SSL cert", onClick: () => act("ssl") },
-            isAdmin && { key: "domain", icon: "⌂", label: "domain", color: C.blue, title: "Set or clear a custom domain", onClick: () => setModal({ type: "domain" }) },
+            isAdmin && info.exposed !== false && { key: "ssl", icon: "🔒", label: "ssl", color: C.txt, busy: busy.ssl, title: "Issue/renew SSL cert", onClick: () => act("ssl") },
+            isAdmin && info.exposed !== false && { key: "domain", icon: "⌂", label: "domain", color: C.blue, title: "Set or clear a custom domain", onClick: () => setModal({ type: "domain" }) },
             isAdmin && null,
             isAdmin && { key: "stop", icon: "■", label: "stop", color: C.red, busy: busy.stop, disabled: !isRunning, title: "Stop container", onClick: () => act("stop") },
           ]} />
