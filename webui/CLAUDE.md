@@ -96,26 +96,21 @@ Things that require reading the whole file to understand:
   chips/badges/inline code `7px`, progress bars `999px`.
 - **`Dashboard` layout is a fixed left nav rail + shifted main column.** A `<nav className="fh-rail">`
   (240px, `C.s2`) holds the `freeholdy` brand + version badge, the `NavItem` entries (**Projects**
-  clears everything; **Backups** and **Tokens** each open their own panel with a money-green active
-  state; **Deploy** and **Plugins** open the creator pinned above the project list rather than a
-  panel; **Git key** opens `GitKeyModal`), and a bottom **Refresh**/**Logout** footer. The content
+  shows the project list; **Deploy**, **Plugins** (admin-only), **Backups** and **Tokens** each open
+  their own panel in its place, with a money-green active state; **Git key** opens `GitKeyModal`),
+  and a bottom **Refresh**/**Logout** footer. The content
   sits in `.fh-main` (`margin-left:240px`) under a slim sticky top bar (section title + `api ●`
   health dot + `DOMAIN`). Below 820px the rail becomes an off-canvas overlay toggled by `railOpen`
   (the `.fh-burger` hamburger + a backdrop); the media query lives in the global `<style>` block.
-- **The creator is pinned to the top of the projects view, and it does not hide the list.** One
-  `creator` state (`null | "deploy" | "plugin"`) drives a permanent bar of two toggle buttons
-  (**＋ deploy project** / **⧉ add plugin**, admin-only) rendered above the cards; the selected one
-  expands `DeployForm` / `PluginPanel` directly beneath the bar, pushing the cards down instead of
-  replacing them. `toggleCreator(kind)` closes the rail panels and flips the bar; the rail's
-  Deploy/Plugins items call the same thing, so both entry points behave identically. A deploy that
-  starts (`handleInstalled`) collapses the creator so the new card and its log are on screen.
 - **The rail panels are mutually exclusive, and one helper enforces it.** Each panel is a boolean
-  of `Dashboard` state, and `showOnly(setter)` maps over the `PANELS` array (**Tokens** and
-  **Backups** — not Deploy/Plugins, which are the creator now) setting exactly one true and
-  clearing the creator. Adding a panel is therefore a `useState`, an entry in `PANELS`, a
+  of `Dashboard` state, and `showOnly(setter)` maps over the `PANELS` array (**Tokens**, **Backups**,
+  **Deploy**, **Plugins**) setting exactly one true; `showOnly()` with no setter is the Projects
+  view. Adding a panel is therefore a `useState`, an entry in `PANELS`, a
   `<NavItem onClick={() => showOnly(setShowX)}>`, a `sectionTitle` arm and a render branch — **not**
   an edit inside every other nav item's `onClick`, which is how it used to work and how it drifted.
-  `projectsView` (= no panel open) gates the creator bar and the project list together.
+  `projectsView` (= no panel open) gates the project list, so the Deploy/Plugins tabs show only
+  their form. A deploy or install that starts (`handleInstalled`) closes Deploy/Plugins, landing on
+  Projects where the new card and its log are on screen.
 - **Every project's log hangs off its own card, and several run at once.** `Dashboard` keeps
   `streams`, a `{ [project]: { wsPath, interactive } }` map — `handleInstalled` and
   `handleDeployStream` *add* a key instead of replacing a single pane, so two simultaneous
@@ -283,8 +278,8 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   `git@github.com:…`. A `POST /git/add` clone that fails SSH auth returns a 400 whose detail points
   the user here, surfaced in `DeployForm`'s `<Err>` (git tab).
 
-`DeployForm` is the single new-project entry point (the pinned creator bar's **＋ deploy project**
-button, `creator === "deploy"`), alongside **⧉ add plugin**. It takes a project name plus a **files/folder ⇄ git URL** toggle,
+`DeployForm` is the single new-project entry point (the rail's **Deploy** tab, `showDeploy`),
+alongside the **Plugins** tab. It takes a project name plus a **files/folder ⇄ git URL** toggle,
 and an **`EnvDisclosure`** (`showEnv`) — the shared collapsible env field defined next to `TextArea`,
 whose header is a Field-style label row (caret + `ENVIRONMENT VARIABLES` + a `{n} stored` chip or
 `optional`) rather than a ghost button. That text rides along in the deploy request (`env` in the

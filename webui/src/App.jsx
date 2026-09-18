@@ -3005,9 +3005,8 @@ const Dashboard = ({ token, onLogout }) => {
   const [health, setHealth] = useState(null);
   const [version, setVersion] = useState(null);
   const [loading, setLoading] = useState(true);
-  // The pinned creator bar at the top of the projects list: null | "deploy" | "plugin".
-  // Unlike the rail panels it does NOT replace the list — it expands above the cards.
-  const [creator, setCreator] = useState(null);
+  const [showDeploy, setShowDeploy] = useState(false);
+  const [showPlugins, setShowPlugins] = useState(false);
   const [showGitKey, setShowGitKey] = useState(false);
   const [showTokens, setShowTokens] = useState(false);
   const [showBackups, setShowBackups] = useState(false);
@@ -3110,7 +3109,8 @@ const Dashboard = ({ token, onLogout }) => {
       ...s,
       [name]: { wsPath: data.ws_path, interactive: data.job?.status === "waiting_interactive" },
     }));
-    setCreator(null);   // collapse the creator so the new card and its log are visible
+    // Leave the Deploy / Plugins tab for Projects, where the new card and its log are.
+    setShowDeploy(false); setShowPlugins(false);
   }, [dropLogFor]);
 
   // Stream an already-launched deploy/rollback job (WS /projects/{name}/deploy) in the
@@ -3146,18 +3146,15 @@ const Dashboard = ({ token, onLogout }) => {
 
   // The left-rail panels are mutually exclusive and replace the projects view. Keeping the
   // reset in one place means adding a panel is one setter here rather than an edit inside
-  // every other nav item's onClick. Deploy/Plugins are NOT panels any more — they expand
-  // from the bar pinned above the project list, so opening one only closes the panels.
-  const PANELS = [setShowTokens, setShowBackups];
-  const showOnly = (setter) => { PANELS.forEach(set => set(set === setter)); setCreator(null); };
-  const toggleCreator = (kind) => {
-    PANELS.forEach(set => set(false));
-    setCreator(c => (c === kind ? null : kind));
-  };
+  // every other nav item's onClick. `showOnly()` with no setter is the Projects view.
+  const PANELS = [setShowTokens, setShowBackups, setShowDeploy, setShowPlugins];
+  const showOnly = (setter) => { PANELS.forEach(set => set(set === setter)); };
 
-  const projectsView = !showTokens && !showBackups;
+  const projectsView = !showTokens && !showBackups && !showDeploy && !showPlugins;
   const sectionTitle = showTokens ? "Tokens"
     : showBackups ? "Backups"
+    : showDeploy ? "Deploy"
+    : showPlugins ? "Plugins"
     : `Projects (${projects.length})`;
 
   // ── Manual ordering (HTML5 drag & drop, persisted by PUT /projects/order) ──
@@ -3251,7 +3248,7 @@ const Dashboard = ({ token, onLogout }) => {
         )}
         {/* Nav */}
         <div style={{ flex: 1 }}>
-          <NavItem icon="▣" label="Projects" active={projectsView && !creator}
+          <NavItem icon="▣" label="Projects" active={projectsView}
             onClick={() => { showOnly(); setRailOpen(false); }} />
           {/* Creating projects, installing plugins, the server SSH key and token management
               are all admin-only on the API — a guest never sees them. Backups are not: a guest
@@ -3264,12 +3261,12 @@ const Dashboard = ({ token, onLogout }) => {
               : "Archive a project — its image, volumes, env and files"}
             onClick={() => { showOnly(setShowBackups); setRailOpen(false); }} />
           {isAdmin && (<>
-            {/* Deploy and Plugins open the creator pinned above the project list rather than
-                a panel that replaces it — the rail is just the second way in. */}
-            <NavItem icon="＋" label="Deploy" active={creator === "deploy"}
-              onClick={() => { toggleCreator("deploy"); setRailOpen(false); }} />
-            <NavItem icon="⧉" label="Plugins" active={creator === "plugin"}
-              onClick={() => { toggleCreator("plugin"); setRailOpen(false); }} />
+            <NavItem icon="＋" label="Deploy" active={showDeploy}
+              title="Deploy a new project from files, a folder or a git URL"
+              onClick={() => { showOnly(setShowDeploy); setRailOpen(false); }} />
+            <NavItem icon="⧉" label="Plugins" active={showPlugins}
+              title="Install a pre-packaged project from the server's plugin catalogue"
+              onClick={() => { showOnly(setShowPlugins); setRailOpen(false); }} />
             <NavItem icon="⚿" label="Tokens" active={showTokens}
               title="Mint and revoke API tokens, including guest tokens scoped to one project"
               onClick={() => { showOnly(setShowTokens); setRailOpen(false); }} />
@@ -3317,26 +3314,15 @@ const Dashboard = ({ token, onLogout }) => {
 
         {/* Content */}
         <div style={{ maxWidth: 1260, margin: "0 auto", padding: "18px 22px" }}>
-          {/* The creator is pinned to the top of the projects view: the bar is always there,
-              and expanding it pushes the cards down instead of hiding them. */}
-          {projectsView && isAdmin && (
-            <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px", marginBottom: "10px", display: "flex", gap: "8px", flexWrap: "wrap", boxShadow: C.shadow }}>
-              <Btn v={creator === "deploy" ? "primary" : "default"} onClick={() => toggleCreator("deploy")}
-                   title="Deploy a new project from files, a folder or a git URL">＋ deploy project</Btn>
-              <Btn v={creator === "plugin" ? "primary" : "default"} onClick={() => toggleCreator("plugin")}
-                   title="Install a pre-packaged project from the server's plugin catalogue">⧉ add plugin</Btn>
-            </div>
-          )}
-
-          {projectsView && creator === "deploy" && (
+          {showDeploy && (
             <DeployForm token={token}
               onDeployed={handleInstalled}
-              onSynced={() => { setCreator(null); fetchProjects(); }}
-              onCancel={() => setCreator(null)} />
+              onSynced={() => { showOnly(); fetchProjects(); }}
+              onCancel={() => showOnly()} />
           )}
 
-          {projectsView && creator === "plugin" && (
-            <PluginPanel token={token} onInstalled={handleInstalled} onCancel={() => setCreator(null)} />
+          {showPlugins && (
+            <PluginPanel token={token} onInstalled={handleInstalled} onCancel={() => showOnly()} />
           )}
 
           {showTokens && (
@@ -3354,15 +3340,15 @@ const Dashboard = ({ token, onLogout }) => {
             )
           )}
 
-          {/* The deployed-projects list shows in the Projects view — Tokens / Backups replace
-              it with their own panel (above); the creator only pushes it down. */}
+          {/* The deployed-projects list shows only in the Projects view — every other tab
+              replaces it with its own panel (above). */}
           {projectsView && (
             loading ? (
               <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "13px", padding: "24px 0" }}>loading projects…</div>
             ) : projects.length === 0 ? (
               <div style={{ border: `1px dashed ${C.bd}`, borderRadius: "14px", padding: "40px", textAlign: "center", color: C.dim, fontFamily: C.ff, fontSize: "13px" }}>
                 {isAdmin
-                  ? <>no projects yet — use <span style={{ color: C.txt }}>＋ deploy project</span> or <span style={{ color: C.txt }}>⧉ add plugin</span> above</>
+                  ? <>no projects yet — use <span style={{ color: C.txt }}>＋ Deploy</span> or <span style={{ color: C.txt }}>⧉ Plugins</span> in the sidebar</>
                   : <>this token is not scoped to any project — ask the server's operator</>}
               </div>
             ) : (<>
