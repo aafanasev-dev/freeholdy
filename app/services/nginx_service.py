@@ -1,3 +1,6 @@
+import glob
+import json
+import logging
 import os
 import subprocess
 from typing import Tuple
@@ -7,6 +10,7 @@ from app.services import compose_service
 
 _TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
 _jinja = Environment(loader=FileSystemLoader(_TEMPLATES_DIR), trim_blocks=True, lstrip_blocks=True)
+log = logging.getLogger(__name__)
 
 
 # ── Config generation ─────────────────────────────────────────────────────────
@@ -80,6 +84,151 @@ def remove_config(project_name: str):
     ]:
         if os.path.exists(path) or os.path.islink(path):
             os.remove(path)
+    _remove_stream(project_name)
+
+
+# ── Stream (raw TCP) endpoints ────────────────────────────────────────────────
+#
+# A compose service labelled `freeholdy.proxy: tcp` is not proxied as HTTP. Its port-80
+# vhost serves only the ACME challenge (so the usual HTTP-01 flow still issues a Let's
+# Encrypt cert for its hostname) and there is no 443 server. Instead it gets nginx
+# `stream` servers, written to NGINX_STREAMS_DIR (included from nginx's main context by
+# scripts/setup_nginx_stream.sh):
+#
+#   * SNI   — a per-project TLS terminator on a unix socket, using the LE cert; the shared
+#             listener on STREAM_SNI_PORT (ssl_preread) routes the still-encrypted
+#             connection there by hostname through a per-project map file in sni/.
+#             The shared listener file exists only while at least one map exists.
+#   * port  — a plain passthrough on a dedicated public port; the service does its own TLS.
+#
+# Which of the two (or both) a project uses comes from `nginx-stream.json` in its project
+# dir (written by the plugin's install.sh), re-read on every render like nginx-extra.conf.
+
+STREAM_SETTINGS_NAME = "nginx-stream.json"
+_SNI_LISTENER_NAME = "00-freeholdy-sni-listener.conf"
+_DEFAULT_STREAM_SETTINGS = {"sni": True, "public_port": None, "alpn": None}
+
+
+def stream_supported() -> bool:
+    """True once scripts/setup_nginx_stream.sh has wired nginx's stream module in."""
+    return os.path.isdir(settings.NGINX_STREAMS_DIR)
+
+
+def load_stream_settings(project_name: str) -> dict:
+    """`{sni: bool, public_port: int | None, alpn: str | None}` from the project dir's
+    nginx-stream.json. Missing or unreadable → SNI only. Values are type-checked here;
+    range/collision checks are the provisioning router's job."""
+    out = dict(_DEFAULT_STREAM_SETTINGS)
+    path = os.path.join(compose_service.project_dir(project_name), STREAM_SETTINGS_NAME)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return out
+    if not isinstance(data, dict):
+        return out
+    out["sni"] = bool(data.get("sni", True))
+    port = data.get("public_port")
+    try:
+        out["public_port"] = int(port) if port not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        out["public_port"] = None
+    alpn = data.get("alpn")
+    out["alpn"] = str(alpn) if alpn and str(alpn).replace("-", "").replace(".", "").isalnum() else None
+    return out
+
+
+def _stream_conf_path(project_name: str) -> str:
+    return os.path.join(settings.NGINX_STREAMS_DIR, _config_filename(project_name))
+
+
+def _sni_map_path(project_name: str) -> str:
+    return os.path.join(settings.NGINX_STREAMS_DIR, "sni", f"freeholdy_{project_name}.map")
+
+
+def _stream_backup_path(project_name: str) -> str:
+    return os.path.join(settings.NGINX_CONFIGS_DIR, f"stream_{_config_filename(project_name)}")
+
+
+def _socket_path(project_name: str, service: str) -> str:
+    return os.path.join(settings.NGINX_STREAM_SOCKET_DIR, f"freeholdy_{project_name}_{service}.sock")
+
+
+def generate_stream_config(project_name: str, tcp_parts: list[dict], cert_ok: set[str]) -> tuple[str, str]:
+    """Render (stream conf, sni map) for a project's TCP endpoints. An SNI terminator is
+    emitted only for a hostname whose cert exists (`cert_ok`); a public-port passthrough
+    needs no cert. Either string is "" when it has nothing to say."""
+    st = load_stream_settings(project_name)
+    parts, map_lines = [], []
+    for p in tcp_parts:
+        service = p.get("service") or "main"
+        sni_active = bool(st["sni"]) and p["subdomain"] in cert_ok
+        socket = _socket_path(project_name, service)
+        parts.append({
+            "subdomain": p["subdomain"],
+            "cert_name": p["subdomain"],
+            "local_port": p["local_port"],
+            "sni_active": sni_active,
+            "socket": socket,
+            "alpn": st["alpn"],
+            "public_port": st["public_port"],
+        })
+        if sni_active:
+            map_lines.append(f"{p['subdomain']} unix:{socket};")
+    if not any(x["sni_active"] or x["public_port"] for x in parts):
+        return "", ""
+    conf = _jinja.get_template("nginx_stream.conf.j2").render(
+        project=project_name, parts=parts, sni_port=settings.STREAM_SNI_PORT)
+    smap = ""
+    if map_lines:
+        smap = f"# SNI routes for {project_name} — generated by freeholdy. Do not edit manually.\n" \
+               + "\n".join(map_lines) + "\n"
+    return conf, smap
+
+
+def _write_or_remove(path: str, content: str):
+    if content:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(content)
+    elif os.path.exists(path) or os.path.islink(path):
+        os.remove(path)
+
+
+def _sync_sni_listener():
+    """Write the shared SNI listener while any project routes by hostname; remove it
+    otherwise, so STREAM_SNI_PORT is bound only when something actually uses it."""
+    path = os.path.join(settings.NGINX_STREAMS_DIR, _SNI_LISTENER_NAME)
+    has_maps = bool(glob.glob(os.path.join(settings.NGINX_STREAMS_DIR, "sni", "*.map")))
+    content = ""
+    if has_maps:
+        content = _jinja.get_template("nginx_stream_sni.conf.j2").render(
+            streams_dir=settings.NGINX_STREAMS_DIR, sni_port=settings.STREAM_SNI_PORT)
+    _write_or_remove(path, content)
+
+
+def _write_stream(project_name: str, tcp_parts: list[dict], cert_ok: set[str]) -> bool:
+    """(Re)write — or remove, when there is nothing to serve — a project's stream files.
+    Returns whether any stream file now exists for the project."""
+    conf, smap = generate_stream_config(project_name, tcp_parts, cert_ok)
+    _write_or_remove(_stream_conf_path(project_name), conf)
+    _write_or_remove(_sni_map_path(project_name), smap)
+    try:
+        _write_or_remove(_stream_backup_path(project_name), conf)
+    except OSError:
+        pass  # the local backup copy is a convenience, never a reason to fail
+    _sync_sni_listener()
+    return bool(conf)
+
+
+def _remove_stream(project_name: str):
+    """Drop a project's stream conf + SNI map (and the shared listener if it was the last)."""
+    for path in (_stream_conf_path(project_name), _sni_map_path(project_name),
+                 _stream_backup_path(project_name)):
+        if os.path.exists(path) or os.path.islink(path):
+            os.remove(path)
+    if stream_supported():
+        _sync_sni_listener()
 
 
 # ── nginx commands ────────────────────────────────────────────────────────────
@@ -143,6 +292,14 @@ def setup_nginx(project_name: str, endpoints: list[dict]) -> dict:
     """
     results: dict[str, dict] = {}
 
+    # TCP endpoints (nginx stream) need the stream module wired in; refuse before
+    # writing anything rather than leave a half-configured project.
+    tcp_parts = [p for p in endpoints if p.get("proxy") == "tcp"]
+    if tcp_parts and not stream_supported():
+        return {"success": False, "ssl": {},
+                "error": "nginx stream support is not installed — run "
+                         "`sudo bash scripts/setup_nginx_stream.sh` on the server first"}
+
     # Step 1: HTTP config
     http_cfg = generate_http_config(project_name, endpoints)
     _write_config(project_name, http_cfg)
@@ -166,9 +323,26 @@ def setup_nginx(project_name: str, endpoints: list[dict]) -> dict:
     if ssl_parts:
         ssl_cfg = generate_ssl_config(project_name, ssl_parts)
         _write_config(project_name, ssl_cfg)
+
+    # Step 3b: stream (TCP) servers. Always synced when stream support exists, so a
+    # re-upload that dropped the `freeholdy.proxy: tcp` label also drops stale files.
+    wrote_stream = False
+    if stream_supported():
+        wrote_stream = _write_stream(project_name, tcp_parts, successful)
+
+    if ssl_parts or wrote_stream:
         ok, msg = test_config()
         if ok:
             reload()
+        elif wrote_stream:
+            # Most likely the stream side (a port nginx can't bind is NOT caught by -t,
+            # but a bad directive or module is): pull it so nginx stays loadable.
+            _remove_stream(project_name)
+            ok2, _ = test_config()
+            if ok2:
+                reload()
+            return {"success": False, "ssl": results,
+                    "error": f"nginx stream config test failed: {msg}"}
 
     return {"success": all_ok, "ssl": results}
 

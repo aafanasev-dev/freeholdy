@@ -683,6 +683,11 @@ fhcli plugin-add nextcloud mycloud  # install one as project "mycloud"</code></p
         </div>
 
         <div class="card">
+          <h3>🐘 postgresql <span class="badge">interactive · TCP 5432 / own port</span></h3>
+          <p>A PostgreSQL 17 server at <code>&lt;project&gt;.&lt;domain&gt;</code>. Add it as many times as you like: each project is its own server with its own data folder (<code>data/postgresql/&lt;project&gt;</code>, kept when the project is deleted). The install asks for the database, user, password and connection mode. <b>sni</b> uses the shared port 5432 with Let's Encrypt TLS and needs psql/libpq 17+ with <code>sslnegotiation=direct</code>. <b>port</b> gives the server a dedicated public port and works with any client (<code>sslmode=require</code>). <b>both</b> enables both. Open the port(s) in your firewall.</p>
+        </div>
+
+        <div class="card">
           <h3>🖼️ imgstore</h3>
           <p>Token-gated image storage — upload via a web UI, share via public links with custom names or auto sha256 URLs.</p>
         </div>

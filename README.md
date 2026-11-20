@@ -667,7 +667,7 @@ freeholdy/
 │       ├── nginx_http.conf.j2  # HTTP-only (for ACME challenge)
 │       └── nginx_ssl.conf.j2   # Full HTTPS config
 ├── configure.sh              # Builds ./venv (server + CLI deps); used by install.sh & update.sh
-├── plugins/                  # Built-in plugins (webui, freeholdy-help, nextcloud, …)
+├── plugins/                  # Built-in plugins (webui, freeholdy-help, nextcloud, postgresql, …)
 ├── examples/                 # Deployable sample projects (fhcli deploy) + DEPLOY.md
 ├── cli/                      # Standalone `fhcli` CLI (own .env; shares the project venv)
 ├── webui/                    # React control panel (source for the webui plugin)

@@ -95,11 +95,13 @@ def _load_manifest(plugin_dir: str, name: str) -> Optional[dict]:
     # Subdomain label override; None means "not set" (caller uses its own default):
     #   "domain_prefix" absent          -> None (dockerfile: use project name; compose: {svc}.{project}.{domain})
     #   "domain_prefix": "" (or null)   -> "" (pins to base domain)
-    #   "domain_prefix": "<value>"      -> that value
+    #   "domain_prefix": "<value>"      -> that value; a `{project}` placeholder is filled
+    #                                      with the project name at add time
+    #                                      (plugins.py::resolve_domain_prefix)
     if "domain_prefix" in data:
         dp = data["domain_prefix"]
         domain_prefix = "" if dp is None else str(dp)
-        if not _valid_domain_prefix(domain_prefix):
+        if not _valid_domain_prefix(domain_prefix.replace("{project}", "x")):
             logger.warning(
                 "Plugin %r has an invalid domain_prefix %r — it must be a DNS-safe "
                 "subdomain label (lowercase letters, digits and hyphens; no "

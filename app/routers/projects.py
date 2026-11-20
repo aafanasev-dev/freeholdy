@@ -123,6 +123,12 @@ def _container_info(project: Project) -> dict:
 
 
 def _service_info(svc: ComposeService) -> dict:
+    proxy = svc.proxy or "http"
+    sni_port = public_port = None
+    if proxy == "tcp" and svc.exposed:
+        st = nginx_service.load_stream_settings(svc.project.name)
+        sni_port = settings.STREAM_SNI_PORT if st["sni"] and svc.ssl_enabled else None
+        public_port = st["public_port"]
     return {
         "name": svc.name,
         "exposed": bool(svc.exposed),
@@ -135,6 +141,9 @@ def _service_info(svc: ComposeService) -> dict:
         "websocket": bool(svc.websocket),
         "container_status": _container_status(svc.container_name, None),
         "env_count": _env_count(svc.project, svc.name),
+        "proxy": proxy,
+        "sni_port": sni_port,
+        "public_port": public_port,
     }
 
 

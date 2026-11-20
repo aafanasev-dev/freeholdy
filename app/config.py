@@ -8,6 +8,17 @@ class Settings(BaseSettings):
     NGINX_CONFIGS_DIR: str = "nginx_configs"
     NGINX_SITES_AVAILABLE: str = "/etc/nginx/sites-available"
     NGINX_SITES_ENABLED: str = "/etc/nginx/sites-enabled"
+    # nginx `stream` (raw TCP) configs for compose services labelled `freeholdy.proxy: tcp`
+    # (e.g. the postgresql plugin). Included from nginx's main context by
+    # scripts/setup_nginx_stream.sh — the directory existing is the "stream support is
+    # installed" marker. `sni/` holds one map file per SNI-routed project.
+    NGINX_STREAMS_DIR: str = "/etc/nginx/freeholdy-streams"
+    # Unix sockets of the per-project TLS terminators behind the shared SNI listener.
+    # Persistent (not /run, which is tmpfs) and created by setup_nginx_stream.sh.
+    NGINX_STREAM_SOCKET_DIR: str = "/var/lib/freeholdy-nginx"
+    # Shared public port of the SNI listener (hostname-routed TLS, e.g. PostgreSQL 17+
+    # clients with sslnegotiation=direct).
+    STREAM_SNI_PORT: int = 5432
     DOCKERFILES_DIR: str = "dockerfiles"
     COMPOSE_DIR: str = "compose"
     # One per-project working directory for both deploy modes. Files uploaded via

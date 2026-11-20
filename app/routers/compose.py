@@ -67,6 +67,50 @@ def _abs_project_dir(project_name: str) -> str:
 
 # ── Upload ──────────────────────────────────────────────────────────────────────
 
+def validate_tcp_settings(db: Session, project: Project):
+    """400 unless the project's nginx-stream.json describes a listener nginx can own:
+    at least one of SNI / a public port; the public port outside freeholdy's loopback
+    range, its API port, 80/443 and (when anyone routes by SNI) the shared SNI port; and
+    no other TCP project claiming the same public port or the SNI port as a public port."""
+    st = nginx_service.load_stream_settings(project.name)
+    port = st["public_port"]
+    sni_port = settings.STREAM_SNI_PORT
+    if not st["sni"] and not port:
+        raise HTTPException(status_code=400, detail=(
+            f"{nginx_service.STREAM_SETTINGS_NAME}: enable SNI or set a public_port — "
+            "a TCP service needs at least one way in"))
+
+    others = (db.query(Project.name)
+              .join(ComposeService, ComposeService.project_id == Project.id)
+              .filter(ComposeService.proxy == "tcp", Project.id != project.id)
+              .distinct().all())
+    other_settings = {name: nginx_service.load_stream_settings(name) for (name,) in others}
+
+    if st["sni"]:
+        for name, o in other_settings.items():
+            if o["public_port"] == sni_port:
+                raise HTTPException(status_code=400, detail=(
+                    f"Project '{name}' already uses port {sni_port} as its public port, "
+                    "so it can't be the shared SNI port"))
+    if port:
+        if not 1024 <= port <= 65535:
+            raise HTTPException(status_code=400, detail=f"public_port {port} must be within 1024-65535")
+        if settings.PORT_RANGE_START <= port < settings.PORT_RANGE_END:
+            raise HTTPException(status_code=400, detail=(
+                f"public_port {port} is inside freeholdy's container port range "
+                f"{settings.PORT_RANGE_START}-{settings.PORT_RANGE_END - 1}"))
+        if port in (settings.PORT, 80, 443):
+            raise HTTPException(status_code=400, detail=f"public_port {port} is reserved")
+        sni_in_use = st["sni"] or any(o["sni"] for o in other_settings.values())
+        if port == sni_port and sni_in_use:
+            raise HTTPException(status_code=400, detail=(
+                f"public_port {port} is the shared SNI port — pick another one"))
+        for name, o in other_settings.items():
+            if o["public_port"] == port:
+                raise HTTPException(status_code=400, detail=(
+                    f"public_port {port} is already used by project '{name}'"))
+
+
 def provision_compose(
     db: Session,
     project: Project,
@@ -145,10 +189,12 @@ def provision_compose(
             container_port=svc["container_port"],
             container_name=f"freeholdy_{project_name}_{svc['name']}",
             websocket=svc["websocket"],
+            proxy=svc.get("proxy", "http"),
         )
         db.add(row)
         rows_by_name[svc["name"]] = row
-        endpoints.append({"subdomain": effective, "local_port": port, "websocket": svc["websocket"]})
+        endpoints.append({"subdomain": effective, "local_port": port, "websocket": svc["websocket"],
+                          "proxy": svc.get("proxy", "http"), "service": svc["name"]})
 
     db.flush()
 
@@ -158,6 +204,15 @@ def provision_compose(
     env_files = env_service.materialize(db, project)
     compose_path, _ = compose_service.write_files(project_name, compose_text, services, env_files)
     project.compose_path = compose_path
+
+    # TCP (nginx stream) endpoints: their public listener comes from nginx-stream.json,
+    # which must not collide with freeholdy's own ports or another project's.
+    if any(e["proxy"] == "tcp" for e in endpoints):
+        try:
+            validate_tcp_settings(db, project)
+        except HTTPException:
+            db.rollback()
+            raise
 
     # nginx + SSL for the exposed services.
     if endpoints:
@@ -230,6 +285,8 @@ def set_service_domain(
         "subdomain": s.effective_domain,
         "local_port": s.local_port,
         "websocket": bool(s.websocket),
+        "proxy": s.proxy or "http",
+        "service": s.name,
     } for s in project.services if s.exposed]
     ssl_result = nginx_service.setup_nginx(project_name, endpoints)
     for s in project.services:

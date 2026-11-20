@@ -12,11 +12,19 @@ server {
         root {{ webroot }};
     }
 
+{% if part.proxy == "tcp" %}
+    # TCP (nginx stream) endpoint: port 80 exists only for the ACME challenge.
+    location / {
+        return 404;
+    }
+{% else %}
     location / {
         return 301 https://$host$request_uri;
     }
+{% endif %}
 }
 
+{% if part.proxy != "tcp" %}
 server {
     listen 443 ssl;
     server_name {{ part.subdomain }};
@@ -45,5 +53,6 @@ server {
 {% endif %}
     }
 }
+{% endif %}
 
 {% endfor %}

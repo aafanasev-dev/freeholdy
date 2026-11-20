@@ -154,7 +154,7 @@ def _create_dockerfile_project(plugin: dict, project_name: str, db: Session) -> 
         db,
         project,
         container_port=plugin["container_port"],
-        domain_prefix=plugin["domain_prefix"],
+        domain_prefix=resolve_domain_prefix(plugin, project_name),
     )
 
     # Stage the plugin's Dockerfile into the build context + scan it for WebSockets.
@@ -172,6 +172,13 @@ def _create_dockerfile_project(plugin: dict, project_name: str, db: Session) -> 
     return project
 
 
+def resolve_domain_prefix(plugin: dict, project_name: str) -> Optional[str]:
+    """The plugin's domain_prefix with its `{project}` placeholder filled in, so a plugin
+    meant to run several times (e.g. postgresql) can serve at `{project}.{BASE_DOMAIN}`."""
+    dp = plugin.get("domain_prefix")
+    return dp.replace("{project}", project_name) if dp is not None else None
+
+
 def _build_install_env(plugin: dict, project_name: str, project_dir: str) -> dict:
     """Env for a compose plugin's install.sh (both phases get the same base; per-service
     ports are added after provisioning). Pure function of its inputs so an interactive
@@ -187,6 +194,14 @@ def _build_install_env(plugin: dict, project_name: str, project_dir: str) -> dic
         # The freeholdy API port; plugins that need a deterministic host port can
         # derive it from this (e.g. binding a service on FREEHOLDY_PORT+1).
         "FREEHOLDY_PORT": str(settings.PORT),
+        "DATA_DIR": os.path.abspath(settings.DATA_DIR),
+        # freeholdy's loopback container port range [START, END) — a plugin choosing a
+        # public port must stay out of it.
+        "PORT_RANGE_START": str(settings.PORT_RANGE_START),
+        "PORT_RANGE_END": str(settings.PORT_RANGE_END),
+        # nginx stream (raw TCP) support — present once setup_nginx_stream.sh has run.
+        "NGINX_STREAMS_DIR": settings.NGINX_STREAMS_DIR,
+        "STREAM_SNI_PORT": str(settings.STREAM_SNI_PORT),
     }
 
 
@@ -235,7 +250,8 @@ def _finish_compose_plugin(
     with open(os.path.join(project_dir, "docker-compose.yml")) as f:
         compose_text = f.read()
 
-    services = provision_compose(db, project, compose_text, domain_prefix=plugin.get("domain_prefix"))
+    services = provision_compose(db, project, compose_text,
+                                 domain_prefix=resolve_domain_prefix(plugin, project.name))
     db.refresh(project)
 
     # Add per-service local ports so install.sh post phase can reach the container's REST API.
@@ -450,7 +466,15 @@ async def install_session(websocket: WebSocket, plugin_name: str, project_name: 
                 "type": "stdout",
                 "data": "\n── install.sh done — provisioning nginx/SSL and starting compose ──\n",
             })
-            await run_in_threadpool(_finish_compose_from_ws, plugin, project_name)
+            try:
+                await run_in_threadpool(_finish_compose_from_ws, plugin, project_name)
+            except HTTPException as e:
+                # Provisioning refused (e.g. a TCP port collision) — the project is left
+                # pre-install, so a reconnect re-runs install.sh. Report, don't crash.
+                await websocket.send_json({"type": "stdout", "data": f"\nprovisioning failed: {e.detail}\n"})
+                await websocket.send_json({"type": "exit", "code": 1})
+                await websocket.close(code=1000)
+                return
         else:
             deploy_service.bluegreen_deploy(
                 finish_args["project_id"], install_script=None,

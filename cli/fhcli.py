@@ -529,6 +529,14 @@ def _fmt_size(n) -> str:
     return f"{size:.1f} TB"
 
 
+def _tcp_suffix(info: dict) -> str:
+    """" (tcp :5432/:15432)" for a raw TCP (nginx stream) endpoint, else ""."""
+    if not info or info.get("proxy") != "tcp":
+        return ""
+    ports = [str(p) for p in (info.get("sni_port"), info.get("public_port")) if p]
+    return f" (tcp {'/'.join(':' + p for p in ports)})" if ports else " (tcp)"
+
+
 def _ssl_icon(part: dict) -> str:
     """SSL cell for a container/service row. Unexposed ones (a headless worker, an
     internal compose service) have no endpoint, so "pending" would be misleading."""
@@ -614,7 +622,7 @@ def list_projects():
 
         for label, info in rows:
             ssl_icon = "[green]✓[/]" if info.get("ssl_enabled") else "[dim]✗[/]"
-            domain = info.get("subdomain") or "[dim]—[/]"
+            domain = (info.get("subdomain") or "[dim]—[/]") + _tcp_suffix(info)
             if info.get("custom_domain"):
                 domain += "  [magenta]· custom[/]"
             table.add_row(
@@ -742,7 +750,7 @@ def plugin_add(plugin: str, project: str, follow: bool):
         for part in entries:
             table.add_row(
                 part.get("name", "container"),
-                part.get("subdomain") or "—",
+                (part.get("subdomain") or "—") + _tcp_suffix(part),
                 str(part.get("local_port") or "—"),
                 _ssl_icon(part),
             )
@@ -1045,7 +1053,7 @@ def _print_provisioned(data: dict):
         rows = [(name, c)] if c else []
     for label, info in rows:
         ssl_icon = "[green]✓[/]" if info.get("ssl_enabled") else "[yellow]pending[/]"
-        table.add_row(label, info.get("subdomain") or "—",
+        table.add_row(label, (info.get("subdomain") or "—") + _tcp_suffix(info),
                       str(info.get("local_port") or "—"), ssl_icon)
     console.print(table)
 
@@ -1143,7 +1151,7 @@ def _print_git_summary(data: dict) -> None:
     is_compose = proj.get("deploy_mode") == "compose"
     entries = proj.get("services", []) if is_compose else ([proj.get("container")] if proj.get("container") else [])
     for part in entries:
-        table.add_row(part.get("name", "container"), part.get("subdomain") or "—",
+        table.add_row(part.get("name", "container"), (part.get("subdomain") or "—") + _tcp_suffix(part),
                       str(part.get("local_port") or "—"), _ssl_icon(part))
     console.print(table)
 

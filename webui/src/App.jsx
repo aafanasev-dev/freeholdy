@@ -1567,8 +1567,17 @@ const Cells = ({ label, info }) => (
     <td style={{ padding: "9px 12px", fontFamily: C.ff, fontSize: "13px", color: C.blue, minWidth: "90px" }}>{label}</td>
     <td style={{ padding: "9px 12px", fontFamily: C.ff, fontSize: "12px" }}>
       {info.subdomain
-        ? <a href={`https://${info.subdomain}`} target="_blank" rel="noreferrer" style={{ color: C.muted, textDecoration: "none" }}>{info.subdomain}</a>
+        ? (info.proxy === "tcp"
+            // A raw TCP endpoint (nginx stream, e.g. postgresql): no website to link to —
+            // show host:port for each way in (shared SNI port and/or its own public port).
+            ? <span style={{ color: C.muted }} title="TCP endpoint through nginx stream — connect with a database/TCP client, not a browser">
+                {[info.sni_port, info.public_port].filter(Boolean).map(p => `${info.subdomain}:${p}`).join("  ·  ") || info.subdomain}
+              </span>
+            : <a href={`https://${info.subdomain}`} target="_blank" rel="noreferrer" style={{ color: C.muted, textDecoration: "none" }}>{info.subdomain}</a>)
         : <span style={{ color: C.dim }}>—</span>}
+      {info.proxy === "tcp" && (
+        <span style={{ color: C.blue, background: C.blueFill, border: `1px solid ${C.blueBd}`, fontSize: "10px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "7px", marginLeft: "7px" }} title={info.sni_port ? `port ${info.sni_port}: TLS by hostname (SNI) — libpq 17+ with sslnegotiation=direct` : "raw TCP through nginx stream"}>tcp</span>
+      )}
       {info.custom_domain && (
         <span style={{ color: C.blue, background: C.blueFill, border: `1px solid ${C.blueBd}`, fontSize: "10px", letterSpacing: "0.08em", padding: "1px 5px", borderRadius: "7px", marginLeft: "7px" }}>custom</span>
       )}

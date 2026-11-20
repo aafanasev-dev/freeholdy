@@ -38,6 +38,9 @@
 #      drag-and-drop writes through PUT /projects/order. Nothing to backfill: the column's
 #      DEFAULT 0 leaves every existing project tied, and the list endpoint breaks ties on
 #      name — i.e. exactly the alphabetical listing that predated the feature.
+#   9. TCP (nginx stream) endpoints — adds compose_services.proxy ('http' | 'tcp'), set from a
+#      service's `freeholdy.proxy: tcp` label. Nothing to backfill: DEFAULT 'http' is exactly
+#      how every pre-existing service is proxied.
 #
 # Usage:
 #   ./migrate_db.sh [path/to/freeholdy.db]
@@ -129,6 +132,17 @@ if [ -n "$has_display_order" ]; then
     order_done=1
 fi
 
+# compose_services.proxy — when the table is rebuilt below (compose_done unset) the rebuilt
+# table lacks it too, so the ADD COLUMN must run after that rebuild.
+has_svc_proxy=""
+if [ -n "$has_compose_services" ]; then
+    has_svc_proxy="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('compose_services') WHERE name='proxy';")"
+fi
+proxy_done=""
+if [ -z "$has_compose_services" ] || [ -n "$has_svc_proxy" ]; then
+    proxy_done=1
+fi
+
 versions_notnull=""
 if [ -n "$has_versions" ]; then
     versions_notnull="$(sqlite3 "$DB" "SELECT 1 FROM pragma_table_info('project_versions') WHERE name='image_name' AND \"notnull\"=1;")"
@@ -136,7 +150,7 @@ fi
 
 if [ -n "$bluegreen_done" ] && [ -n "$compose_done" ] && [ -z "$versions_notnull" ] \
    && [ -n "$has_env_files" ] && [ -n "$roles_done" ] && [ -n "$git_origin_done" ] \
-   && [ -n "$backups_done" ] && [ -n "$order_done" ]; then
+   && [ -n "$backups_done" ] && [ -n "$order_done" ] && [ -n "$proxy_done" ]; then
     echo "Database '$DB' is already up to date — nothing to migrate."
     exit 0
 fi
@@ -215,6 +229,11 @@ if [ -z "$compose_done" ]; then
       FROM compose_services;
     DROP TABLE compose_services;
     ALTER TABLE compose_services_new RENAME TO compose_services;"
+fi
+
+if [ -z "$proxy_done" ]; then
+    echo "  + compose_services.proxy"
+    SQL="$SQL ALTER TABLE compose_services ADD COLUMN proxy VARCHAR NOT NULL DEFAULT 'http';"
 fi
 
 # project_versions: drop the NOT NULL on image_name/container_name (compose versions leave

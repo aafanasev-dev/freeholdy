@@ -529,6 +529,21 @@ else
     warn "migrate_db.sh not found in ${APP_DIR} — skipping schema migration."
 fi
 
+# ── 10b. nginx stream support (idempotent; TCP plugins such as postgresql) ──────
+CURRENT_STEP="enabling nginx stream support"
+section "nginx stream support"
+if [[ -f "${APP_DIR}/scripts/setup_nginx_stream.sh" ]]; then
+    STREAM_FLAGS=( -g nginx-managers )
+    [[ "${ASSUME_YES:-0}" -eq 1 ]] && STREAM_FLAGS+=( -y )
+    # Non-fatal: everything except TCP plugins works without it.
+    if bash "${APP_DIR}/scripts/setup_nginx_stream.sh" "${STREAM_FLAGS[@]}"; then
+        ok "nginx stream support ready"
+    else
+        warn "nginx stream support not enabled — TCP plugins (postgresql) unavailable."
+        warn "Re-run later: sudo bash ${APP_DIR}/scripts/setup_nginx_stream.sh"
+    fi
+fi
+
 # ── 11. Start the service ───────────────────────────────────────────────────────
 CURRENT_STEP="starting the service"
 section "Starting ${SERVICE_NAME}"

@@ -92,6 +92,10 @@ class ComposeService(Base):
     container_name = Column(String, nullable=False)   # freeholdy_{project}_{service}
     ssl_enabled = Column(Boolean, default=False)
     websocket = Column(Boolean, default=False)        # detected from this service's compose block
+    # "http" (nginx vhost) | "tcp" (nginx stream — label `freeholdy.proxy: tcp`; port 80
+    # serves only the ACME challenge, the per-install SNI/port settings live in the
+    # project dir's nginx-stream.json).
+    proxy = Column(String, nullable=False, default="http")
 
     project = relationship("Project", back_populates="services")
 

@@ -7,8 +7,10 @@ A compose project is described by a single user-supplied `docker-compose.yml`.
 freeholdy discovers its services, exposes every service that publishes a TCP
 port at `{service}.{project}.{base_domain}`, and pins container names +
 loopback-only port bindings via a generated `docker-compose.override.yml`.
-UDP-only services are never exposed (nginx is HTTP-only and can't proxy UDP);
-their original host bindings pass through the compose merge untouched.
+UDP-only services are never exposed (nginx can't proxy UDP here); their original
+host bindings pass through the compose merge untouched. An exposed service is proxied
+as HTTP by default; the label `freeholdy.proxy: tcp` makes it a raw TCP endpoint served
+through nginx's `stream` module instead (see nginx_service, e.g. the postgresql plugin).
 Functions here are pure (parsing) or filesystem-only (file writing);
 orchestration lives in the compose router.
 """
@@ -52,10 +54,29 @@ def _extract_container_port(entry) -> int | None:
         return None
 
 
+PROXY_LABEL = "freeholdy.proxy"
+
+
+def _proxy_kind(spec: dict) -> str:
+    """"tcp" when the service carries the label `freeholdy.proxy: tcp` (mapping or
+    `["freeholdy.proxy=tcp"]` list form), else "http"."""
+    labels = spec.get("labels") or {}
+    value = None
+    if isinstance(labels, dict):
+        value = labels.get(PROXY_LABEL)
+    elif isinstance(labels, list):
+        for item in labels:
+            key, _, val = str(item).partition("=")
+            if key.strip() == PROXY_LABEL:
+                value = val
+    return "tcp" if str(value or "").strip().lower() == "tcp" else "http"
+
+
 def parse_services(compose_text: str) -> list[dict]:
     """Parse a compose file into a list of service descriptors.
 
-    Each descriptor is `{name, exposed: bool, container_port: int | None}`.
+    Each descriptor is `{name, exposed: bool, container_port: int | None, websocket,
+    proxy: "http" | "tcp"}`.
     A service is *exposed* (gets an nginx endpoint) iff it declares at least
     one TCP `ports:` entry. UDP-only services are not exposed — no loopback
     rebind, no nginx vhost, no subdomain — and keep their original bindings.
@@ -89,6 +110,7 @@ def parse_services(compose_text: str) -> list[dict]:
             "exposed": container_port is not None,
             "container_port": container_port,
             "websocket": scan.uses_websocket(block),
+            "proxy": _proxy_kind(spec),
         })
 
     if not services:

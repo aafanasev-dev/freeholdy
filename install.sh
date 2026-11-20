@@ -385,6 +385,7 @@ else
     echo -e "    • install only supporting packages (git, certbot, python, …)"
     echo -e "    • reuse or create the service user '${SERVICE_USER}'"
     echo -e "    • add an nginx vhost for api.<domain> (reverting on any test failure)"
+    echo -e "    • add a stream {} include for TCP plugins (asks before installing the module)"
     echo -e "    • set group-write + sticky bit on nginx sites dirs (non-recursive)"
     echo -e "    • add a systemd unit + a nightly cert-renewal cron line"
 fi
@@ -981,6 +982,28 @@ if apply_and_reload_or_revert; then
 else
     fail "Could not enable ${API_DOMAIN} without breaking nginx — left existing config intact."
     exit 1
+fi
+fi
+
+# ── 10b. nginx stream (raw TCP) support — for plugins like postgresql ───────────
+# Non-fatal: freeholdy runs fine without it; only TCP plugins need it. On a FRESH box
+# the stream module package may be apt-installed (-i); in COEXIST mode the script asks
+# first, because that is an apt change next to someone else's nginx.
+section "nginx stream support"
+if step_is_done nginx_stream; then
+    ok "nginx_stream already complete — skipping"
+    step_mark_skipped nginx_stream
+else
+step_mark_started nginx_stream
+STREAM_FLAGS=( -g "$NGINX_GROUP" )
+[[ "$MODE" == "fresh" ]] && STREAM_FLAGS+=( -i )
+[[ "${ASSUME_YES:-0}" -eq 1 && "$MODE" == "fresh" ]] && STREAM_FLAGS+=( -y )
+if bash "${APP_DIR}/scripts/setup_nginx_stream.sh" "${STREAM_FLAGS[@]}"; then
+    step_mark_done nginx_stream
+else
+    warn "nginx stream support not enabled — TCP plugins (postgresql) will be unavailable."
+    warn "Fix and re-run later: sudo bash ${APP_DIR}/scripts/setup_nginx_stream.sh"
+    step_mark_done nginx_stream "skipped"
 fi
 fi
 

@@ -175,6 +175,9 @@ class ServiceInfo(BaseModel):
     websocket: bool = False
     container_status: str = "not_found"
     env_count: int = 0                     # variables in this service's own .env file
+    proxy: str = "http"                    # "http" (nginx vhost) | "tcp" (nginx stream: label freeholdy.proxy=tcp)
+    sni_port: Optional[int] = None         # tcp only: shared TLS/SNI port reaching `subdomain` (null until its cert exists)
+    public_port: Optional[int] = None      # tcp only: dedicated public passthrough port, if configured
 
 
 class VolumeInfo(BaseModel):
