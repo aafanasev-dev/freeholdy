@@ -109,6 +109,9 @@ if [[ "$PHASE" == "pre" ]]; then
 
     # ── Data folder: detect a cluster left by an earlier install with this name ──
     PG_DATA_DIR="${DATA_DIR}/postgresql/${PROJECT_NAME}"
+    # ctl.sh's credential JSONs (/home/projects in the container). A sibling tree rather
+    # than postgresql/{project}-projects, which a project named "{project}-projects" owns.
+    PG_PROJECTS_DIR="${DATA_DIR}/postgresql-projects/${PROJECT_NAME}"
     KEEP_CLUSTER=0
     # The postgres entrypoint chowns the folder to its own uid on first start, so a
     # folder not owned by us is an initialised cluster.
@@ -125,6 +128,11 @@ if [[ "$PHASE" == "pre" ]]; then
                     if [[ "$CONFIRM" == "$PROJECT_NAME" ]]; then
                         docker run --rm -v "${PG_DATA_DIR}:/d" alpine \
                             sh -c 'find /d -mindepth 1 -delete && chown '"$(id -u):$(id -g)"' /d'
+                        # ctl.sh's credential files belong to the wiped cluster too.
+                        if [[ -d "$PG_PROJECTS_DIR" ]]; then
+                            docker run --rm -v "${PG_PROJECTS_DIR}:/d" alpine \
+                                sh -c 'find /d -mindepth 1 -delete'
+                        fi
                         echo "Wiped."
                         break
                     fi
@@ -135,7 +143,7 @@ if [[ "$PHASE" == "pre" ]]; then
         done
         echo ""
     fi
-    mkdir -p "$PG_DATA_DIR"
+    mkdir -p "$PG_DATA_DIR" "$PG_PROJECTS_DIR"
 
     # ── Database / user / password ──
     DEFAULT_IDENT="${PROJECT_NAME//-/_}"
@@ -238,6 +246,10 @@ if [[ "$PHASE" == "pre" ]]; then
     _env_set PG_DATA_DIR "$PG_DATA_DIR"
     _env_set PG_MODE "$MODE"
     _env_set PG_PUBLIC_PORT "$PUBLIC_PORT"
+    _env_set PG_PROJECTS_DIR "$PG_PROJECTS_DIR"
+    _env_set PG_HOST "$HOST"
+    PG_SNI_PORT=""; [[ "$MODE" == "sni" || "$MODE" == "both" ]] && PG_SNI_PORT="$SNI_PORT"
+    _env_set PG_SNI_PORT "$PG_SNI_PORT"
     chmod 600 "$ENV_FILE"
 
     SNI_JSON=false; [[ "$MODE" == "sni" || "$MODE" == "both" ]] && SNI_JSON=true
@@ -248,6 +260,7 @@ if [[ "$PHASE" == "pre" ]]; then
     [[ "$SNI_JSON" == true ]] && echo "  SNI : ${HOST}:${SNI_PORT}"
     [[ -n "$PUBLIC_PORT" ]]  && echo "  Port: ${HOST}:${PUBLIC_PORT}"
     echo "Data folder: ${PG_DATA_DIR}"
+    echo "App databases: docker exec -it freeholdy_${PROJECT_NAME}_db /home/ctl.sh add myapp"
     echo "Connection strings will be saved to ${CREDS_FILE}."
     exit 0
 fi
@@ -320,4 +333,7 @@ FW_PORTS=()
 [[ -n "$PUBLIC_PORT" ]] && FW_PORTS+=( "$PUBLIC_PORT" )
 echo "Open TCP port(s) ${FW_PORTS[*]} in your firewall (cloud firewall and ufw, if any)."
 echo "Data lives in ${PG_DATA_DIR} and is KEPT when the project is deleted."
+echo ""
+echo "One database + user per app (credentials land in /home/projects/<name>.json):"
+echo "  docker exec -it ${DB_CONTAINER} /home/ctl.sh add myapp      # also: list, remove myapp"
 exit 0

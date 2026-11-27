@@ -28,6 +28,23 @@ The exact connection strings are saved to `postgresql-credentials` (mode 600) in
 
 **Server prerequisite:** nginx's stream module must be wired in. `install.sh` and `update.sh` do this automatically. If it was skipped, run `sudo bash scripts/setup_nginx_stream.sh` from the freeholdy directory. You need nginx 1.21.4 or newer.
 
+## Databases for your apps (`ctl.sh`)
+
+One server can hold the databases of many apps. Each install has a small manager script at `/home/ctl.sh` in the container. Open a shell on the `db` service (the **exec** action in the web UI), or run it from the server:
+
+```bash
+docker exec -it freeholdy_<project>_db /home/ctl.sh add shop      # new database + user "shop"
+docker exec -it freeholdy_<project>_db /home/ctl.sh list          # users and their databases
+docker exec -it freeholdy_<project>_db /home/ctl.sh remove shop   # drop them again
+```
+
+- **`add NAME`** creates a database and a login user, both named `NAME` (`-` becomes `_`), with a random password. The user owns its database and **can connect to it only**: `add` removes the default "everyone may connect" right from every database on the server, so an app's credentials never open another app's data.
+- The credentials are saved to **`/home/projects/NAME.json`** (mode 600): `database`, `user`, `password`, `host`, the ports, and ready-to-use `sni_url` / `port_url` (for whichever connection modes this install uses), plus an `internal_url` for use inside the container. Read it with `docker exec freeholdy_<project>_db cat /home/projects/NAME.json`.
+- **`remove NAME`** drops the database (closing its open connections), the user and the JSON file. **The data is gone for good**, so take a `pg_dump` first if you might need it.
+- **`list`** shows every login user (except the server's own admin user), the databases it owns, and whether a credentials file exists.
+
+`/home/projects` is a host folder, **`<freeholdy data dir>/postgresql-projects/<project>`**, so the files survive restarts and redeploys. Like the data folder, it is kept when the project is deleted, and it is kept or wiped together with the data folder when you add the plugin again. Users you created by hand with SQL lose the default right to connect to *other* databases the first time `add` runs. Grant them back with `GRANT CONNECT ON DATABASE … TO …` if they need it.
+
 ## Data
 
 The cluster lives on the host in **`<freeholdy data dir>/postgresql/<project>`**, which is mounted into the container as the docker volume `<project>_data`. The volume list, download/upload and backups in freeholdy all work on it.

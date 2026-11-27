@@ -22,8 +22,14 @@
 # entrypoint copies ./tls into /run/pgtls as root with the right owner/mode, then hands
 # off to the stock entrypoint. ($$ escapes compose interpolation.)
 #
+# App databases: ./ctl.sh is installed as /home/ctl.sh (exec bit set by the entrypoint,
+# whatever mode staging left it with). `ctl.sh add NAME` creates a database + a user that can
+# connect to it only, and saves credentials to /home/projects/NAME.json. /home/projects is the
+# named volume `projects`, a bind of ${PG_PROJECTS_DIR} = {DATA_DIR}/postgresql-projects/{project},
+# so the files survive the container being recreated. FH_PG_* tell it the public address.
+#
 # Variables (written to .env by install.sh's pre phase): PG_DB, PG_USER, PG_PASSWORD,
-# PG_DATA_DIR. POSTGRES_* only matter on the FIRST start with an empty data folder —
+# PG_DATA_DIR, PG_PROJECTS_DIR, PG_HOST, PG_SNI_PORT, PG_PUBLIC_PORT. POSTGRES_* only matter on the FIRST start with an empty data folder —
 # afterwards the cluster keeps the user/password it was initialised with.
 
 services:
@@ -37,9 +43,14 @@ services:
       - POSTGRES_DB=${PG_DB}
       - POSTGRES_USER=${PG_USER}
       - POSTGRES_PASSWORD=${PG_PASSWORD}
+      - FH_PG_HOST=${PG_HOST:-}
+      - FH_PG_SNI_PORT=${PG_SNI_PORT:-}
+      - FH_PG_PUBLIC_PORT=${PG_PUBLIC_PORT:-}
     volumes:
       - data:/var/lib/postgresql/data
+      - projects:/home/projects
       - ./tls:/tls-src:ro
+      - ./ctl.sh:/ctl-src/ctl.sh:ro
     entrypoint:
       - bash
       - -c
@@ -47,6 +58,8 @@ services:
         install -d -o postgres -g postgres -m 700 /run/pgtls &&
         install -o postgres -g postgres -m 600 /tls-src/server.key /run/pgtls/server.key &&
         install -o postgres -g postgres -m 644 /tls-src/server.crt /run/pgtls/server.crt &&
+        install -m 755 /ctl-src/ctl.sh /home/ctl.sh &&
+        chmod 700 /home/projects &&
         exec docker-entrypoint.sh "$$@"
       - --
     command:
@@ -71,3 +84,9 @@ volumes:
       type: none
       o: bind
       device: ${PG_DATA_DIR}
+  projects:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PG_PROJECTS_DIR}
