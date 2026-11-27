@@ -43,6 +43,7 @@ sudo ln -s "$(pwd)/cli/fhcli.py" /usr/local/bin/fhcli   # from the repo root
 | `fhcli plugins` | List available plugins in the catalog (incl. system plugins) |
 | `fhcli plugin-add PLUGIN PROJECT` | Create a project from a plugin, then build + run it |
 | `fhcli deploy NAME SOURCE [--branch B] [--dest DIR] [--env FILE] [--no-follow]` | **Deploy a project** — auto-creates it if new, redeploys if it exists. `SOURCE` is a local file/folder (zipped + streamed in 1 MiB chunks) **or** a git clone URL (cloned server-side). Either way the server auto-detects Dockerfile/compose, provisions nginx + SSL, then builds + runs it (deploy log streams live). `--branch` is git-only; `--dest` is local-upload-only; `--env FILE` stores variables **before the first container start**. |
+| `fhcli deploy NAME (ARCHIVE \| --image REF) (--port N \| --headless) [--websocket/--no-websocket] [--env FILE]` | **Deploy a prebuilt image** — `ARCHIVE` is `docker save` output (`.tar`/`.tar.gz`, auto-detected), `--image REF` saves a local image for you. Nothing is built: the server loads it as a new blue/green version. You choose the port nginx proxies to (`--port`), or `--headless` for no URL; without either, the image's exposed ports are listed and nothing is deployed. |
 | `fhcli redeploy PROJECT [--no-follow]` | **Rebuild from the project's own git origin** — re-clones the URL and branch recorded at its last git deploy, no arguments. Git-backed projects only; this is the deploy a guest token gets |
 | `fhcli stop PROJECT` | Stop the container |
 | `fhcli restart PROJECT [--no-follow]` | Recreate the container(s) from the images they already run — no rebuild. How edited environment variables take effect |
@@ -105,6 +106,25 @@ fhcli stop myapp
 # Retry SSL if it failed during the deploy
 fhcli ssl myapp
 ```
+
+## Prebuilt image example
+
+When the image is built elsewhere (CI, your laptop), ship the image instead of the source.
+It becomes an ordinary single-container project — versions, rollback, restart, env, volumes
+and backups all work the same — but nothing is built on the server. An image has no
+Dockerfile to read the port from, so **you pick it**:
+
+```bash
+fhcli deploy myapp ./myapp.tar                    # lists the ports the image EXPOSEs, deploys nothing
+fhcli deploy myapp ./myapp.tar --port 8000        # serve container port 8000 at myapp.{base_domain}
+fhcli deploy myapp --image myapp:latest --port 8000   # runs `docker save` locally, then the same
+fhcli deploy mybot --image mybot:latest --headless    # a worker with no URL
+```
+
+Build it for the server's CPU (`docker build --platform linux/amd64 …`); an image for another
+architecture is rejected before anything is deployed. WebSocket headers are guessed from the
+image's history and labels; override with `--websocket` / `--no-websocket`. The image's own
+tags (`myapp:latest`) are **not** left on the server — only `freeholdy_myapp:vN` is.
 
 ## Compose workflow example
 

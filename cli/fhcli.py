@@ -57,6 +57,9 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import shutil
+import subprocess
+import tarfile
 import uuid
 import zipfile
 from pathlib import Path
@@ -196,9 +199,10 @@ def _get(path: str) -> dict:
         sys.exit(1)
 
 
-def _post(path: str, json: dict | None = None, files: dict | list | None = None) -> dict:
+def _post(path: str, json: dict | None = None, files: dict | list | None = None,
+          timeout: int = 30) -> dict:
     try:
-        kwargs: dict = {"headers": _headers(), "timeout": 30}
+        kwargs: dict = {"headers": _headers(), "timeout": timeout}
         if files:
             kwargs["files"] = files
         else:
@@ -1077,6 +1081,35 @@ def _collect_files(path: str, dest: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def _send_chunks(project: str, upload_id: str, path: str) -> int:
+    """Stream a local file to `upload/chunk` in CHUNK_SIZE pieces with a progress bar.
+    Returns the total byte count (the `total_size` the completion call checks)."""
+    total = os.path.getsize(path)
+    with Progress(
+        TextColumn("[cyan]{task.description}[/]"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("sending", total=total)
+        with open(path, "rb") as fh:
+            offset = 0
+            while True:
+                chunk = fh.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                _post_raw(
+                    f"/projects/{project}/upload/chunk",
+                    data=chunk,
+                    params={"upload_id": upload_id, "offset": offset},
+                )
+                offset += len(chunk)
+                progress.update(task, advance=len(chunk))
+    return total
+
+
 def _chunked_upload(project: str, file_pairs: list[tuple[str, str]],
                     env: str | None = None) -> dict:
     """Zip the files, send the archive in CHUNK_SIZE pieces with a progress bar, and ask
@@ -1095,29 +1128,7 @@ def _chunked_upload(project: str, file_pairs: list[tuple[str, str]],
             for local, rel in file_pairs:
                 zf.write(local, arcname=rel)
 
-        total = os.path.getsize(tmp.name)
-        with Progress(
-            TextColumn("[cyan]{task.description}[/]"),
-            BarColumn(),
-            DownloadColumn(),
-            TransferSpeedColumn(),
-            TimeRemainingColumn(),
-            console=console,
-        ) as progress:
-            task = progress.add_task("sending", total=total)
-            with open(tmp.name, "rb") as fh:
-                offset = 0
-                while True:
-                    chunk = fh.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    _post_raw(
-                        f"/projects/{project}/upload/chunk",
-                        data=chunk,
-                        params={"upload_id": upload_id, "offset": offset},
-                    )
-                    offset += len(chunk)
-                    progress.update(task, advance=len(chunk))
+        total = _send_chunks(project, upload_id, tmp.name)
 
         with console.status("Reassembling + provisioning (certbot may run if a manifest is detected)…"):
             body = {"upload_id": upload_id, "total_size": total}
@@ -1218,9 +1229,112 @@ def _deploy_path(project: str, path: str, dest: str, follow: bool,
     console.print("\n[green]✓[/] Project deployed and running")
 
 
+def _is_image_archive(path: str) -> bool:
+    """True for a `docker save` archive (plain or compressed tar holding manifest.json or
+    an OCI index.json) — such a file deploys as an image instead of being zipped up."""
+    if not os.path.isfile(path):
+        return False
+    try:
+        with tarfile.open(path, "r:*") as tf:
+            for member in tf:
+                if member.name.lstrip("./") in ("manifest.json", "index.json", "oci-layout"):
+                    return True
+    except (tarfile.TarError, OSError, EOFError):
+        return False
+    return False
+
+
+def _docker_save(ref: str) -> str:
+    """`docker save REF` into a temp file on this machine; returns its path."""
+    if not shutil.which("docker"):
+        console.print("[bold red]Error:[/] --image needs the docker CLI on this machine "
+                      "(or pass an archive made with `docker save`).")
+        sys.exit(1)
+    tmp = tempfile.NamedTemporaryFile(prefix="fhcli-image-", suffix=".tar", delete=False)
+    tmp.close()
+    with console.status(f"docker save {ref}…"):
+        res = subprocess.run(["docker", "save", "-o", tmp.name, ref], capture_output=True, text=True)
+    if res.returncode != 0:
+        os.unlink(tmp.name)
+        console.print(f"[bold red]docker save failed:[/] {res.stderr.strip() or res.stdout.strip()}")
+        sys.exit(1)
+    return tmp.name
+
+
+def _deploy_image(project: str, archive: str, port: int | None, headless: bool,
+                  websocket: bool | None, follow: bool, env: str | None, source_label: str) -> None:
+    """Deploy a `docker save` archive: chunk-upload it raw, let the server inspect it, check
+    the port choice against what the image EXPOSEs, then complete (load + tag + run) and
+    stream the deploy log."""
+    upload_id = uuid.uuid4().hex
+    size_mb = os.path.getsize(archive) / (1024 * 1024)
+    console.print(f"Uploading image archive [cyan]{source_label}[/] ({size_mb:.1f} MiB) → [cyan]{project}[/]…")
+    total = _send_chunks(project, upload_id, archive)
+
+    def discard() -> None:
+        try:
+            requests.delete(_url(f"/projects/{project}/upload/{upload_id}"), headers=_headers(), timeout=30)
+        except requests.exceptions.RequestException:
+            pass
+
+    try:
+        with console.status("Inspecting image…"):
+            info = _post(f"/projects/{project}/upload/inspect-image",
+                         json={"upload_id": upload_id, "total_size": total}, timeout=600)
+    except SystemExit:
+        discard()
+        raise
+
+    ports = info.get("ports") or []
+    tags = ", ".join(info.get("repo_tags") or []) or "untagged"
+    console.print(f"  image  [bold]{tags}[/]  [dim]{info.get('os') or '?'}/{info.get('architecture') or '?'}[/]")
+    console.print(f"  exposes  {', '.join(f'{p}/tcp' for p in ports) or '[dim]no TCP port[/]'}"
+                  + (f"  [dim](udp {', '.join(map(str, info['udp_ports']))} — not proxied)[/]"
+                     if info.get("udp_ports") else ""))
+    if info.get("websocket"):
+        console.print("  [dim]looks like it uses WebSocket[/]")
+
+    if port is None and not headless:
+        discard()
+        console.print("\n[bold red]Choose how to serve it:[/] pass the container port nginx should proxy to, "
+                      "or --headless for a background worker with no URL.")
+        hint = f"--port {ports[0]}" if ports else "--port PORT"
+        console.print(f"  e.g. [bold]fhcli deploy {project} {source_label} {hint}[/]   or   [bold]--headless[/]")
+        sys.exit(1)
+    if port is not None and ports and port not in ports:
+        console.print(f"[yellow]⚠[/] the image does not EXPOSE {port} (it exposes {', '.join(map(str, ports))}) "
+                      "— deploying anyway")
+
+    body: dict = {"upload_id": upload_id, "total_size": total, "kind": "image",
+                  "container_port": port, "headless": headless}
+    if websocket is not None:
+        body["websocket"] = websocket
+    if env:
+        body["env"] = env
+    try:
+        with console.status("Provisioning (certbot may run)…"):
+            data = _post(f"/projects/{project}/upload/complete", json=body, timeout=600)
+    except SystemExit:
+        discard()
+        raise
+    console.print(f"[green]✓[/] {data.get('message', 'deploying')}")
+    _print_provisioned(data)
+
+    ws_path = data.get("ws_path")
+    if not follow or not ws_path:
+        console.print(f"\n[green]✓[/] Deploy started. Check progress with: [bold]fhcli status {project}[/]")
+        return
+    console.print("\n[dim]─── deploy output (load → run) ───[/]")
+    code = asyncio.run(_install_ws(ws_path))
+    if code != 0:
+        console.print(f"\n[red]✗ deploy failed (exit {code})[/] — the previous version keeps running")
+        sys.exit(1)
+    console.print("\n[green]✓[/] Project deployed and running")
+
+
 @cli.command("deploy")
 @click.argument("name")
-@click.argument("source", metavar="LOCAL_PATH_OR_GIT_URL")
+@click.argument("source", metavar="LOCAL_PATH_OR_GIT_URL", required=False)
 @click.option("--branch", "-b", default=None,
               help="Git only: branch/ref to clone (default: the repo's default branch).")
 @click.option("--dest", "-d", default="", metavar="REMOTE_DIR",
@@ -1234,8 +1348,17 @@ def _deploy_path(project: str, path: str, dest: str, follow: bool,
 @click.option("--env", "env_file", type=click.Path(), default=None, metavar="FILE",
               help="dotenv file to store before the first container start "
                    "(\"-\" reads stdin). Compose: shared by every service.")
-def deploy(name: str, source: str, branch: str | None, dest: str, follow: bool,
-           env_file: str | None):
+@click.option("--image", "image_ref", default=None, metavar="REF",
+              help="Deploy a local docker image (runs `docker save REF` here) instead of SOURCE.")
+@click.option("--port", "port", type=click.IntRange(1, 65535), default=None,
+              help="Image only: the container port nginx proxies to.")
+@click.option("--headless", is_flag=True, default=False,
+              help="Image only: no port, no URL — a background worker.")
+@click.option("--websocket/--no-websocket", default=None,
+              help="Image only: nginx WebSocket upgrade headers (default: guessed from the image).")
+def deploy(name: str, source: str | None, branch: str | None, dest: str, follow: bool,
+           env_file: str | None, image_ref: str | None, port: int | None, headless: bool,
+           websocket: bool | None):
     """Deploy a project from a local file/folder or a git repo. Creates it if new, redeploys
     if it already exists (a fresh blue/green version).
 
@@ -1254,6 +1377,11 @@ def deploy(name: str, source: str, branch: str | None, dest: str, follow: bool,
     With --env, the file's variables are stored *before* the project is provisioned, so the
     very first container this deploy starts already has them — no restart needed.
 
+    SOURCE may also be a docker image archive (`docker save` output, .tar or .tar.gz), or
+    use --image REF to save and send a local image. Nothing is built: the server loads the
+    image as a new blue/green version. An image carries no Dockerfile to scan, so you pick
+    the port with --port (the exposed ports are listed if you don't) or --headless.
+
     \b
     Examples:
       fhcli deploy myapp ./myapp                              # a project folder
@@ -1262,9 +1390,36 @@ def deploy(name: str, source: str, branch: str | None, dest: str, follow: bool,
       fhcli deploy myapp https://github.com/owner/repo.git    # from a git repo
       fhcli deploy myapp git@github.com:owner/repo.git -b dev # a private repo + branch
       fhcli deploy myapp ./myapp --env prod.env               # env set before first start
+      fhcli deploy myapp ./myapp.tar --port 8000              # a `docker save` archive
+      fhcli deploy myapp --image myapp:latest --port 8000     # a local image
+      fhcli deploy mybot --image mybot:latest --headless      # an image with no URL
     """
     _validate_project_name(name)
     env = _read_env_file(env_file) if env_file else None
+
+    if image_ref:
+        if source:
+            console.print("[bold red]Error:[/] pass either SOURCE or --image, not both.")
+            sys.exit(1)
+    elif not source:
+        console.print("[bold red]Error:[/] missing SOURCE (a local path, a git URL) or --image REF.")
+        sys.exit(1)
+    if headless and port is not None:
+        console.print("[bold red]Error:[/] --port and --headless are mutually exclusive.")
+        sys.exit(1)
+
+    if image_ref or _is_image_archive(source):
+        archive = _docker_save(image_ref) if image_ref else source
+        try:
+            _deploy_image(name, archive, port, headless, websocket, follow, env,
+                          image_ref or source)
+        finally:
+            if image_ref and os.path.exists(archive):
+                os.unlink(archive)
+        return
+    if port is not None or headless or websocket is not None:
+        console.print("[bold red]Error:[/] --port/--headless/--websocket apply only to image deploys.")
+        sys.exit(1)
 
     if _looks_like_git_url(source):
         _deploy_git(name, source, branch, follow, env)
