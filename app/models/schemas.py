@@ -1,5 +1,5 @@
 from pydantic import BaseModel, field_validator, model_validator
-from typing import Optional, List
+from typing import Literal, Optional, List
 from datetime import datetime
 from enum import Enum
 
@@ -235,11 +235,48 @@ class UploadCompleteRequest(BaseModel):
     # Optional dotenv text stored before provisioning, so the FIRST container start already
     # has it. Omitted/blank leaves any stored env untouched.
     env: Optional[str] = None
+    # "files" (default): the staged data is a zip of a project tree. "image": it is a
+    # `docker save` archive — deployed by `docker load` + tag instead of `docker build`.
+    kind: Literal["files", "image"] = "files"
+    # Image only, and one of the two is required: the container port nginx proxies to (the
+    # user picks it — see POST .../upload/inspect-image), or headless (no port, no nginx).
+    container_port: Optional[int] = None
+    headless: bool = False
+    # Image only: WebSocket upgrade headers in nginx. None → the archive's scanned hint.
+    websocket: Optional[bool] = None
 
     @field_validator("env")
     @classmethod
     def env_must_parse(cls, v: Optional[str]) -> Optional[str]:
         return v if v is None else validate_env_content(v)
+
+    @model_validator(mode="after")
+    def image_needs_port_choice(self):
+        if self.kind == "image":
+            if self.headless and self.container_port is not None:
+                raise ValueError("Pass either container_port or headless, not both")
+            if not self.headless and self.container_port is None:
+                raise ValueError("An image deploy needs container_port (or headless: true)")
+            if self.container_port is not None and not 1 <= self.container_port <= 65535:
+                raise ValueError("container_port must be 1..65535")
+        return self
+
+
+class ImageInspectRequest(BaseModel):
+    """Body of POST /projects/{name}/upload/inspect-image."""
+    upload_id: str
+    total_size: Optional[int] = None
+
+
+class ImageInspectResponse(BaseModel):
+    """What a staged image archive declares — the facts a Dockerfile scan gives a
+    dockerfile project, for the client to confirm (port choice, WebSocket)."""
+    ports: List[int] = []          # TCP ports the image EXPOSEs (incl. base images), sorted
+    udp_ports: List[int] = []      # UDP EXPOSEs — informational, nginx cannot proxy them
+    websocket: bool = False        # hint scanned from history/labels/env/cmd
+    architecture: Optional[str] = None
+    os: Optional[str] = None
+    repo_tags: List[str] = []
 
 
 class UploadResponse(BaseModel):

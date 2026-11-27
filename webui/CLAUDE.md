@@ -186,6 +186,14 @@ The UI assumes these endpoints and is the place this contract is exercised from 
   zip → chunk → complete round-trip; both `UploadModal` (per-card redeploy) and `DeployForm` (new
   project) call it. A provisioned response is handed to `handleInstalled` → `InstallPane` to stream the
   deploy log live (a no-manifest sync has no `ws_path` and just shows its result). Re-upload to redeploy.
+- **Image archive deploy:** the "image archive" tab of both `DeployForm` and `UploadModal` renders
+  `ImageDeploy`, which owns its own buttons (the parent hides its deploy button in that mode). Step 1
+  streams the single file with `chunkedSend` (`file.slice()` pieces — never the whole image in
+  memory, unlike `chunkedDeploy`) and calls `POST /projects/{name}/upload/inspect-image`; step 2 is a
+  port picker (each exposed TCP port, "other port", "none" = headless) plus a WebSocket checkbox
+  prefilled from the hint, then `upload/complete` with `{kind: "image", container_port | headless,
+  websocket, env}` → `onDeployed` → `InstallPane`. An inspected-but-not-deployed archive is
+  `DELETE`d on **discard** and on unmount. History records `srcKind: "image"`.
 - Dockerfile (single-container) actions, all project-level:
   `POST /projects/{name}/{stop|ssl|abort}` and `GET /projects/{name}/status` (no `/build` or `/start`)
 - **Blue/green versions** (both modes): `GET /projects/{name}/versions` (active/inactive/archived

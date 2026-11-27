@@ -796,9 +796,176 @@ const chunkedDeploy = async (api, project, entries, onProgress, env = null) => {
   return api.post(`/projects/${project}/upload/complete`, body);
 };
 
+// Stream one File to `upload/chunk` in 1 MiB `file.slice()` pieces — never reading the
+// whole thing into memory, which matters for a multi-GB image archive (chunkedDeploy zips
+// in memory, fine for source trees). Returns { uploadId, total }.
+const chunkedSend = async (api, project, file, onProgress) => {
+  const total = file.size;
+  const uploadId = crypto.randomUUID().replace(/-/g, "");
+  onProgress && onProgress({ sent: 0, total });
+  for (let offset = 0; offset < total; offset += CHUNK_SIZE) {
+    const end = Math.min(offset + CHUNK_SIZE, total);
+    await api.raw(`/projects/${project}/upload/chunk?upload_id=${uploadId}&offset=${offset}`,
+                  file.slice(offset, end));
+    onProgress && onProgress({ sent: end, total });
+  }
+  return { uploadId, total };
+};
+
+const ProgressBar = ({ progress, label = "sending" }) => progress ? (
+  <div>
+    <div style={{ height: "8px", background: C.s3, borderRadius: "999px", overflow: "hidden" }}>
+      <div style={{ height: "100%", width: `${progress.total ? Math.round(progress.sent / progress.total * 100) : 0}%`, background: C.green, transition: "width 0.15s ease" }} />
+    </div>
+    <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", marginTop: "5px" }}>
+      {label} {(progress.sent / 1048576).toFixed(1)} / {(progress.total / 1048576).toFixed(1)} MB
+    </div>
+  </div>
+) : null;
+
+// The "image archive" source of DeployForm / UploadModal: a `docker save` archive (.tar /
+// .tar.gz) is deployed as a dockerfile-mode project with nothing built — the server loads
+// it as a new blue/green version. Two steps, because an image has no Dockerfile to read the
+// port from: (1) upload + `POST …/upload/inspect-image` lists what the image EXPOSEs, then
+// (2) the user picks the port nginx proxies to (or none: a background worker) and confirms
+// the WebSocket guess, and `upload/complete` with `kind: "image"` provisions + launches.
+// A staged archive that is never deployed is discarded (button, or on unmount).
+const ImageDeploy = ({ token, project, env, onDeployed, onCancel, disabled }) => {
+  const [file, setFile] = useState(null);
+  const [progress, setProgress] = useState(null);
+  const [staged, setStaged] = useState(null);     // { project, uploadId, total, info }
+  const [choice, setChoice] = useState("");       // a port as a string | "custom" | "headless"
+  const [custom, setCustom] = useState("");
+  const [ws, setWs] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const stagedRef = useRef(null);
+
+  const discard = (st = stagedRef.current) => {
+    stagedRef.current = null;
+    if (st) mkApi(token).del(`/projects/${st.project}/upload/${st.uploadId}`).catch(() => {});
+  };
+  useEffect(() => () => discard(), []);   // leaving the form drops an undeployed archive
+
+  const pick = (f) => { setError(""); discard(); setStaged(null); setProgress(null); setFile(f || null); };
+
+  const upload = async () => {
+    if (!project) return setError("Project name is required");
+    if (!file) return setError("Select an image archive first");
+    setError(""); setBusy(true);
+    try {
+      const api = mkApi(token);
+      const { uploadId, total } = await chunkedSend(api, project, file, setProgress);
+      const st = { project, uploadId, total, info: null };
+      stagedRef.current = st;
+      const info = await api.post(`/projects/${project}/upload/inspect-image`, { upload_id: uploadId, total_size: total });
+      st.info = info;
+      setStaged({ ...st });
+      setChoice(info.ports.length ? String(info.ports[0]) : "headless");
+      setWs(!!info.websocket);
+    } catch (e) { setError(e.message); discard(); }
+    finally { setBusy(false); setProgress(null); }
+  };
+
+  const deploy = async () => {
+    const st = stagedRef.current;
+    if (!st) return;
+    const headless = choice === "headless";
+    const port = headless ? null : parseInt(choice === "custom" ? custom : choice, 10);
+    if (!headless && !(port >= 1 && port <= 65535)) return setError("Enter a container port between 1 and 65535");
+    setError(""); setBusy(true);
+    try {
+      const body = { upload_id: st.uploadId, total_size: st.total, kind: "image", container_port: port, headless };
+      if (!headless) body.websocket = ws;
+      if (env) body.env = env;
+      const data = await mkApi(token).post(`/projects/${st.project}/upload/complete`, body);
+      stagedRef.current = null;   // consumed by the server
+      saveProjectDeploy(st.project, { srcKind: "image", gitUrl: "", branch: "", label: `image ${file.name}` });
+      onDeployed(data);
+    } catch (e) {
+      setError(e.message);
+      // A rejected complete has already removed the staged file server-side (the body is
+      // validated client-side above, so no 422 reaches here) — start over from the pick.
+      stagedRef.current = null; setStaged(null);
+    } finally { setBusy(false); }
+  };
+
+  const info = staged?.info;
+  const radio = (value, label, sub) => (
+    <label key={value} style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", fontFamily: C.ff, fontSize: "13px", color: C.txt }}>
+      <input type="radio" name="img-port" checked={choice === value} onChange={() => setChoice(value)} />
+      {label}{sub && <span style={{ color: C.dim, fontSize: "12px" }}>{sub}</span>}
+    </label>
+  );
+  const dropStyle = { display: "block", border: `2px dashed ${C.bdB}`, borderRadius: "14px", padding: "14px", textAlign: "center", background: C.s1, cursor: "pointer" };
+
+  return (
+    <div style={{ display: "grid", gap: "12px" }}>
+      {!info && (
+        <>
+          <label htmlFor="img-file" style={dropStyle}>
+            <input id="img-file" type="file" accept=".tar,.tgz,.gz,.tar.gz,application/x-tar,application/gzip"
+                   onChange={e => pick(e.target.files[0])} style={{ display: "none" }} />
+            <div style={{ color: file ? C.green : C.muted, fontFamily: C.ff, fontSize: "13px" }}>
+              {file ? `✓ ${file.name} · ${(file.size / 1048576).toFixed(1)} MB` : "select an image archive (.tar / .tar.gz)"}
+            </div>
+          </label>
+          <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", lineHeight: "1.6" }}>
+            Make one with <span style={{ color: C.txt }}>docker save myapp:latest -o myapp.tar</span>. Nothing is built: the
+            image is loaded as a new version. Build it for this server&apos;s CPU (e.g. <span style={{ color: C.txt }}>--platform linux/amd64</span>).
+          </div>
+          <ProgressBar progress={progress} />
+        </>
+      )}
+
+      {info && (
+        <div style={{ background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "12px", display: "grid", gap: "10px" }}>
+          <div style={{ fontFamily: C.ff, fontSize: "12px", color: C.muted }}>
+            <span style={{ color: C.txt }}>{info.repo_tags.join(", ") || "untagged image"}</span>
+            {" · "}{info.os || "?"}/{info.architecture || "?"}
+            {info.udp_ports.length > 0 && <> · udp {info.udp_ports.join(", ")} (not proxied)</>}
+          </div>
+          <Field label="WHICH PORT SHOULD NGINX PROXY TO?">
+            <div style={{ display: "grid", gap: "6px" }}>
+              {info.ports.map(p => radio(String(p), `${p}/tcp`, " exposed by the image"))}
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                {radio("custom", "other port")}
+                {choice === "custom" && <TextIn value={custom} onChange={setCustom} placeholder="8000" type="number" style={{ width: "110px" }} />}
+              </div>
+              {radio("headless", "none", " — a background worker with no URL")}
+            </div>
+          </Field>
+          {choice !== "headless" && (
+            <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", fontFamily: C.ff, fontSize: "13px", color: C.txt }}>
+              <input type="checkbox" checked={ws} onChange={e => setWs(e.target.checked)} />
+              WebSocket support
+              <span style={{ color: C.dim, fontSize: "12px" }}>{info.websocket ? "(detected in the image)" : "(not detected)"}</span>
+            </label>
+          )}
+          {choice !== "headless" && (
+            <div style={{ color: C.dim, fontFamily: C.ff, fontSize: "12px" }}>
+              → served at <span style={{ color: C.blue }}>https://{staged.project}.{DOMAIN}</span> (unless the project has a custom domain)
+            </div>
+          )}
+        </div>
+      )}
+
+      <Err msg={error} />
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+        {info
+          ? <Btn v="ghost" onClick={() => { discard(); setStaged(null); }} disabled={busy}>discard</Btn>
+          : onCancel && <Btn v="ghost" onClick={onCancel} disabled={busy}>cancel</Btn>}
+        {info
+          ? <Btn v="primary" onClick={deploy} busy={busy} disabled={disabled}>deploy</Btn>
+          : <Btn v="primary" onClick={upload} busy={busy} disabled={disabled || !file}>upload &amp; inspect</Btn>}
+      </div>
+    </div>
+  );
+};
+
 const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
   const prev = useMemo(() => getProjectDeploy(project), [project]);
-  const [mode, setMode] = useState(prev?.srcKind === "git" ? "git" : "files");   // "files" | "git"
+  const [mode, setMode] = useState(prev?.srcKind === "git" || prev?.srcKind === "image" ? prev.srcKind : "files");   // "files" | "git" | "image"
   const [entries, setEntries] = useState([]);   // [{ file, rel }]
   const [srcKind, setSrcKind] = useState("files");   // "files" | "folder" — which picker fired
   const [rootName, setRootName] = useState("");      // top folder name of a folder pick
@@ -900,17 +1067,26 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
       <ModalHeader title="DEPLOY" color={C.txt} onClose={onClose} />
       <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", marginBottom: "14px", lineHeight: "1.6" }}>
         {project} · a <span style={{ color: C.txt }}>Dockerfile</span> or <span style={{ color: C.txt }}>docker-compose.yml</span> in the
-        deployed root sets the deploy mode and provisions automatically (compose wins).
+        deployed root sets the deploy mode and provisions automatically (compose wins) — or deploy a prebuilt image archive.
       </div>
 
       <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
         {tab("files", "files / folder")}
         {tab("git", "git URL")}
+        {tab("image", "image archive")}
       </div>
 
-      {mode === "files" ? (
+      {mode === "image" ? (
+        <div style={{ marginBottom: "12px" }}>
+          {prev?.srcKind === "image" && (
+            <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", marginBottom: "10px" }}>
+              last deploy: <span style={{ color: C.txt }}>{prev.label}</span> — reselect to redeploy
+            </div>
+          )}
+        </div>
+      ) : mode === "files" ? (
         <>
-          {prev && prev.srcKind !== "git" && !entries.length && (
+          {prev && prev.srcKind !== "git" && prev.srcKind !== "image" && !entries.length && (
             <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", marginBottom: "10px" }}>
               last deploy: <span style={{ color: C.txt }}>{prev.label}</span> — reselect to redeploy
             </div>
@@ -969,6 +1145,11 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
         />
       </div>
 
+      {mode === "image" && (
+        <ImageDeploy token={token} project={project} env={env.trim() || null} onCancel={onClose}
+                     onDeployed={(data) => { onDeploy && onDeploy(data); onClose(); }} />
+      )}
+
       {result && (
         <>
           <Ok msg={result.message} />
@@ -981,10 +1162,12 @@ const UploadModal = ({ token, project, onClose, onUploaded, onDeploy }) => {
       )}
       {error && <Err msg={error} />}
 
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "12px" }}>
-        <Btn v="ghost" onClick={onClose}>close</Btn>
-        <Btn v="primary" onClick={submit} busy={busy} disabled={mode === "files" && !entries.length}>deploy</Btn>
-      </div>
+      {mode !== "image" && (
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "12px" }}>
+          <Btn v="ghost" onClick={onClose}>close</Btn>
+          <Btn v="primary" onClick={submit} busy={busy} disabled={mode === "files" && !entries.length}>deploy</Btn>
+        </div>
+      )}
     </Modal>
   );
 };
@@ -1816,7 +1999,7 @@ const ProjectCard = ({ project, token, role, pane, dragging, onDragStart, onDrag
                    title={`Re-clone ${gitUrl}${project.git_branch ? ` (${project.git_branch})` : ""} and deploy a new version`}>redeploy</Btn>
             )}
             {isAdmin && (
-              <Btn sm v={gitUrl ? "ghost" : "primary"} onClick={() => setUploadModal(true)} title="Upload files or a folder — auto-detects Dockerfile / docker-compose.yml, provisions, and deploys">{isPending ? "upload" : "deploy"}</Btn>
+              <Btn sm v={gitUrl ? "ghost" : "primary"} onClick={() => setUploadModal(true)} title="Upload files, a folder or a docker image archive — auto-detects Dockerfile / docker-compose.yml, provisions, and deploys">{isPending ? "upload" : "deploy"}</Btn>
             )}
             {isCompose && (
               <Btn sm v="blue" onClick={() => setEnvModal(true)} title="Edit the environment variables shared by every service">env</Btn>
@@ -1967,7 +2150,7 @@ const ProjectCard = ({ project, token, role, pane, dragging, onDragStart, onDrag
 // the InstallPane (onDeployed → handleInstalled). Mirrors `fhcli deploy NAME PATH-OR-URL`.
 const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
   const [name, setName] = useState("");
-  const [mode, setMode] = useState("files");   // "files" | "git"
+  const [mode, setMode] = useState("files");   // "files" | "git" | "image"
   const [entries, setEntries] = useState([]);   // [{ file, rel }]
   const [srcKind, setSrcKind] = useState("files");   // "files" | "folder" — which picker fired
   const [rootName, setRootName] = useState("");      // top folder name of a folder pick
@@ -2046,9 +2229,10 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
         <div style={{ display: "flex", gap: "8px" }}>
           {tab("files", "files / folder")}
           {tab("git", "git URL")}
+          {tab("image", "image archive")}
         </div>
 
-        {mode === "files" ? (
+        {mode === "image" ? null : mode === "files" ? (
           <>
             <div style={{ display: "flex", gap: "8px" }}>
               <label htmlFor="dep-file" style={dropStyle}>
@@ -2096,6 +2280,10 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
           </>}
         />
 
+        {mode === "image" ? (
+          <ImageDeploy token={token} project={/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(slug) ? slug : ""} env={env.trim() || null}
+                       onDeployed={onDeployed} onCancel={onCancel} />
+        ) : <>
         <div style={{ color: C.muted, fontFamily: C.ff, fontSize: "12px", lineHeight: "1.6", background: C.s1, border: `1px solid ${C.bd}`, borderRadius: "14px", padding: "10px 12px" }}>
           The server scans the {mode === "git" ? "cloned repo" : "uploaded"} root for a
           <span style={{ color: C.txt }}> Dockerfile</span> or <span style={{ color: C.txt }}>docker-compose.yml</span> (compose
@@ -2122,6 +2310,7 @@ const DeployForm = ({ token, onDeployed, onSynced, onCancel }) => {
           <Btn v="ghost" onClick={onCancel} disabled={busy}>cancel</Btn>
           <Btn v="primary" onClick={submit} busy={busy} disabled={mode === "files" && !entries.length}>deploy</Btn>
         </div>
+        </>}
       </div>
     </div>
   );
@@ -3271,7 +3460,7 @@ const Dashboard = ({ token, onLogout }) => {
             onClick={() => { showOnly(setShowBackups); setRailOpen(false); }} />
           {isAdmin && (<>
             <NavItem icon="＋" label="Deploy" active={showDeploy}
-              title="Deploy a new project from files, a folder or a git URL"
+              title="Deploy a new project from files, a folder, a git URL or a docker image archive"
               onClick={() => { showOnly(setShowDeploy); setRailOpen(false); }} />
             <NavItem icon="⧉" label="Plugins" active={showPlugins}
               title="Install a pre-packaged project from the server's plugin catalogue"

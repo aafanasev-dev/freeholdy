@@ -91,6 +91,7 @@ def _deploy_script(
     container_port: Optional[int],
     env_file: Optional[str] = None,
     volumes_from: Optional[str] = None,
+    image_archive: Optional[str] = None,
 ) -> list:
     """optional install.sh → docker build → docker run, as one bash job (mirrors
     docker_service.provision_from_plugin, but with version-scoped names).
@@ -100,7 +101,8 @@ def _deploy_script(
     variables stored in the DB. None → the command is exactly what it was before.
     `volumes_from` is the currently active container, whose volumes the new version
     inherits (`docker_service.volumes_from_lines`); None/absent on a first deploy. A None
-    port (headless project) publishes nothing."""
+    port (headless project) publishes nothing. `image_archive` replaces the build with
+    `_load_lines` (an uploaded `docker save` archive)."""
     q = shlex.quote
     dockerfile = os.path.join(project_dir, "Dockerfile")
     lines = ["set -e"]
@@ -110,9 +112,14 @@ def _deploy_script(
             f"cd {q(project_dir)}",
             f"PLUGIN_DIR={q(plugin_dir or project_dir)} PROJECT_DIR={q(project_dir)} bash {q(install_script)}",
         ]
+    if image_archive:
+        lines += _load_lines(image_archive, image_name)
+    else:
+        lines += [
+            f'echo "── docker build {image_name} ──"',
+            f"docker build --progress=plain -t {q(image_name)} -f {q(dockerfile)} {q(project_dir)}",
+        ]
     lines += [
-        f'echo "── docker build {image_name} ──"',
-        f"docker build --progress=plain -t {q(image_name)} -f {q(dockerfile)} {q(project_dir)}",
         f'echo "── docker run {container_name} ──"',
         f"docker rm -f {q(container_name)} >/dev/null 2>&1 || true",
         *docker_service.volumes_from_lines(volumes_from),
@@ -347,15 +354,55 @@ def enforce_backup_limit(project_id: int) -> None:
 
 # ── Public entry points ─────────────────────────────────────────────────────────
 
+def _load_lines(archive: str, image_name: str) -> list:
+    """Bash lines that turn an uploaded `docker save` archive into `image_name`, in place of
+    `docker build`. The archive is deleted when the script exits, whatever the outcome.
+
+    `docker load` applies the archive's own RepoTags (say `postgres:16`), which would
+    silently repoint a tag other projects on this host run. So the tags' current targets are
+    recorded first and put back afterwards (or the tag removed if it did not exist), leaving
+    only `image_name` pointing at the upload. The loaded reference is read from docker's
+    `Loaded image:` / `Loaded image ID:` line, which works with both image stores."""
+    from app.services import image_service  # lazy: keeps this module's imports light
+
+    q = shlex.quote
+    try:
+        tags = image_service.inspect_archive(archive)["repo_tags"]
+    except ValueError:
+        tags = []
+    lines = [
+        f"trap 'rm -f {q(archive)}' EXIT",
+        f'echo "── docker load ({os.path.basename(archive)}) ──"',
+        "declare -A FH_PREV=()",
+    ]
+    for t in tags:
+        lines.append(f"FH_PREV[{q(t)}]=$(docker image inspect -f '{{{{.Id}}}}' {q(t)} 2>/dev/null || true)")
+    lines += [
+        f"FH_OUT=$(docker load -i {q(archive)})",
+        'echo "$FH_OUT"',
+        "FH_REF=$(printf '%s\n' \"$FH_OUT\" | sed -n 's/^Loaded image\\( ID\\)\\{0,1\\}: //p' | tail -n 1)",
+        'if [ -z "$FH_REF" ]; then echo "docker load reported no image" >&2; exit 1; fi',
+        f'echo "── tag $FH_REF → {image_name} ──"',
+        f'docker tag "$FH_REF" {q(image_name)}',
+        'for t in "${!FH_PREV[@]}"; do',
+        '  if [ -n "${FH_PREV[$t]}" ]; then docker tag "${FH_PREV[$t]}" "$t";',
+        '  else docker rmi "$t" >/dev/null 2>&1 || true; fi',
+        "done",
+    ]
+    return lines
+
+
 def bluegreen_deploy(project_id: int, install_script: Optional[str] = None,
-                     plugin_dir: Optional[str] = None) -> str:
+                     plugin_dir: Optional[str] = None,
+                     image_archive: Optional[str] = None) -> str:
     """Build + run the next version of a dockerfile project, then switch nginx to it and
     shuffle/prune older versions. Returns the deploy job key (stream over
     `WS /projects/{name}/deploy`). The first deploy reuses the port nginx was already set up
     on (no switch); re-deploys allocate a fresh green port and switch after the build.
 
     `install_script`/`plugin_dir` come from the plugins router so plugin installs also
-    create version 1 through this single path."""
+    create version 1 through this single path. `image_archive` (an uploaded `docker save`
+    archive) is loaded + tagged as the new version instead of building the Dockerfile."""
     from app.routers.projects import _next_port  # lazy: projects imports this module
 
     db = SessionLocal()
@@ -382,7 +429,7 @@ def bluegreen_deploy(project_id: int, install_script: Optional[str] = None,
     cmd = _deploy_script(
         project_dir, install_script, plugin_dir,
         image_name, container_name, green_port, container_port,
-        env_file=env_file, volumes_from=active_container,
+        env_file=env_file, volumes_from=active_container, image_archive=image_archive,
     )
 
     def promote(log: Callable[[str], None]) -> None:
@@ -410,6 +457,8 @@ def bluegreen_deploy(project_id: int, install_script: Optional[str] = None,
     def cleanup() -> None:
         docker_service.remove_container(container_name)
         docker_service.remove_image(image_name)
+        if image_archive and os.path.isfile(image_archive):
+            os.remove(image_archive)   # the script's trap does this too; abort may kill it first
 
     return _spawn(job_key, cmd, container_name, promote, cleanup)
 

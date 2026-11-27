@@ -1,6 +1,6 @@
 {
   "name": "postgresql",
-  "description": "PostgreSQL 17 server at <project>.<domain> — install it several times, one database server per project. Interactive install: database, user, password, and how clients connect: by hostname on the shared TLS port 5432 (SNI, libpq/psql 17+ with sslnegotiation=direct), on a dedicated public TCP port (any client), or both. Data lives in a host folder named after the project. Open the port(s) in your firewall.",
+  "description": "PostgreSQL 17 server at <project>.<domain> — install it several times, one database server per project. Interactive install: database, user, password, and how clients connect: by hostname on the shared TLS port 5432 (SNI, libpq/psql 17+ with sslnegotiation=direct), on a dedicated public TCP port (any client), or both. Data lives in a host folder named after the project. Open the port(s) in your firewall. Inside the container, /home/ctl.sh add|remove|list creates a database + user per app (each user can reach only its own database) and saves credentials to /home/projects/<name>.json.",
   "deploy_mode": "compose",
   "type": "plugin",
   "domain_prefix": "{project}",

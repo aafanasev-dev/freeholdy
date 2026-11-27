@@ -15,6 +15,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func
 from sqlalchemy.orm import Session, object_session
 from typing import List
@@ -27,6 +28,8 @@ from app.models.schemas import (
     PluginAddResponse,
     UploadResponse,
     UploadCompleteRequest,
+    ImageInspectRequest,
+    ImageInspectResponse,
     ReorderProjectsRequest,
     ReorderResponse,
     DockerJobStatusResponse,
@@ -42,6 +45,7 @@ from app.services import (
     compose_service,
     env_service,
     git_service,
+    image_service,
     scan,
     interactive_service,
     volume_service,
@@ -650,16 +654,21 @@ def _provision_from_dockerfile(db: Session, project: Project, dockerfile_path: s
 
     provision_dockerfile(db, project, container_port=port)
     project.dockerfile_path = dockerfile_path
-
-    ws = scan.uses_websocket(text)
-    if ws != bool(project.websocket):
-        project.websocket = ws
-        if project.ssl_enabled:
-            nginx_service.write_ssl_config(project.name, [{
-                "subdomain": project.effective_domain, "local_port": project.local_port, "websocket": ws,
-            }])
+    _apply_websocket(project, scan.uses_websocket(text))
     db.commit()
     db.refresh(project)
+
+
+def _apply_websocket(project: Project, ws: bool) -> None:
+    """Set an exposed dockerfile project's WebSocket flag, regenerating its SSL vhost
+    (Upgrade headers) when the flag changed. Caller commits."""
+    if ws == bool(project.websocket):
+        return
+    project.websocket = ws
+    if project.ssl_enabled:
+        nginx_service.write_ssl_config(project.name, [{
+            "subdomain": project.effective_domain, "local_port": project.local_port, "websocket": ws,
+        }])
 
 
 @router.post(
@@ -743,7 +752,7 @@ def _autoprovision(
     return True, detected_mode
 
 
-def launch_deploy(project: Project) -> str:
+def launch_deploy(project: Project, image_archive: str | None = None) -> str:
     """Launch the async build + run job for an already-provisioned project, dispatching on
     its deploy mode, and return the job_key the client streams over a deploy WebSocket.
 
@@ -751,12 +760,15 @@ def launch_deploy(project: Project) -> str:
     flow (`WS /projects/{name}/deploy`), git deploy (`WS /git/deploy/{name}`), and the
     non-interactive plugin install. Both modes run a blue/green versioned deploy: compose
     via `deploy_service.compose_bluegreen_deploy` (build-first, brief down/up switch),
-    dockerfile via `deploy_service.bluegreen_deploy` (build + run + nginx switch)."""
+    dockerfile via `deploy_service.bluegreen_deploy` (build + run + nginx switch).
+
+    `image_archive` (dockerfile mode only) is an uploaded `docker save` archive: the job
+    `docker load`s + tags it instead of building, and deletes the file when it ends."""
     from app.services import deploy_service  # lazy: deploy_service imports _next_port from here
 
     if project.deploy_mode == "compose":
         return deploy_service.compose_bluegreen_deploy(project.id)
-    return deploy_service.bluegreen_deploy(project.id)
+    return deploy_service.bluegreen_deploy(project.id, image_archive=image_archive)
 
 
 def launch_restart(db: Session, project: Project) -> tuple[str, str]:
@@ -1087,12 +1099,11 @@ async def upload_complete(
 
     An optional `env` (dotenv text) is stored before provisioning, so the first container
     this deploy starts already has those variables."""
-    zip_path = _staging_zip_path(project_name, request.upload_id)
-    if not os.path.isfile(zip_path):
-        raise HTTPException(status_code=404, detail="No staged upload for this upload_id")
-    if request.total_size is not None and os.path.getsize(zip_path) != request.total_size:
-        os.remove(zip_path)
-        raise HTTPException(status_code=400, detail="Staged upload is incomplete (size mismatch)")
+    zip_path = _staged_upload(project_name, request.upload_id, request.total_size)
+
+    if request.kind == "image":
+        # Off the event loop: reading a large (gzipped) archive takes a while.
+        return await run_in_threadpool(_complete_image_upload, db, project_name, zip_path, request)
 
     project = _get_or_create_project(db, project_name)
     # Before _autoprovision + launch_deploy, so the first container start already has it.
@@ -1124,6 +1135,108 @@ async def upload_complete(
 
     db.refresh(project)
     return _upload_response(project, project_name, written, provisioned, detected_mode)
+
+
+def _inspect_staged_image(path: str) -> dict:
+    """inspect_archive + host compatibility check, as an HTTP 400 on any problem."""
+    try:
+        info = image_service.inspect_archive(path)
+        image_service.check_runnable(info)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return info
+
+
+def _staged_upload(project_name: str, upload_id: str, total_size: int | None) -> str:
+    """Path of a fully staged chunked upload, 404/400 when it is missing or short."""
+    path = _staging_zip_path(project_name, upload_id)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="No staged upload for this upload_id")
+    if total_size is not None and os.path.getsize(path) != total_size:
+        os.remove(path)
+        raise HTTPException(status_code=400, detail="Staged upload is incomplete (size mismatch)")
+    return path
+
+
+@router.post(
+    "/{project_name}/upload/inspect-image",
+    response_model=ImageInspectResponse,
+    summary="Read the ports / WebSocket hint / platform of a staged docker image archive",
+)
+def upload_inspect_image(
+    project_name: str,
+    request: ImageInspectRequest,
+    _=Depends(require_admin),
+):
+    """Inspect a chunk-uploaded `docker save` archive without loading it: which TCP ports
+    the image EXPOSEs, whether it looks like it speaks WebSocket, its tags and platform. The
+    staged file is kept, so the client can show the user a port choice and then finish with
+    `upload/complete` (`kind: "image"`), or discard it with `DELETE .../upload/{id}`. A
+    platform the host cannot run is rejected here already."""
+    path = _staged_upload(project_name, request.upload_id, request.total_size)
+    return ImageInspectResponse(**_inspect_staged_image(path))
+
+
+def _complete_image_upload(
+    db: Session, project_name: str, staged: str, request: UploadCompleteRequest
+) -> UploadResponse:
+    """Deploy a staged image archive as a dockerfile-mode project: provision with the port
+    the client chose (or headless), then launch a blue/green deploy whose build step is
+    `docker load` + tag. The archive is moved under `{DATA_DIR}/images/{name}/` for the job,
+    which deletes it when it ends; a request that fails before the launch deletes it here."""
+    images_dir = os.path.join(settings.DATA_DIR, "images", project_name)
+    archive = os.path.join(images_dir, f"{request.upload_id}.tar")
+    launched = False
+    try:
+        info = _inspect_staged_image(staged)
+        project = _get_or_create_project(db, project_name)
+        if project.deploy_mode == "compose":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Project '{project_name}' is a compose project — remove and recreate it "
+                       f"to deploy an image archive.",
+            )
+        os.makedirs(images_dir, exist_ok=True)
+        shutil.move(staged, archive)
+
+        if apply_deploy_env(db, project, request.env):
+            db.flush()
+        # Like `_autoprovision`: what is deployed now is this archive, not a git origin.
+        project.git_url = None
+        project.git_branch = None
+        project.dockerfile_path = None
+        if request.headless:
+            provision_dockerfile_headless(db, project)
+        else:
+            provision_dockerfile(db, project, container_port=request.container_port)
+            ws = info["websocket"] if request.websocket is None else request.websocket
+            _apply_websocket(project, ws)
+        db.commit()
+        db.refresh(project)
+
+        job_key = launch_deploy(project, image_archive=archive)
+        launched = True
+    finally:
+        if not launched:
+            for path in (staged, archive):
+                if os.path.isfile(path):
+                    os.remove(path)
+
+    ref = info["repo_tags"][0] if info["repo_tags"] else "untagged image"
+    where = ("as a background worker (no port, no nginx endpoint)" if request.headless
+             else f"serving container port {request.container_port}")
+    ws_path = _deploy_ws_path(project_name)
+    return UploadResponse(
+        status="ok",
+        message=f"Deploying image {ref} to '{project_name}' {where}",
+        count=1,
+        files=[],
+        deploy_mode=project.deploy_mode,
+        provisioned=True,
+        project=project_response(project),
+        ws_path=ws_path,
+        job=_deploy_job_response(job_key, f"Loading + starting {ref} — stream {ws_path}"),
+    )
 
 
 @router.delete(
