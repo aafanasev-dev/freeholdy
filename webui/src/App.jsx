@@ -574,9 +574,12 @@ const InstallPane = ({ token, wsPath, project, interactive, attached, onExit, on
 };
 
 // ── Modal wrapper ─────────────────────────────────────────────────────────────
+// The panel resets text-align / white-space: `position: fixed` detaches a modal visually, but
+// CSS inheritance still follows the DOM, and ServiceRow mounts its modals inside a centered,
+// nowrap actions <td> — which centered every line of the exec terminal (xterm rows inherit it).
 const Modal = ({ onClose, width = 460, children }) => (
   <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", backdropFilter: "blur(2px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 }} onClick={onClose}>
-    <div style={{ background: C.s1, border: `1px solid ${C.bdB}`, borderRadius: "14px", padding: "22px", width, maxWidth: "95vw", boxShadow: "0 24px 64px rgba(0,0,0,.6)" }} onClick={e => e.stopPropagation()}>
+    <div style={{ background: C.s1, border: `1px solid ${C.bdB}`, borderRadius: "14px", padding: "22px", width, maxWidth: "95vw", boxShadow: "0 24px 64px rgba(0,0,0,.6)", textAlign: "left", whiteSpace: "normal" }} onClick={e => e.stopPropagation()}>
       {children}
     </div>
   </div>
