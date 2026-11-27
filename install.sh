@@ -86,6 +86,22 @@ section() { echo -e "\n${BOLD}━━━  $*  ━━━${NC}"; }
 # Run a command as the service user, with its HOME set.
 as_user() { sudo -u "$SERVICE_USER" -H "$@"; }
 
+# Hand the checkout to the service user WITHOUT descending into runtime state. data/ and
+# projects/ hold files that containers own under their own uids — a plugin's bind-mounted
+# cluster (data/postgresql/<p> is uid 999) stops working the moment it is re-owned, which
+# is exactly what a plain `chown -R $APP_DIR` used to do on every update. Those trees are
+# written by the service itself; only their top directories are chowned here. -h: never
+# follow a symlink out of the tree.
+chown_checkout() {
+    find "$APP_DIR" \( -path "${APP_DIR}/data" -o -path "${APP_DIR}/projects" \) -prune \
+        -o -exec chown -h "$SERVICE_USER":"$SERVICE_USER" {} +
+    local d
+    for d in data projects; do
+        [[ -d "${APP_DIR}/${d}" ]] && chown "$SERVICE_USER":"$SERVICE_USER" "${APP_DIR}/${d}"
+    done
+    return 0
+}
+
 # Derive user-dependent paths (re-run after the service user is resolved).
 set_paths() {
     USER_HOME="/home/${SERVICE_USER}"
@@ -760,7 +776,7 @@ else
     ok "Repository cloned to $APP_DIR (${REPO_REF})"
 fi
 
-chown -R "$SERVICE_USER":"$SERVICE_USER" "$APP_DIR"
+chown_checkout
 ok "Source owned by '$SERVICE_USER'"
 
 step_mark_done fetch_source

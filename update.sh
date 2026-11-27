@@ -61,6 +61,22 @@ section() { echo -e "\n${BOLD}━━━  $*  ━━━${NC}"; }
 # Run a command as the service user, with its HOME set.
 as_user() { sudo -u "$SERVICE_USER" -H "$@"; }
 
+# Hand the checkout to the service user WITHOUT descending into runtime state. data/ and
+# projects/ hold files that containers own under their own uids — a plugin's bind-mounted
+# cluster (data/postgresql/<p> is uid 999) stops working the moment it is re-owned, which
+# is exactly what a plain `chown -R $APP_DIR` used to do on every update. Those trees are
+# written by the service itself; only their top directories are chowned here. -h: never
+# follow a symlink out of the tree.
+chown_checkout() {
+    find "$APP_DIR" \( -path "${APP_DIR}/data" -o -path "${APP_DIR}/projects" \) -prune \
+        -o -exec chown -h "$SERVICE_USER":"$SERVICE_USER" {} +
+    local d
+    for d in data projects; do
+        [[ -d "${APP_DIR}/${d}" ]] && chown "$SERVICE_USER":"$SERVICE_USER" "${APP_DIR}/${d}"
+    done
+    return 0
+}
+
 # Y/N confirmation honouring -y. Without a tty and without -y, abort (fail safe).
 confirm() {
     [[ "${ASSUME_YES:-0}" -eq 1 ]] && return 0
@@ -460,7 +476,7 @@ as_user git -C "$APP_DIR" reset --hard "$TARGET_SHA" | sed 's/^/      /'
 # nginx_configs/, venv/, cli/.env, *.log) are exactly the runtime state that must
 # survive an upgrade. This only removes stale untracked-but-not-ignored files.
 as_user git -C "$APP_DIR" clean -fd | sed 's/^/      /'
-chown -R "$SERVICE_USER":"$SERVICE_USER" "$APP_DIR"
+chown_checkout
 ok "Source now at ${TARGET_SHA:0:7} (v${NEW_VERSION})"
 
 # ── 9. Refresh the Python environment ───────────────────────────────────────────
